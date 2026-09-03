@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function() {
+        try {
+          var origFetch = window.fetch;
+          if (origFetch) {
+            var currentFetch = origFetch;
+            Object.defineProperty(window, 'fetch', {
+              get: function() {
+                return currentFetch;
+              },
+              set: function(fn) {
+                currentFetch = fn;
+              },
+              configurable: true,
+              enumerable: true
+            });
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>LiveCall - 1-on-1 Video & Monetization</title>
+    <meta name="description" content="Live 1-on-1 video calling, creator monetization, interactive matching, and discovery platform." />
+    
+    <!-- PWA Primary Color & Appearance -->
+    <meta name="theme-color" content="#0F1115" />
+    <meta name="color-scheme" content="dark light" />
+    
+    <!-- PWA Manifest & App Icons -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/pwa-icon.svg" />
+    <link rel="apple-touch-icon" href="/pwa-icon.svg" />
+    
+    <!-- iOS / Safari Standalone Mode -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="LiveCall" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    
+    <!-- Open Graph & Social -->
+    <meta property="og:title" content="LiveCall - 1-on-1 Video & Monetization" />
+    <meta property="og:description" content="Live 1-on-1 video calling, creator monetization, interactive matching, and discovery platform." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

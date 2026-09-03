@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+:root {
+  --app-bg: #0F1115;
+  --app-surface: #161920;
+  --app-card: #1A1D26;
+  --app-card-subtle: #12151C;
+  --app-input: #0B0D11;
+  --app-border: #1E293B;
+  --app-text: #CBD5E1;
+  --app-text-muted: #64748B;
+  --app-heading: #FFFFFF;
+}
+
+html[data-theme='light'],
+html.light,
+body.light {
+  --app-bg: #F8FAFC;
+  --app-surface: #FFFFFF;
+  --app-card: #FFFFFF;
+  --app-card-subtle: #F1F5F9;
+  --app-input: #F8FAFC;
+  --app-border: #E2E8F0;
+  --app-text: #334155;
+  --app-text-muted: #64748B;
+  --app-heading: #0F172A;
+}
+
+body {
+  background-color: var(--app-bg);
+  color: var(--app-text);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* =========================================================================
+   LIGHT THEME OVERRIDES FOR APPLICATION PALETTE
+   ========================================================================= */
+
+html[data-theme='light'] body {
+  background-color: #F8FAFC;
+  color: #334155;
+}
+
+html[data-theme='light'] #main-app-header {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  border-color: #E2E8F0 !important;
+  color: #1E293B !important;
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05) !important;
+}
+
+html[data-theme='light'] #desktop-sub-header {
+  background-color: rgba(248, 250, 252, 0.95) !important;
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] #global-bottom-nav {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] .bg-\[\#0F1115\],
+html[data-theme='light'] .bg-\[\#0f1115\],
+html[data-theme='light'] .bg-\[\#101319\],
+html[data-theme='light'] .bg-\[\#0a0c10\],
+html[data-theme='light'] .bg-\[\#0B0D11\] {
+  background-color: #F8FAFC !important;
+}
+
+html[data-theme='light'] .bg-\[\#161920\],
+html[data-theme='light'] .bg-\[\#121722\],
+html[data-theme='light'] .bg-\[\#1A1D26\],
+html[data-theme='light'] .bg-slate-900 {
+  background-color: #FFFFFF !important;
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] .bg-slate-950 {
+  background-color: #F1F5F9 !important;
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] .bg-slate-900\/90,
+html[data-theme='light'] .bg-slate-900\/95,
+html[data-theme='light'] .bg-slate-900\/80,
+html[data-theme='light'] .bg-slate-900\/70,
+html[data-theme='light'] .bg-slate-900\/60,
+html[data-theme='light'] .bg-\[\#161920\]\/95,
+html[data-theme='light'] .bg-\[\#101319\]\/95 {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] .bg-slate-800 {
+  background-color: #F1F5F9 !important;
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] .bg-slate-800\/80,
+html[data-theme='light'] .bg-slate-800\/60,
+html[data-theme='light'] .bg-slate-800\/50,
+html[data-theme='light'] .bg-slate-800\/40,
+html[data-theme='light'] .bg-slate-800\/30 {
+  background-color: rgba(241, 245, 249, 0.85) !important;
+}
+
+html[data-theme='light'] .border-slate-800,
+html[data-theme='light'] .border-slate-800\/80,
+html[data-theme='light'] .border-slate-800\/60,
+html[data-theme='light'] .border-slate-800\/50,
+html[data-theme='light'] .border-slate-800\/40,
+html[data-theme='light'] .border-slate-700,
+html[data-theme='light'] .border-slate-700\/80,
+html[data-theme='light'] .border-slate-700\/60 {
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] .divide-slate-800 > :not([hidden]) ~ :not([hidden]),
+html[data-theme='light'] .divide-slate-800\/60 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme='light'] .text-white {
+  color: #0F172A !important;
+}
+
+html[data-theme='light'] .text-slate-100,
+html[data-theme='light'] .text-slate-200 {
+  color: #1E293B !important;
+}
+
+html[data-theme='light'] .text-slate-300 {
+  color: #334155 !important;
+}
+
+html[data-theme='light'] .text-slate-400 {
+  color: #64748B !important;
+}
+
+/* Maintain crisp text inside buttons and gradient badges */
+html[data-theme='light'] button.bg-indigo-600,
+html[data-theme='light'] button.bg-pink-600,
+html[data-theme='light'] button.bg-purple-600,
+html[data-theme='light'] button.bg-emerald-600,
+html[data-theme='light'] button.bg-rose-600,
+html[data-theme='light'] .bg-gradient-to-r.text-white,
+html[data-theme='light'] .bg-gradient-to-tr.text-white,
+html[data-theme='light'] [class*="bg-indigo-600"] .text-white,
+html[data-theme='light'] [class*="bg-pink-600"] .text-white,
+html[data-theme='light'] [class*="bg-purple-600"] .text-white,
+html[data-theme='light'] [class*="bg-rose-600"] .text-white,
+html[data-theme='light'] [class*="bg-emerald-600"] .text-white {
+  color: #FFFFFF !important;
+}
+
+/* Modals and Drawers */
+html[data-theme='light'] .fixed.inset-0.bg-black\/80,
+html[data-theme='light'] .fixed.inset-0.bg-slate-950\/80,
+html[data-theme='light'] .fixed.inset-0.bg-black\/70 {
+  background-color: rgba(15, 23, 42, 0.5) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0F1115;
+}
+::-webkit-scrollbar-thumb {
+  background: #272a34;
+  border-radius: 3px;
+}
+
+html[data-theme='light'] ::-webkit-scrollbar-track {
+  background: #F1F5F9 !important;
+}
+html[data-theme='light'] ::-webkit-scrollbar-thumb {
+  background: #CBD5E1 !important;
+}
+
+/* Date picker styles */
+input[type="date"] {
+  color-scheme: dark;
+}
+html[data-theme='light'] input[type="date"],
+html.light input[type="date"] {
+  color-scheme: light;
+}
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  filter: invert(0.8) sepia(1) saturate(5) hue-rotate(300deg);
+  opacity: 0.9;
+  padding: 4px;
+}
+

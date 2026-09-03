@@ -1,0 +1,870 @@
+export type UserGender = 'male' | 'female' | 'other';
+export type UserRole = 'male_user' | 'female_user' | 'female_creator' | 'female_host' | 'other_user' | 'admin' | 'team_leader' | 'agency_manager';
+export type OnlineStatus = 'online' | 'busy' | 'offline' | 'in_call';
+
+/**
+ * Derives the exact user-facing role label according to business rules:
+ * - Admin -> "Admin"
+ * - Team Leader -> "Team Leader"
+ * - Other -> "Other User"
+ * - Male -> "Male User"
+ * - Female with Team Leader OR explicitly female_creator -> "Female Creator"
+ * - Regular Female without Team Leader -> "Female User"
+ */
+export function getUserRoleLabel(user?: { role?: string; gender?: string; teamLeaderId?: string | null } | null): string {
+  if (!user) return 'Male User';
+  const role = user.role;
+  const gender = user.gender;
+  const hasTeamLeader = Boolean(user.teamLeaderId);
+
+  if (role === 'admin') return 'Admin';
+  if (role === 'team_leader' || role === 'agency_manager') return 'Team Leader';
+  if (role === 'other_user' || gender === 'other') return 'Other User';
+
+  if (gender === 'female' || role === 'female_user' || role === 'female_creator') {
+    // Only Team Leader created female hosts are Female Creators!
+    if (role === 'female_creator' || hasTeamLeader) {
+      return 'Female Creator';
+    }
+    return 'Female User';
+  }
+
+  return 'Male User';
+}
+
+export interface CreatorMoment {
+  id: string;
+  mediaUrl: string;
+  caption: string;
+  likes: number;
+  commentsCount: number;
+  createdAt: string;
+  mediaType?: 'image' | 'video';
+  isLiked?: boolean;
+}
+
+export interface UserProfile {
+  id: string;
+  authId?: string;
+  name: string;
+  email: string;
+  phone?: string;
+  gender: UserGender;
+  genderLocked: boolean;
+  age: number;
+  dob: string;
+  nationality: string;
+  countryCode: string; // e.g. 'US', 'ES', 'BR', 'JP'
+  spokenLanguages: string[];
+  bio: string;
+  extendedBio?: string;
+  locationCity?: string;
+  zodiac?: string;
+  responseRate?: string;
+  interests: string[];
+  interestedIn?: string[]; // e.g. ['female', 'everyone']
+  tags?: string[]; // Creator tags/categories e.g. ['Singer', 'Gamer', 'Model', 'Dancer', 'Traveler']
+  avatarUrl: string;
+  gallery: string[];
+  introVideoUrl?: string; // Cloudflare R2 uploaded video introduction
+  verificationVideoUrl?: string;
+  isVerified: boolean;
+  onlineStatus: OnlineStatus;
+  role: UserRole;
+  createdAt: string;
+
+  // Onboarding & Flow State
+  isOnboarded?: boolean;
+  onboardingStep?: number;
+  agreedToTerms?: boolean;
+  agreedToAdultTerms?: boolean; // Male Consumer 18+ Adult Agreement
+  agreedToHostTerms?: boolean; // Female Host Code of Conduct & Commission Agreement
+
+  // KYC Verification (Only required at payout request, NOT at registration)
+  kycStatus?: 'unsubmitted' | 'pending' | 'verified' | 'rejected';
+  kycDocuments?: {
+    idType?: string;
+    idFrontUrl?: string;
+    idBackUrl?: string;
+    submittedAt?: string;
+  };
+
+  // Security & Authentication (Raw passwords never stored in state)
+  hasPasswordSet?: boolean;
+  emailVerified?: boolean;
+  password?: string;
+  country?: string;
+  username?: string;
+
+  // Moderation & Suspension (Team Leader / Admin N-Days Ban & Deletion)
+  isBanned?: boolean;
+  banReason?: string;
+  bannedUntil?: string; // ISO timestamp for temporary ban expiration (null if unbanned)
+  bannedById?: string; // ID of Team Leader or Admin who issued the ban
+  bannedByRole?: string; // 'team_leader' | 'admin'
+
+  // Recent Moments / Feed
+  moments?: CreatorMoment[];
+
+  // Male Specific
+  coinBalance: number;
+  vipTier?: 'none' | 'bronze' | 'silver' | 'gold' | 'diamond';
+
+  // Female Specific
+  hourlyCoinRate: number; // e.g. 10 coins/min
+  earningsCoins: number; // current accumulated coins value
+  totalLifetimeEarnedUSD: number;
+  payoutMethod?: {
+    type: 'bank' | 'paypal' | 'crypto' | 'local';
+    details: string;
+  };
+
+  // Location & Geolocation Configuration
+  allowMockLocation?: boolean; // Admin permission switch for female host
+  isUsingMockLocation?: boolean; // Whether mock location is active
+  mockLocationCity?: string;
+  mockLocationCountry?: string;
+  mockLocationCountryCode?: string;
+  exactLocation?: {
+    latitude: number;
+    longitude: number;
+    city?: string;
+    country?: string;
+    countryCode?: string;
+    accuracyMeters?: number;
+    detectedAt?: string;
+    isMock?: boolean;
+  };
+
+  // Stats
+  totalCallsHosted?: number;
+  totalCallMinutes?: number;
+  totalGiftsReceivedCount?: number;
+  ratingScore?: number; // e.g. 4.95
+  totalReviewsCount?: number;
+  acceptanceRatePercent?: number; // e.g. 96.5
+  hoursOnlineThisMonth?: number;
+  profileViewsThisMonth?: number;
+  newFollowersThisMonth?: number;
+
+  // Team Leader & Agency Hierarchy
+  teamLeaderId?: string; // ID of the Team Leader who manages/created this user
+  createdById?: string; // ID of the user (Admin or Team Leader) who created this profile
+  coinEarnOverrideRate?: number; // Custom per-minute coin earning override set by Team Leader/Admin (e.g., 7, 8, 9 🪙/min)
+  teamLeaderNote?: string; // Team Leader internal notes
+  agencyName?: string; // Agency / Guild / Team Name (for Team Leaders)
+  commissionPercent?: number; // Team Leader commission % (e.g. 10%)
+}
+
+export interface TransactionReceipt {
+  id: string;
+  invoiceNumber: string;
+  userId: string;
+  userName: string;
+  packageTitle: string;
+  coinsCredited: number;
+  bonusCoins: number;
+  amountUSD: number;
+  taxUSD: number;
+  paymentGateway: 'stripe' | 'apple_pay' | 'google_pay' | 'paypal' | 'crypto';
+  transactionHash?: string;
+  status: 'paid' | 'pending' | 'refunded';
+  createdAt: string;
+  billingAddress?: string;
+  description?: string;
+  coinsChange?: number;
+  date?: string;
+}
+
+export interface WalletLedgerEntry {
+  id: string;
+  userId: string;
+  type: 'credit' | 'debit';
+  category: 'call_spend' | 'gift_spend' | 'chat_message' | 'moment_unlock' | 'topup_purchase' | 'daily_bonus' | 'host_earning' | 'payout_withdrawal';
+  title: string;
+  description?: string;
+  coins: number;
+  balanceAfter: number;
+  counterpartName?: string;
+  counterpartAvatar?: string;
+  timestamp: string;
+  referenceId?: string;
+}
+
+export interface AutoRechargeConfig {
+  enabled: boolean;
+  triggerThresholdCoins: number; // e.g. when coins drop below 50
+  rechargePackageCoins: number; // e.g. auto buy 500 coins package ($4.99)
+  preferredPaymentMethod: string;
+  lastTriggeredAt?: string;
+}
+
+export interface CoinPackage {
+  id: string;
+  title: string;
+  coins: number;
+  bonusCoins: number;
+  priceUSD: number;
+  badgeTag?: string; // 'Best Value', '70% OFF', 'Popular'
+  popular?: boolean;
+}
+
+export interface VirtualGift {
+  id: string;
+  name: string;
+  coinCost: number;
+  icon: string;
+  animationType: 'rose' | 'heart' | 'ring' | 'car' | 'yacht' | 'rocket' | 'crown' | 'fire' | 'diamond' | 'custom';
+  color: string;
+  gradient?: string;
+  isActive?: boolean;
+  category?: string;
+}
+
+export interface CallSession {
+  id: string;
+  callerId: string;
+  receiverId: string;
+  startTime: number;
+  endTime?: number;
+  durationSeconds: number;
+  billedMinutes?: number;
+  coinsSpent: number;
+  coinsEarned: number;
+  giftsSent: { giftId: string; giftName: string; cost: number; timestamp: number }[];
+  status: 'ringing' | 'connecting' | 'active' | 'ended' | 'rejected';
+  warningMessage?: string;
+}
+
+export interface AdminActiveCall {
+  id: string;
+  hostId: string;        // Female host ID
+  hostName: string;
+  hostAvatar: string;
+  hostCountry: string;
+  hostCountryCode?: string;
+  hostHourlyRate: number;
+  hostRating?: number;
+  hostAge?: number;
+  hostEarningsCoins: number;
+
+  callerId: string;      // Male caller ID
+  callerName: string;
+  callerAvatar: string;
+  callerCountry: string;
+  callerCountryCode?: string;
+  callerVipTier?: string;
+  callerCoinBalance: number;
+
+  startTime: number;
+  durationSeconds: number;
+  billedMinutes?: number;
+  coinsSpent: number;
+  coinsEarned: number;
+  status: 'active' | 'ringing';
+  burnRatePerMin: number;
+
+  // Video & Stream Telemetry
+  videoQuality?: '1080p FHD' | '720p HD' | '4K Ultra HD' | '480p SD';
+  fps?: number;
+  bitrateKbps?: number;
+  latencyMs?: number;
+  packetLoss?: number;
+  safetyScore?: number; // 0-100% clean
+  safetyFlag?: 'clean' | 'suspicious' | 'under_review';
+  aiShieldActive?: boolean;
+
+  // Live Audio Telemetry
+  hostAudioLevel?: number;   // 0 - 100
+  callerAudioLevel?: number; // 0 - 100
+  warningMessage?: string;
+}
+
+export interface IncidentEvidence {
+  id: string;
+  callId: string;
+  hostName: string;
+  callerName: string;
+  timestamp: string;
+  snapshotUrl?: string;
+  actionTaken: string;
+  adminNote?: string;
+}
+
+export interface PayoutRequest {
+  id: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  amountCoins: number;
+  amountUSD: number;
+  payoutMethod: string;
+  accountDetails: string;
+  status: 'pending' | 'processing' | 'completed' | 'rejected';
+  requestDate: string;
+  processedDate?: string;
+  adminNote?: string;
+  teamLeaderId?: string;
+  teamLeaderName?: string;
+}
+
+export interface CallLogItem {
+  id: string;
+  callerId: string;       // Male caller ID
+  callerName: string;
+  callerAvatar: string;
+  callerCountry?: string;
+  receiverId: string;     // Female receiver ID
+  receiverName: string;
+  receiverAvatar: string;
+  hostId?: string;
+  hostName?: string;
+  hostAvatar?: string;
+  startTime: number;
+  endTime?: number;
+  durationSeconds: number;
+  coinsSpent: number;
+  coinsEarned: number;
+  timestamp: string;
+  wasFriendCall: boolean;
+  isAudioOnly?: boolean;
+  isRoulette?: boolean;
+  status?: 'completed' | 'missed' | 'declined' | 'rejected' | 'failed' | string;
+}
+
+export interface FriendRequest {
+  id: string;
+  senderId: string;      // Female creator sending request
+  senderName: string;
+  senderAvatar: string;
+  receiverId: string;    // Male user receiving request
+  receiverName: string;
+  receiverAvatar: string;
+  status: 'pending' | 'accepted' | 'declined' | 'removed';
+  timestamp: string;
+  callLogId?: string;
+}
+
+export interface CreatorReview {
+  id: string;
+  creatorId: string;
+  creatorName?: string;
+  creatorAvatar?: string;
+  callerId: string;
+  callerName: string;
+  callerAvatar: string;
+  callerCountry?: string;
+  callLogId?: string;
+  stars: number; // 1 to 5
+  communication?: number; // 1 to 5
+  friendliness?: number; // 1 to 5
+  clarity?: number; // 1 to 5
+  energy?: number; // 1 to 5
+  comment?: string;
+  tags?: string[];
+  createdAt: string;
+  callDurationSeconds?: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  receiverId: string;
+  text: string;
+  originalLanguage: string;
+  translatedText?: string;
+  targetLanguage?: string;
+  mediaUrl?: string;
+  type: 'text' | 'image' | 'voice' | 'gift' | 'friend_request' | 'system' | 'call_rating';
+  giftInfo?: { name: string; coins: number; icon: string };
+  friendRequestInfo?: FriendRequest;
+  ratingInfo?: {
+    callLogId?: string;
+    callDurationSeconds?: number;
+    creatorId: string;
+    creatorName: string;
+    creatorAvatar: string;
+    callerId: string;
+    stars?: number;
+    communication?: number;
+    friendliness?: number;
+    clarity?: number;
+    energy?: number;
+    comment?: string;
+    tags?: string[];
+    isSubmitted?: boolean;
+  };
+  timestamp: string;
+}
+
+export interface FeedPost {
+  id: string;
+  creatorId: string;
+  creatorName: string;
+  creatorAvatar: string;
+  creatorCountry: string;
+  mediaType: 'image' | 'video';
+  mediaUrl: string;
+  caption: string;
+  likes: number;
+  commentsCount: number;
+  createdAt: string;
+  isLiked?: boolean;
+}
+
+export interface SystemSettings {
+  coinBurnRatePerMin: number; // Standard Coin Burn Rate - Non-Friends (Coins / Minute), e.g. 120
+  coinBurnRateFriendPerMin: number; // Friend Discounted Burn Rate - Friends (Coins / Minute), e.g. 80
+  femaleHostSharePercent: number; // Female Host Share for 1-on-1 Calls (%), e.g. 40 for 40%
+  teamLeaderSharePercent: number; // Team Leader Share for 1-on-1 Calls (%), e.g. 10 for 10%
+  giftFemaleHostSharePercent: number; // Female Host Share for Virtual Gifts (%), e.g. 70 for 70%
+  giftTeamLeaderSharePercent: number; // Team Leader Share for Virtual Gifts (%), e.g. 10 for 10%
+  enableVirtualGifts?: boolean; // Master toggle for virtual gifts system
+  femalePayoutRatioUSD: number; // Female Coin-to-USD Payout Ratio ($ USD per Coin Earned), e.g. 0.008
+  minPayoutThresholdUSD: number; // Minimum Withdrawal Threshold ($ USD), e.g. 50
+  femaleEarningRatePerMin?: number; // Legacy raw number fallback (derived: burnRate * femaleHostSharePercent / 100)
+  coinToUSDRatio: number; // e.g. 100 coins = $1.00 USD (0.01 per coin)
+  enableRegularFemaleCoinEarning?: boolean; // When false, only Team Leader created female hosts can earn coins; regular female users have all coin earning options hidden
+  aiNudityShieldEnabled: boolean;
+  screenRecordingProtection: boolean;
+  freeDailyLoginCoins: number;
+  showDevPersonaBar?: boolean; // Developer Persona Switcher top bar visibility
+  defaultTheme?: 'dark' | 'light'; // System default theme
+  videoQualityProfile?: 'auto' | 'hd_1080p' | 'high_720p' | 'standard_480p' | 'ultra_4k'; // WebRTC video quality setting
+  livekitApiKey?: string;
+  livekitApiSecret?: string;
+  livekitWsUrl?: string;
+  // LiveKit Advanced Quality & Encoding Configuration
+  livekitCaptureResolution?: '1080p' | '720p' | '480p' | '4k';
+  livekitMaxBitrateKbps?: number; // e.g. 3000 kbps for 1080p
+  livekitMaxFramerate?: number; // e.g. 30 or 60 fps
+  livekitSimulcastEnabled?: boolean;
+  livekitAdaptiveStream?: boolean;
+  livekitDynacast?: boolean;
+  livekitVideoCodec?: 'vp8' | 'h264' | 'vp9' | 'av1';
+  livekitExplicitlySet?: boolean; // Set when admin explicitly overrides default
+  allowedCountryCodes?: string[]; // Admin configurable enabled country ISO codes
+  allowedLanguages?: string[]; // Admin configurable enabled language codes/names (e.g. ['en', 'es', ...])
+  allowedZodiacSigns?: string[]; // Admin configurable enabled zodiac keys (e.g. ['aries', 'taurus', ...])
+  allowedInterests?: string[]; // Admin configurable enabled interest keys/names (e.g. ['travel', 'gaming', ...])
+  flagSizes?: Partial<FlagSizesConfig>; // Dynamic SVG flag height settings (width automatically computed 1.5x)
+  // Quick Match Configuration
+  quickMatchFreeEnabled?: boolean; // Quick Match is free to discover & match (default true)
+  quickMatchTimerSeconds?: number; // Decision timer duration in seconds (default 5, configurable 5-15)
+  quickMatchGiftPrices?: {
+    rose: number; // default 10
+    heart: number; // default 25
+    cheers: number; // default 50
+    tiara: number; // default 100
+    diamond: number; // default 200
+    rocket: number; // default 500
+  };
+  quickMatchGiftSplitFemaleCreator?: number; // Female Creator % split for Quick Match Gifts (default 60%)
+  quickMatchGiftSplitTL?: number; // Team Leader % split for Quick Match Gifts (default 10%)
+  quickMatchGiftSplitPlatform?: number; // Platform % split for Quick Match Gifts (default 30%)
+  quickMatchAutoFallbackOnlineCreators?: boolean; // Fallback to online creators matching interestedIn when live host pool is empty
+  dailyStreakRewards?: number[]; // 7-day progressive streak coins: e.g. [10, 15, 20, 25, 35, 50, 100]
+  dailyMissionsConfig?: {
+    chatFriends?: { target: number; reward: number; enabled?: boolean };
+    quickMatches?: { target: number; reward: number; enabled?: boolean };
+    videoCall?: { target: number; reward: number; enabled?: boolean };
+    momentInteract?: { target: number; reward: number; enabled?: boolean };
+    sendGift?: { target: number; reward: number; enabled?: boolean };
+    masterChest?: { target: number; reward: number; enabled?: boolean };
+  };
+  // Female Creator Target Engine & Algorithmic Boost Configuration
+  creatorTargetCycle?: 'weekly' | 'monthly' | 'biweekly' | string;
+  creatorTargetBronzeHours?: number;
+  creatorTargetBronzeCoins?: number;
+  creatorTargetBronzeBonusUSD?: number;
+  creatorTargetSilverHours?: number;
+  creatorTargetSilverCoins?: number;
+  creatorTargetSilverBonusUSD?: number;
+  creatorTargetGoldHours?: number;
+  creatorTargetGoldCoins?: number;
+  creatorTargetGoldBonusUSD?: number;
+  peakHoursStart?: string;
+  peakHoursEnd?: string;
+  peakHoursEnabled?: boolean;
+  callRingTimeoutSeconds?: number;
+  dailyFirstCallBonusCoins?: number;
+  dailyFirstCallBonusUSD?: number;
+  dailyFirstCallMinDurationSec?: number;
+  streakTargetDays?: number;
+  streakBoostDurationDays?: number;
+  minDailyActiveHoursForStreak?: number;
+  // Algorithmic Rotational Priority Matrix Weights
+  algoWeightOnlineAvailable?: number;
+  algoWeightBusyInCall?: number;
+  algoWeightGoldTier?: number;
+  algoWeightSilverTier?: number;
+  algoWeightBronzeTier?: number;
+  algoWeightReadyNowSurge?: number;
+  algoWeightResponseHealthMax?: number;
+  algoWeightStreakBoost?: number;
+  algoWeightDiversityJitterMax?: number;
+  algoWeightVerified?: number;
+  algoWeightHighRating?: number;
+}
+
+export type CreatorTier = 'bronze' | 'silver' | 'gold';
+
+export interface CreatorMetrics {
+  creatorId: string;
+  creatorName?: string;
+  creatorAvatar?: string;
+  agencyLeaderId?: string | null;
+  agencyName?: string | null;
+  activeOnlineSeconds: number;
+  activeOnlineHours: number;
+  coinsEarnedFromCalls: number;
+  coinsEarnedFromGifts: number;
+  totalTargetCoins: number;
+  currentStreakDays: number;
+  streakBoostUntil?: string | null;
+  lastActiveDate?: string;
+  firstCallBonusClaimedDate?: string;
+  totalCallsOffered: number;
+  totalCallsAnswered: number;
+  totalCallsDeclined: number;
+  totalCallsMissed: number;
+  responseHealthScore: number; // 0 - 100%
+  performanceTier: CreatorTier;
+  isReadyNowActive: boolean;
+  readyNowToggledAt?: string | null;
+  targetPeriodStart?: string;
+  targetPeriodEnd?: string | null;
+  bonusEarnedCoins: number;
+  bonusEarnedUSD: number;
+  updatedAt?: string;
+}
+
+export interface DailyMissionItem {
+  key: 'chat_friends' | 'quick_matches' | 'video_call' | 'moment_interact' | 'send_gift';
+  title: string;
+  description: string;
+  target: number;
+  current: number;
+  rewardCoins: number;
+  claimed: boolean;
+  icon: string;
+  actionTab?: string;
+  actionText?: string;
+  enabled?: boolean;
+}
+
+export interface DailyRewardRecord {
+  userId: string;
+  lastLoginDate: string;
+  streakCount: number;
+  streakClaimedDate: string | null;
+  tasksDate: string;
+  taskChatFriends: string[];
+  taskChatClaimed: boolean;
+  taskQuickMatches: number;
+  taskQuickMatchClaimed: boolean;
+  taskVideoCallSeconds: number;
+  taskVideoCallClaimed: boolean;
+  taskMomentInteractions: number;
+  taskMomentClaimed: boolean;
+  taskGiftCount: number;
+  taskGiftClaimed: boolean;
+  masterChestClaimed: boolean;
+  totalCoinsEarned: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type FlagSizeVariant = 'xs' | 'sm' | 'card' | 'md' | 'lg' | 'admin' | 'xl' | '2xl';
+
+export interface FlagSizesConfig {
+  xs: number; // height in px (default: 14 -> width 21)
+  sm: number; // height in px (default: 18 -> width 27)
+  card: number; // height in px (default: 18 -> width 27)
+  md: number; // height in px (default: 22 -> width 33)
+  lg: number; // height in px (default: 27 -> width 40)
+  admin: number; // height in px (default: 27 -> width 40)
+  xl: number; // height in px (default: 36 -> width 54)
+  '2xl': number; // height in px (default: 48 -> width 72)
+}
+
+export type ZodiacElement = 'fire' | 'earth' | 'air' | 'water';
+
+export interface ZodiacItem {
+  key: string; // e.g. 'aries'
+  name: string; // e.g. 'Aries'
+  symbol: string; // e.g. '♈'
+  dateRange: string; // e.g. 'Mar 21 - Apr 19'
+  element: ZodiacElement;
+  traits?: string[];
+  enabled?: boolean;
+}
+
+export interface LanguageItem {
+  code: string; // e.g. 'en', 'es'
+  name: string; // e.g. 'English', 'Spanish'
+  nativeName: string; // e.g. 'English', 'Español'
+  popular?: boolean;
+  region?: string;
+  enabled?: boolean;
+}
+
+export type InterestCategory = 'lifestyle' | 'sports' | 'art' | 'music' | 'tech' | 'entertainment' | 'food' | 'wellness' | 'social';
+
+export interface InterestItem {
+  id: string; // e.g. 'travel'
+  name: string; // e.g. 'Travel & Adventure'
+  category: InterestCategory;
+  iconName?: string;
+  color?: string;
+  popular?: boolean;
+  enabled?: boolean;
+}
+
+export interface QuickMatchItem {
+  id: string;
+  matchedUserId: string;
+  matchedUserName: string;
+  matchedUserAvatar: string;
+  matchedUserGender?: string;
+  matchedUserAge?: number;
+  matchedUserCountryCode?: string;
+  matchedUserCity?: string;
+  matchedAt: string;
+  giftsExchangedCoins?: number;
+}
+
+export interface VIPPlan {
+  id: 'bronze' | 'silver' | 'gold' | 'diamond';
+  name: string;
+  priceMonthlyUSD: number;
+  dailyFreeCoins: number;
+  callDiscountPercent: number;
+  badge: string;
+  features: string[];
+}
+
+export interface HomeBanner {
+  id: string;
+  title: string;
+  subtitle: string;
+  tagText: string;
+  tagColor?: string;
+  imageUrl: string;
+  ctaText: string;
+  actionType: 'tab' | 'modal' | 'external' | 'policy';
+  actionTarget: string; // e.g. 'discovery', 'swipe', 'moments', 'store', 'vip', 'match', or policy id / url
+  active: boolean;
+  order: number;
+  bgGradient?: string;
+}
+
+export interface PolicyDocument {
+  id: string;
+  slug: string;
+  title: string;
+  category: 'safety' | 'privacy' | 'terms' | 'coins' | 'creators' | 'moderation';
+  icon: string;
+  summary: string;
+  content: string;
+  lastUpdated: string;
+  externalUrl?: string;
+  order: number;
+  isFeaturedOnHome: boolean;
+}
+
+export interface HomeQuickLink {
+  id: string;
+  title: string;
+  subtitle?: string;
+  icon: string;
+  badge?: string;
+  actionType: 'tab' | 'modal' | 'external' | 'policy';
+  actionTarget: string;
+  colorGradient: string;
+  order: number;
+  active: boolean;
+}
+
+export interface InfraSystemConfig {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
+  r2AccountId: string;
+  r2AccessKeyId: string;
+  r2SecretAccessKey: string;
+  r2BucketName: string;
+  r2PublicUrl: string;
+  dbMaxPoolSize: number;
+  dbIdleTimeoutSeconds: number;
+  dbStatementTimeoutMs: number;
+  dbQueryCachingEnabled: boolean;
+  r2MaxImageSizeMb: number;
+  r2MaxVideoSizeMb: number;
+  r2AllowedMimeTypes: string[];
+  r2CdnCacheTtlSeconds: number;
+  autoModerationSensitivity: 'low' | 'medium' | 'high' | 'strict';
+  nsfwFilterEnabled: boolean;
+  bannedKeywords: string[];
+  abuseReportAutoSuspendThreshold: number;
+  featureRealtimeChatEnabled: boolean;
+  featureR2DirectUploadEnabled: boolean;
+  featureVideoCallingEnabled: boolean;
+  featureGeoDiscoveryEnabled: boolean;
+  featureMaintenanceMode: boolean;
+  supabaseConfigured?: boolean;
+  r2Configured?: boolean;
+}
+
+export interface ResetDataOptions {
+  // 1. Users & Accounts
+  mockFemaleCreators?: boolean;
+  mockMaleCallers?: boolean;
+  adminAccount?: boolean;
+  customUsers?: boolean;
+  teamLeaderAgencies?: boolean;
+
+  // 2. User Profiles & Media
+  profilesMedia?: boolean;
+
+  // 3. Coins & Wallet Balances
+  userCoins?: boolean;
+  creatorEarnings?: boolean;
+  vipTiers?: boolean;
+
+  // 4. Transactions & Store
+  payoutRequests?: boolean;
+  coinPackages?: boolean;
+  virtualGiftsCatalog?: boolean;
+
+  // 5. Chats & Social
+  chatMessages?: boolean;
+  friendRequests?: boolean;
+  friendsList?: boolean;
+  favoritesList?: boolean;
+  blockedList?: boolean;
+
+  // 6. Matches & Activity Calls
+  callLogs?: boolean;
+  liveHostsPool?: boolean;
+  surveillanceLogs?: boolean;
+  quickMatchQueues?: boolean;
+
+  // 7. Feed & Community
+  feedPosts?: boolean;
+  creatorGoals?: boolean;
+  creatorAnalytics?: boolean;
+  creatorReviews?: boolean;
+  dailyRewardsAndQuests?: boolean;
+
+  // 8. CMS & Settings
+  homeBanners?: boolean;
+  policyDocuments?: boolean;
+  quickLinks?: boolean;
+  systemSettings?: boolean;
+  taxonomiesAndFlags?: boolean;
+
+  // Sync targets
+  syncWithSupabase?: boolean;
+  syncWithServer?: boolean;
+}
+
+export interface ResetResult {
+  success: boolean;
+  categoriesCleared: string[];
+  summary: string;
+  error?: string;
+}
+
+export interface AuthOtpState {
+  email: string;
+  role: UserRole;
+  name: string;
+  otpSent: boolean;
+  otpCode: string;
+  resendCountdown: number;
+  isVerifying: boolean;
+  error?: string;
+}
+
+export interface OnboardingFormData {
+  dob: string;
+  age: number;
+  gender: UserGender;
+  nationality: string;
+  countryCode: string;
+  zodiac?: string;
+  spokenLanguages: string[];
+  bio: string;
+  interests: string[];
+  interestedIn: string[];
+  tags: string[]; // For creators
+  hourlyCoinRate: number; // For creators
+  avatarUrl: string;
+  gallery: string[];
+  introVideoUrl?: string;
+  agreedToTerms: boolean;
+  agreedToAdultTerms: boolean;
+  agreedToHostTerms: boolean;
+}
+
+export interface ServerDiagnosticInfo {
+  nodeVersion: string;
+  platform: string;
+  uptimeSeconds: number;
+  memoryMb: number;
+  isEnvWritable: boolean;
+  isLocked: boolean;
+  services: {
+    database: boolean;
+    livekit: boolean;
+    r2Storage: boolean;
+    smtp: boolean;
+  };
+  envValues: {
+    supabaseUrl?: string;
+    supabaseAnonKey?: string;
+    supabaseServiceRoleKey?: string;
+    livekitUrl?: string;
+    livekitApiKey?: string;
+    livekitApiSecret?: string;
+    r2AccountId?: string;
+    r2AccessKeyId?: string;
+    r2SecretAccessKey?: string;
+    r2BucketName?: string;
+    r2PublicUrl?: string;
+    smtpHost?: string;
+    smtpPort?: number;
+    smtpUser?: string;
+    smtpPass?: string;
+    smtpFrom?: string;
+    smtpSecure?: boolean;
+    resendApiKey?: string;
+  };
+}
+
+export interface SetupConfigPayload {
+  supabaseUrl?: string;
+  supabaseAnonKey?: string;
+  supabaseServiceRoleKey?: string;
+  livekitUrl?: string;
+  livekitApiKey?: string;
+  livekitApiSecret?: string;
+  r2AccountId?: string;
+  r2AccessKeyId?: string;
+  r2SecretAccessKey?: string;
+  r2BucketName?: string;
+  r2PublicUrl?: string;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpUser?: string;
+  smtpPass?: string;
+  smtpFrom?: string;
+  smtpSecure?: boolean;
+  resendApiKey?: string;
+  adminPassword?: string;
+  coinBurnRatePerMin?: number;
+  coinBurnRateFriendPerMin?: number;
+  femaleHostSharePercent?: number;
+  teamLeaderSharePercent?: number;
+  lockInstaller?: boolean;
+}
