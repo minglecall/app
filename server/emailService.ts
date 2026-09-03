@@ -1,6 +1,11 @@
 import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+
+function hashOtp(code: string) {
+  return crypto.createHash('sha256').update(String(code).trim()).digest('hex');
+}
 
 interface StoredOtp {
   code: string;
@@ -31,7 +36,7 @@ function loadPersistedSmtpConfig(): SmtpRuntimeConfig {
       const parsed = JSON.parse(data);
       console.log('[Email Service] Loaded persisted SMTP configuration from disk.');
       return {
-        showOtpInForm: true,
+        showOtpInForm: false,
         ...parsed,
       };
     }
@@ -39,7 +44,7 @@ function loadPersistedSmtpConfig(): SmtpRuntimeConfig {
     console.warn('[Email Service] Failed to load persisted SMTP config:', err);
   }
   return {
-    showOtpInForm: true,
+    showOtpInForm: false,
   };
 }
 
@@ -99,7 +104,7 @@ export function getSmtpConfig(): {
     user: user ? user.replace(/(.{2})(.*)(@.*)/, '$1***$3') : '',
     from: runtimeSmtpConfig.from || process.env.SMTP_FROM || '',
     configured,
-    showOtpInForm: runtimeSmtpConfig.showOtpInForm ?? true,
+    showOtpInForm: runtimeSmtpConfig.showOtpInForm ?? false,
   };
 }
 
@@ -113,7 +118,7 @@ export function generateSixDigitOtp(): string {
 export function saveOtp(email: string, code: string, metadata?: { name?: string; role?: string }): void {
   const cleanEmail = email.trim().toLowerCase();
   otpStore.set(cleanEmail, {
-    code,
+    code: hashOtp(code),
     email: cleanEmail,
     name: metadata?.name,
     role: metadata?.role,
@@ -143,7 +148,7 @@ export function verifyStoredOtp(email: string, inputCode: string): { success: bo
 
   stored.attempts += 1;
 
-  if (stored.code.trim() === inputCode.trim()) {
+  if (stored.code === hashOtp(inputCode)) {
     otpStore.delete(cleanEmail);
     return {
       success: true,

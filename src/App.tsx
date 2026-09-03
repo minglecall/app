@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header } from './components/Header';
-import { DevPersonaBar } from './components/dev/DevPersonaBar';
 import { DiscoveryGrid } from './components/discovery/DiscoveryGrid';
 import { SwipeMatchDeck } from './components/discovery/SwipeMatchDeck';
 import { ProfileDetailModal } from './components/discovery/ProfileDetailModal';
@@ -153,9 +152,6 @@ const MainApp: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#0F1115] text-slate-300 flex flex-col font-sans selection:bg-indigo-600 selection:text-white">
-      {/* Dev Persona Switcher Bar (Temporary Dev Toolbar, Toggleable from Admin) */}
-      <DevPersonaBar onOpenAuth={() => handleOpenAuth('register')} />
-
       {/* App Header */}
       <Header
         activeTab={activeTab}

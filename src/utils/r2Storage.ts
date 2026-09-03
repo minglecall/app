@@ -15,6 +15,17 @@ export interface DirectUploadResult {
   durationMs: number;
 }
 
+/** Local-only preview URLs must never be persisted as the authoritative avatar/media URL. */
+export function isEphemeralMediaUrl(url?: string | null): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  return trimmed.startsWith('blob:') || trimmed.startsWith('data:');
+}
+
+export function isPersistableMediaUrl(url?: string | null): boolean {
+  return Boolean(url && !isEphemeralMediaUrl(url));
+}
+
 /** Build JSON request headers with the current Supabase access token when available. */
 async function getAuthJsonHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -117,7 +128,13 @@ export async function uploadMediaDirectlyToR2(
     });
 
     if (!presignRes.ok) {
-      // Fallback to direct server upload endpoint
+      const presignError = await presignRes.json().catch(() => ({}));
+      const authMessage =
+        presignError?.error?.message ||
+        presignError?.error ||
+        presignError?.message ||
+        `Presigned URL request failed (${presignRes.status})`;
+      console.warn('[R2 Storage] Presigned URL request failed, using server upload fallback:', authMessage);
       return await uploadMediaViaServerFallback(file, userId, category, onProgress);
     }
 

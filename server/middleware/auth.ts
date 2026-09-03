@@ -1,22 +1,73 @@
 import type { Request, Response, NextFunction } from 'express';
 import { getSupabaseAdmin, isSupabaseAdminConfigured } from '../supabaseAdmin';
 
-/**
- * Extract Bearer token from the Authorization header.
- * Accepts: "Bearer <token>" (case-insensitive scheme).
- */
-function extractBearerToken(req: Request): string | null {
+export const PUBLIC_SIGNUP_ROLES = new Set([
+  'male_user',
+  'female_user',
+  'female_creator',
+  'female_host',
+  'other_user',
+]);
+
+export const ADMIN_ROLES = new Set(['admin']);
+export const TEAM_LEADER_ROLES = new Set(['team_leader', 'agency_manager', 'admin']);
+
+export type AuthUser = {
+  id: string;
+  email?: string | null;
+  user_metadata?: Record<string, any>;
+  app_metadata?: Record<string, any>;
+};
+
+export type ResolvedProfile = {
+  id: string;
+  role: string;
+  email?: string | null;
+  teamLeaderId?: string | null;
+  createdById?: string | null;
+  agencyName?: string | null;
+};
+
+const PRIVILEGED_PROFILE_KEYS = new Set([
+  'coinBalance',
+  'coin_balance',
+  'earningsCoins',
+  'earnings_coins',
+  'role',
+  'password',
+  'password_hash',
+  'hasPasswordSet',
+  'has_password_set',
+  'isBanned',
+  'is_banned',
+  'banReason',
+  'ban_reason',
+  'bannedUntil',
+  'banned_until',
+  'bannedById',
+  'banned_by_id',
+  'bannedByRole',
+  'banned_by_role',
+  'isVerified',
+  'is_verified',
+  'kycStatus',
+  'kyc_status',
+  'vipTier',
+  'vip_tier',
+  'totalLifetimeEarnedUSD',
+  'total_lifetime_earned_usd',
+]);
+
+export function extractBearerToken(req: Request): string | null {
   const header = req.headers.authorization || req.headers.Authorization;
   if (!header || typeof header !== 'string') return null;
-
   const match = header.match(/^Bearer\s+(.+)$/i);
   if (!match) return null;
-
   const token = match[1].trim();
   return token.length > 0 ? token : null;
 }
 
-function sendUnauthorized(res: Response, message: string) {
+export function sendUnauthorized(res: Response, message: string) {
   return res.status(401).json({
     success: false,
     error: {
@@ -26,7 +77,7 @@ function sendUnauthorized(res: Response, message: string) {
   });
 }
 
-function sendForbidden(res: Response, message: string) {
+export function sendForbidden(res: Response, message: string) {
   return res.status(403).json({
     success: false,
     error: {
@@ -36,17 +87,63 @@ function sendForbidden(res: Response, message: string) {
   });
 }
 
-type AuthUser = {
-  id: string;
-  email?: string | null;
-  user_metadata?: Record<string, any>;
-  app_metadata?: Record<string, any>;
-};
+export async function verifyAccessToken(token: string): Promise<{
+  user: AuthUser;
+  profile: ResolvedProfile | null;
+} | null> {
+  if (!token || !isSupabaseAdminConfigured()) return null;
+  const supabaseAdmin = getSupabaseAdmin();
+  if (!supabaseAdmin) return null;
 
-/**
- * Validate Bearer JWT via Supabase Admin and attach Auth user to the request.
- * Returns the user on success, or null after sending a 401 response.
- */
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !data?.user) return null;
+
+  const user = data.user as AuthUser;
+  const profile = await lookupProfileForAuthUser(user);
+  return { user, profile };
+}
+
+export async function lookupProfileForAuthUser(authUser: AuthUser): Promise<ResolvedProfile | null> {
+  const supabaseAdmin = getSupabaseAdmin();
+  if (!supabaseAdmin) return null;
+
+  const { data: byAuthId } = await supabaseAdmin
+    .from('profiles')
+    .select('id, role, email, team_leader_id, created_by_id, agency_name')
+    .eq('auth_id', authUser.id)
+    .maybeSingle();
+
+  const row =
+    byAuthId ||
+    (
+      await supabaseAdmin
+        .from('profiles')
+        .select('id, role, email, team_leader_id, created_by_id, agency_name')
+        .eq('id', authUser.id)
+        .maybeSingle()
+    ).data ||
+    (authUser.email
+      ? (
+          await supabaseAdmin
+            .from('profiles')
+            .select('id, role, email, team_leader_id, created_by_id, agency_name')
+            .ilike('email', authUser.email.trim().toLowerCase())
+            .maybeSingle()
+        ).data
+      : null);
+
+  if (!row) return null;
+
+  return {
+    id: String(row.id),
+    role: String(row.role || 'male_user'),
+    email: row.email,
+    teamLeaderId: row.team_leader_id,
+    createdById: row.created_by_id,
+    agencyName: row.agency_name,
+  };
+}
+
 async function authenticateRequest(req: Request, res: Response): Promise<AuthUser | null> {
   const existing = (req as any).user as AuthUser | undefined;
   if (existing?.id) return existing;
@@ -57,32 +154,19 @@ async function authenticateRequest(req: Request, res: Response): Promise<AuthUse
     return null;
   }
 
-  if (!isSupabaseAdminConfigured()) {
-    sendUnauthorized(res, 'Authentication service is not configured.');
+  const verified = await verifyAccessToken(token);
+  if (!verified) {
+    sendUnauthorized(res, 'Invalid or expired authentication token.');
     return null;
   }
 
-  const supabaseAdmin = getSupabaseAdmin();
-  if (!supabaseAdmin) {
-    sendUnauthorized(res, 'Authentication service is unavailable.');
-    return null;
-  }
-
-  const { data, error } = await supabaseAdmin.auth.getUser(token);
-  if (error || !data?.user) {
-    sendUnauthorized(res, error?.message || 'Invalid or expired authentication token.');
-    return null;
-  }
-
-  (req as any).user = data.user;
+  (req as any).user = verified.user;
   (req as any).accessToken = token;
-  return data.user as AuthUser;
+  (req as any).profile = verified.profile;
+  (req as any).profileId = verified.profile?.id || verified.user.id;
+  return verified.user;
 }
 
-/**
- * Require a valid Supabase Auth session (Bearer JWT).
- * On success, attaches the Auth user to `(req as any).user` and calls next().
- */
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
     const user = await authenticateRequest(req, res);
@@ -94,79 +178,69 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
 }
 
-/**
- * Optional admin gate. Verifies the Bearer token (if not already attached),
- * then checks Auth metadata and/or the profiles table for an admin role/id.
- *
- * Usage:
- *   app.get('/api/admin/...', requireAuth, requireAdmin, handler)
- *   // or standalone:
- *   app.get('/api/admin/...', requireAdmin, handler)
- */
+function isAdminRole(role?: string | null) {
+  return role === 'admin';
+}
+
 export async function requireAdmin(req: Request, res: Response, next: NextFunction) {
   try {
     const authUser = await authenticateRequest(req, res);
     if (!authUser) return;
 
-    const metaRole =
-      authUser.user_metadata?.role ||
-      authUser.app_metadata?.role ||
-      authUser.user_metadata?.user_role;
+    const appRole = authUser.app_metadata?.role;
+    const profile = (req as any).profile as ResolvedProfile | undefined;
 
-    if (metaRole === 'admin') {
+    if (isAdminRole(appRole) || isAdminRole(profile?.role)) {
       (req as any).isAdmin = true;
+      (req as any).adminProfile = profile || null;
       return next();
     }
 
-    const supabaseAdmin = getSupabaseAdmin();
-    if (!supabaseAdmin) {
-      return sendForbidden(res, 'Admin verification unavailable.');
-    }
-
-    let profile: { id?: string; role?: string; email?: string } | null = null;
-
-    const { data: byAuthId } = await supabaseAdmin
-      .from('profiles')
-      .select('id, role, email')
-      .eq('auth_id', authUser.id)
-      .maybeSingle();
-
-    if (byAuthId) {
-      profile = byAuthId;
-    } else {
-      const { data: byId } = await supabaseAdmin
-        .from('profiles')
-        .select('id, role, email')
-        .eq('id', authUser.id)
-        .maybeSingle();
-
-      if (byId) {
-        profile = byId;
-      } else if (authUser.email) {
-        const { data: byEmail } = await supabaseAdmin
-          .from('profiles')
-          .select('id, role, email')
-          .ilike('email', authUser.email.trim().toLowerCase())
-          .maybeSingle();
-        profile = byEmail;
-      }
-    }
-
-    const isAdminProfile =
-      profile?.role === 'admin' ||
-      profile?.id === 'admin_user' ||
-      (profile?.email && profile.email.toLowerCase() === 'admin@livecall.com') ||
-      (authUser.email && authUser.email.toLowerCase() === 'admin@livecall.com');
-
-    if (!isAdminProfile) {
-      return sendForbidden(res, 'Admin privileges required.');
-    }
-
-    (req as any).isAdmin = true;
-    (req as any).adminProfile = profile;
-    return next();
+    return sendForbidden(res, 'Admin privileges required.');
   } catch (err: any) {
     console.error('[Auth Middleware] requireAdmin error:', err);
     return sendForbidden(res, 'Admin verification failed.');
   }
+}
+
+export function requireRole(roles: string[]) {
+  const allowed = new Set(roles);
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const authUser = await authenticateRequest(req, res);
+      if (!authUser) return;
+      const profile = (req as any).profile as ResolvedProfile | undefined;
+      const role = profile?.role || '';
+      if (!allowed.has(role) && !isAdminRole(role)) {
+        return sendForbidden(res, 'Insufficient role privileges.');
+      }
+      return next();
+    } catch (err: any) {
+      console.error('[Auth Middleware] requireRole error:', err);
+      return sendForbidden(res, 'Role verification failed.');
+    }
+  };
+}
+
+export const requireTeamLeader = requireRole(['team_leader', 'agency_manager', 'admin']);
+
+export function sanitizePublicSignupRole(role: unknown): string {
+  const value = String(role || 'male_user');
+  return PUBLIC_SIGNUP_ROLES.has(value) ? value : 'male_user';
+}
+
+export function stripPrivilegedProfileFields<T extends Record<string, any>>(body: T): Partial<T> {
+  const next: Record<string, any> = { ...body };
+  for (const key of PRIVILEGED_PROFILE_KEYS) {
+    delete next[key];
+  }
+  return next as Partial<T>;
+}
+
+export function callerOwnsCreator(leader: ResolvedProfile, creator: { teamLeaderId?: string | null; createdById?: string | null; agencyName?: string | null }) {
+  if (leader.role === 'admin') return true;
+  if (creator.teamLeaderId && creator.teamLeaderId === leader.id) return true;
+  if (creator.createdById && creator.createdById === leader.id) return true;
+  if (leader.agencyName && creator.agencyName && creator.agencyName === leader.agencyName) return true;
+  return false;
 }

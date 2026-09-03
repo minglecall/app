@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import type { ServerRuntime } from '../runtimeTypes';
+import { requireAuth } from '../middleware/auth';
 import {
   upsertProfileAdmin,
   isSupabaseAdminConfigured,
@@ -20,9 +21,10 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
   } = ctx;
 
   // Dedicated Presence REST Endpoint
-  router.post('/', async (req, res) => {
+  router.post('/', requireAuth, async (req, res) => {
     try {
-      const { userId, status } = req.body;
+      const userId = String((req as any).profileId || (req as any).user?.id || '');
+      const { status } = req.body;
       if (!userId || !status) {
         return res.status(400).json({ success: false, error: 'userId and status required' });
       }
@@ -56,9 +58,10 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
 
   // Dedicated Presence Heartbeat REST Endpoint
   // Lightweight liveness ping — persists status to Supabase when provided
-  router.post('/heartbeat', (req, res) => {
+  router.post('/heartbeat', requireAuth, (req, res) => {
     try {
-      const { userId, status } = req.body;
+      const userId = String((req as any).profileId || (req as any).user?.id || '');
+      const { status } = req.body;
       if (userId) {
         if (status === 'offline') {
           userLastSeen.delete(userId);
@@ -92,7 +95,7 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
   });
 
   // Dedicated Presence GET Endpoint
-  router.get('/', (req, res) => {
+  router.get('/', requireAuth, (req, res) => {
     return res.json({ success: true, presence: getFormattedPresence() });
   });
 
@@ -109,7 +112,7 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
     broadcastUsers,
   } = ctx;
 
-  router.get('/metrics', async (req, res) => {
+  router.get('/metrics', requireAuth, async (req, res) => {
     try {
       const creatorId = req.query.creatorId as string | undefined;
       if (creatorId) {
@@ -123,9 +126,10 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Creator Heartbeat (Active Online Hours Tracking)
-  router.post('/heartbeat', async (req, res) => {
+  router.post('/heartbeat', requireAuth, async (req, res) => {
     try {
-      const { creatorId, agencyLeaderId, secondsIncrement } = req.body;
+      const creatorId = String((req as any).profileId || (req as any).user?.id || '');
+      const { secondsIncrement, agencyLeaderId } = req.body;
       if (!creatorId) {
         return res.status(400).json({ success: false, error: 'creatorId is required' });
       }
@@ -236,9 +240,10 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Record Call Offer / Answer / Decline / Miss Event
-  router.post('/call-offer', async (req, res) => {
+  router.post('/call-offer', requireAuth, async (req, res) => {
     try {
-      const { creatorId, outcome } = req.body;
+      const creatorId = String((req as any).profileId || (req as any).user?.id || '');
+      const { outcome } = req.body;
       if (!creatorId || !outcome) {
         return res.status(400).json({ success: false, error: 'creatorId and outcome are required' });
       }
@@ -287,12 +292,14 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Claim Daily First Call Bonus
-  router.post('/first-call-bonus', async (req, res) => {
+  router.post('/first-call-bonus', requireAuth, async (req, res) => {
     try {
-      const { creatorId, bonusCoins, bonusUSD } = req.body;
+      const creatorId = String((req as any).profileId || (req as any).user?.id || '');
       if (!creatorId) {
         return res.status(400).json({ success: false, error: 'creatorId is required' });
       }
+      const bonusCoins = 100;
+      const bonusUSD = 1;
 
       const todayStr = new Date().toISOString().split('T')[0];
       const existing = creatorMetricsMap.get(creatorId) || {

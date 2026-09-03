@@ -9,7 +9,7 @@ import {
   Cloud,
   CheckCircle2,
 } from 'lucide-react';
-import { uploadMediaDirectlyToR2, normalizeMediaUrl } from '../../utils/r2Storage';
+import { uploadMediaDirectlyToR2, normalizeMediaUrl, isPersistableMediaUrl } from '../../utils/r2Storage';
 import {
   FEMALE_PORTRAIT_AVATARS,
   MALE_PORTRAIT_AVATARS,
@@ -98,18 +98,19 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
         },
       });
 
-      if (result && result.publicUrl) {
+      if (result && result.publicUrl && isPersistableMediaUrl(result.publicUrl)) {
         // Keep local objectUrl as active preview so local rendering never fails or blinks, while calling onImageUploaded with the safe public URL
         setPreviewUrl(objectUrl);
         setUploadSuccess(true);
         onImageUploaded(result.publicUrl, result.storageKey);
+      } else {
+        throw new Error('Upload completed but no cloud storage URL was returned');
       }
     } catch (err: any) {
-      console.warn('[Unified Uploader] Network upload fallback active:', err?.message);
-      // Fail-safe: Keep the high-resolution local preview active
+      console.error('[Unified Uploader] Cloud upload failed:', err?.message || err);
       setPreviewUrl(objectUrl);
-      onImageUploaded(objectUrl);
-      setUploadSuccess(true);
+      setErrorMessage(err?.message || 'Failed to upload image to Cloudflare R2. Please try again.');
+      setUploadSuccess(false);
     } finally {
       setIsUploading(false);
       setUploadProgress(0);

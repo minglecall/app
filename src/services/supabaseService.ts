@@ -9,6 +9,7 @@ import {
   ALL_INTERESTS,
 } from '../utils/taxonomies';
 import { DEFAULT_FLAG_SIZES } from '../constants/appDefaults';
+import { authFetch } from '../utils/apiClient';
 
 export type DbProfile = Database['public']['Tables']['profiles']['Row'];
 export type DbMatch = Database['public']['Tables']['matches']['Row'];
@@ -16,6 +17,11 @@ export type DbMessage = Database['public']['Tables']['messages']['Row'];
 export type DbSystemConfig = Database['public']['Tables']['system_configs']['Row'];
 export type DbModerationReport = Database['public']['Tables']['moderation_reports']['Row'];
 export type DbUserDailyRewards = Database['public']['Tables']['user_daily_rewards']['Row'];
+
+/** PostgREST requires a filter on DELETE; PK columns are NOT NULL so this matches every row. */
+function deleteAllRows(table: string, notNullColumn: string) {
+  return (supabase.from(table) as any).delete().not(notNullColumn, 'is', null);
+}
 
 export function generateValidUuid(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -335,7 +341,7 @@ export async function upsertProfileToSupabase(profile: UserProfile): Promise<boo
 
   // 2. Also dispatch to server Supabase upsert API endpoint to guarantee persistence (bypasses RLS issues)
   try {
-    const sRes = await fetch('/api/supabase/upsert-profile', {
+    const sRes = await authFetch('/api/supabase/upsert-profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(normalizedProfile),
@@ -352,7 +358,7 @@ export async function upsertProfileToSupabase(profile: UserProfile): Promise<boo
 
   // 3. Sync to local server user directory
   try {
-    await fetch('/api/users', {
+    await authFetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(normalizedProfile),
@@ -417,16 +423,19 @@ export async function updateUserProfileInSupabase(
       .eq('id', userId)
       .select('id');
 
-    // 1b. If no rows updated and email provided, update matching email in Supabase
-    if ((!updatedRows || updatedRows.length === 0 || updateErr) && updates.email) {
-      const cleanEmail = updates.email.toLowerCase().trim();
-      await (supabase.from('profiles') as any)
-        .update(payload)
-        .eq('email', cleanEmail);
+    // 1b. If no rows updated, try auth_id then email
+    if ((!updatedRows || updatedRows.length === 0 || updateErr)) {
+      await (supabase.from('profiles') as any).update(payload).eq('auth_id', userId);
+      if (updates.email) {
+        const cleanEmail = updates.email.toLowerCase().trim();
+        await (supabase.from('profiles') as any)
+          .update(payload)
+          .ilike('email', cleanEmail);
+      }
     }
 
     // 2. Also dispatch to server Supabase Admin endpoint for 100% guaranteed persistence
-    fetch('/api/supabase/update-profile', {
+    authFetch('/api/supabase/update-profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, updates: { ...updates, email: updates.email } }),
@@ -436,7 +445,7 @@ export async function updateUserProfileInSupabase(
   } catch (err) {
     console.warn('Supabase updateUserProfile exception, falling back to server endpoint:', err);
     try {
-      fetch('/api/supabase/update-profile', {
+      authFetch('/api/supabase/update-profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, updates }),
@@ -493,7 +502,7 @@ export async function updateUserStatusInSupabase(
 
   // 2. Also dispatch to server endpoint for guaranteed persistence via Supabase Admin
   try {
-    fetch('/api/supabase/update-status', {
+    authFetch('/api/supabase/update-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, status }),
@@ -523,7 +532,7 @@ export async function fetchUserStatusesFromSupabase(): Promise<Array<{ id: strin
 
   // Fallback to server admin endpoint
   try {
-    const res = await fetch('/api/supabase/user-statuses');
+    const res = await authFetch('/api/supabase/user-statuses');
     if (res.ok) {
       const data = await res.json();
       if (data.success && Array.isArray(data.statuses)) {
@@ -572,10 +581,7 @@ export async function purgeMockProfilesFromSupabase(mockIds: string[]): Promise<
 export async function purgeMessagesFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase
-      .from('messages')
-      .delete()
-      .neq('id', '___non_existent___');
+    const { error } = await deleteAllRows('messages', 'id');
     if (error) {
       console.warn('Supabase purgeMessages error:', error.message);
       return { success: false, error: error.message };
@@ -590,10 +596,7 @@ export async function purgeMessagesFromSupabase(): Promise<{ success: boolean; e
 export async function purgeMatchesFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase
-      .from('matches')
-      .delete()
-      .neq('id', '___non_existent___');
+    const { error } = await deleteAllRows('matches', 'id');
     if (error) {
       console.warn('Supabase purgeMatches error:', error.message);
       return { success: false, error: error.message };
@@ -608,10 +611,7 @@ export async function purgeMatchesFromSupabase(): Promise<{ success: boolean; er
 export async function purgeModerationReportsFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase
-      .from('moderation_reports')
-      .delete()
-      .neq('id', '___non_existent___');
+    const { error } = await deleteAllRows('moderation_reports', 'id');
     if (error) {
       console.warn('Supabase purgeModerationReports error:', error.message);
       return { success: false, error: error.message };
@@ -626,7 +626,7 @@ export async function purgeModerationReportsFromSupabase(): Promise<{ success: b
 export async function purgeCallLogsFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase.from('call_logs').delete().neq('id', '___non_existent___');
+    const { error } = await deleteAllRows('call_logs', 'id');
     if (error) {
       console.warn('Supabase purgeCallLogs error:', error.message);
       return { success: false, error: error.message };
@@ -641,7 +641,7 @@ export async function purgeCallLogsFromSupabase(): Promise<{ success: boolean; e
 export async function purgeFriendRequestsFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase.from('friend_requests').delete().neq('id', '___non_existent___');
+    const { error } = await deleteAllRows('friend_requests', 'id');
     if (error) {
       console.warn('Supabase purgeFriendRequests error:', error.message);
       return { success: false, error: error.message };
@@ -656,7 +656,7 @@ export async function purgeFriendRequestsFromSupabase(): Promise<{ success: bool
 export async function purgePayoutRequestsFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase.from('payout_requests').delete().neq('id', '___non_existent___');
+    const { error } = await deleteAllRows('payout_requests', 'id');
     if (error) {
       console.warn('Supabase purgePayoutRequests error:', error.message);
       return { success: false, error: error.message };
@@ -671,7 +671,7 @@ export async function purgePayoutRequestsFromSupabase(): Promise<{ success: bool
 export async function purgeFeedPostsFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase.from('feed_posts').delete().neq('id', '___non_existent___');
+    const { error } = await deleteAllRows('feed_posts', 'id');
     if (error) {
       console.warn('Supabase purgeFeedPosts error:', error.message);
       return { success: false, error: error.message };
@@ -686,7 +686,7 @@ export async function purgeFeedPostsFromSupabase(): Promise<{ success: boolean; 
 export async function purgeFavoritesFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase.from('favorites').delete().neq('user_id', '___non_existent___');
+    const { error } = await deleteAllRows('favorites', 'user_id');
     if (error) {
       console.warn('Supabase purgeFavorites error:', error.message);
       return { success: false, error: error.message };
@@ -701,7 +701,7 @@ export async function purgeFavoritesFromSupabase(): Promise<{ success: boolean; 
 export async function purgeBlockedUsersFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase.from('blocked_users').delete().neq('user_id', '___non_existent___');
+    const { error } = await deleteAllRows('blocked_users', 'user_id');
     if (error) {
       console.warn('Supabase purgeBlockedUsers error:', error.message);
       return { success: false, error: error.message };
@@ -716,7 +716,7 @@ export async function purgeBlockedUsersFromSupabase(): Promise<{ success: boolea
 export async function purgeCreatorGoalsFromSupabase(): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
-    const { error } = await supabase.from('creator_goals').delete().neq('creator_id', '___non_existent___');
+    const { error } = await deleteAllRows('creator_goals', 'creator_id');
     if (error) {
       console.warn('Supabase purgeCreatorGoals error:', error.message);
       return { success: false, error: error.message };
@@ -741,7 +741,7 @@ export async function resetFinancialBalancesInSupabase(type: 'caller_coins' | 'c
     }
     if (type === 'vip') updates.vip_tier = 'none';
 
-    const { error } = await (supabase.from('profiles') as any).update(updates).neq('id', '___non_existent___');
+    const { error } = await (supabase.from('profiles') as any).update(updates).not('id', 'is', null);
     if (error) {
       console.warn('Supabase resetFinancialBalances error:', error.message);
       return { success: false, error: error.message };
@@ -760,7 +760,7 @@ export async function purgeAllProfilesFromSupabase(keepAdmin: boolean = true): P
     if (keepAdmin) {
       query = query.neq('role', 'admin');
     } else {
-      query = query.neq('id', '___non_existent___');
+      query = query.not('id', 'is', null);
     }
     const { error } = await query;
     if (error) {
@@ -893,7 +893,7 @@ export async function bulkUpsertProfilesToSupabase(profiles: UserProfile[]): Pro
 
   // 2. Fallback to server-side admin bulk upsert API
   try {
-    const sRes = await fetch('/api/supabase/bulk-upsert-profiles', {
+    const sRes = await authFetch('/api/supabase/bulk-upsert-profiles', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profiles }),
@@ -2474,7 +2474,7 @@ export async function upsertUserDailyRewardsInSupabase(record: DailyRewardRecord
 
     if (error) {
       console.warn('[Supabase] upsertUserDailyRewards error:', error.message);
-      fetch('/api/rewards/update', {
+      authFetch('/api/rewards/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(record),

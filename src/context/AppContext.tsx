@@ -35,6 +35,7 @@ import {
   INITIAL_HOME_QUICK_LINKS,
   INITIAL_CREATOR_REVIEWS,
 } from '../constants/appDefaults';
+import { authFetch, getAccessToken } from '../utils/apiClient';
 import {
   fetchProfilesFromSupabase,
   upsertProfileToSupabase,
@@ -105,6 +106,7 @@ import { updateUserPassword, signOutSupabase } from '../services/supabaseAuthSer
 import { getUserEffectiveLocation } from '../utils/location';
 import { supabase } from '../lib/supabase';
 import type { Session, User as SupabaseAuthUser } from '@supabase/supabase-js';
+import { getPasswordPolicyError } from '../../shared/passwordPolicy';
 
 
 const DEFAULT_FALLBACK_USER: UserProfile = {
@@ -186,6 +188,8 @@ interface AppContextType {
   showToast: (title: string, message: string, type?: 'success' | 'error' | 'info' | 'warning') => void;
   hideToast: () => void;
   switchUser: (userOrId: string | UserProfile) => void;
+  /** Apply a profile only after password/OTP Auth succeeded (not passwordless impersonation). */
+  completeAuthenticatedLogin: (profile: UserProfile) => void;
   switchRolePersona: (role: UserRole) => void;
   loginUser: (identifier: string) => boolean;
   logoutUser: () => void;
@@ -732,6 +736,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const burnInFlightRef = useRef<Set<number>>(new Set());
   const endCallRef = useRef<() => void>(() => {});
   const applyBurnBalancesRef = useRef<(payload: any) => void>(() => {});
+  const applyWalletBalanceRef = useRef<(payload: {
+    userId?: string;
+    authId?: string;
+    email?: string;
+    coinBalance?: number;
+    earningsCoins?: number;
+  }) => void>(() => {});
 
   useEffect(() => {
     usersRef.current = users;
@@ -899,18 +910,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (session?.user?.id) {
           await applySupabaseSessionUser(session.user);
         } else {
-          // No live session: soft-rehydrate legacy/custom OTP flows that persist
-          // a profile id without a Supabase Auth JWT. Do not invent identity.
-          const savedLoggedIn = localStorage.getItem('livecall_logged_in');
-          const savedUserId = localStorage.getItem('livecall_current_user_id');
-          if (savedLoggedIn === 'true' && savedUserId) {
-            isLoggedInRef.current = true;
-            currentUserIdRef.current = savedUserId;
-            setCurrentUserId(savedUserId);
-            setIsLoggedIn(true);
-          } else if (savedLoggedIn === 'true' && !savedUserId) {
-            clearLocalAuthState();
-          }
+          clearLocalAuthState();
         }
       } catch (err) {
         console.warn('[Auth Rehydrate] bootstrap exception:', err);
@@ -1106,7 +1106,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           usersRef.current = finalProfiles;
 
           // Sync with server memory so WebSocket and WebRTC signaling have all live profiles
-          fetch('/api/users/sync-all', {
+          authFetch('/api/users/sync-all', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ users: finalProfiles, overwrite: true }),
@@ -1124,7 +1124,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       // If Supabase not reachable or unconfigured, pull latest from server database
-      const res = await fetch('/api/users');
+      const res = await authFetch('/api/users');
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.users)) {
@@ -1169,15 +1169,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const categoriesCleared: string[] = [];
       let currentUsersList = [...users];
 
-      // Hard stop realtime repopulation: unsubscribe from Supabase channels and close WS reconnect loop.
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (supabase as any).removeAllChannels?.();
-      } catch {}
-      try {
-        wsRef.current?.close();
-      } catch {}
-
       // 1. Users & Accounts
       const mockFemaleIds = currentUsersList.filter((u) => u.gender === 'female' || u.role === 'female_creator').map((u) => u.id);
       const mockMaleIds = currentUsersList.filter((u) => u.gender === 'male' && u.role === 'male_user').map((u) => u.id);
@@ -1208,6 +1199,77 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           categoriesCleared.push('Team Leader & Agency Data');
         }
       }
+
+      // Server/database purge must succeed before local UI state is wiped.
+      // Previously a 401 (no Auth JWT) was ignored, the UI reported success, then reload restored Supabase data.
+      if (options.syncWithServer !== false) {
+        const sessionRes = await supabase.auth.getSession();
+        const accessToken = sessionRes.data.session?.access_token;
+        if (!accessToken) {
+          throw new Error(
+            'Reset requires a live admin sign-in session. Sign out, sign in again, then retry Reset Data.'
+          );
+        }
+
+        const resetRes = await authFetch('/api/admin/granular-reset', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            clearMockUsers: Boolean(options.mockFemaleCreators || options.mockMaleCallers),
+            clearAllUsers: Boolean(options.customUsers && (options.mockFemaleCreators || options.mockMaleCallers)),
+            clearAdmin: Boolean(options.adminAccount),
+            clearActiveCalls: Boolean(options.surveillanceLogs || options.callLogs),
+            clearPresence: true,
+            mockIds: idsToRemove,
+            chatMessages: Boolean(options.chatMessages),
+            callLogs: Boolean(options.callLogs || options.quickMatchQueues),
+            friendRequests: Boolean(options.friendRequests || options.friendsList),
+            payoutRequests: Boolean(options.payoutRequests),
+            moderationReports: Boolean(options.surveillanceLogs || options.taxonomiesAndFlags),
+            feedPosts: Boolean(options.feedPosts),
+            favorites: Boolean(options.favoritesList),
+            blockedUsers: Boolean(options.blockedList),
+            homeBanners: Boolean(options.homeBanners),
+            homeQuickLinks: Boolean(options.quickLinks),
+            cmsPolicies: Boolean(options.policyDocuments),
+            systemSettings: Boolean(options.systemSettings),
+            coinPackages: Boolean(options.coinPackages),
+            virtualGiftsCatalog: Boolean(options.virtualGiftsCatalog),
+            creatorGoals: Boolean(options.creatorGoals),
+            creatorAnalytics: Boolean(options.creatorAnalytics),
+            dailyRewardsAndQuests: Boolean(options.dailyRewardsAndQuests),
+            taxonomiesAndFlags: Boolean(options.taxonomiesAndFlags),
+            purgeR2MediaStorage: Boolean(options.profilesMedia || options.r2PurgeAllUploads),
+            purgeAllR2Uploads: Boolean(options.r2PurgeAllUploads),
+            resetBalances: {
+              callerCoins: Boolean(options.userCoins),
+              creatorEarnings: Boolean(options.creatorEarnings),
+              vipTiers: Boolean(options.vipTiers),
+            },
+          }),
+        });
+
+        const resetJson = await resetRes.json().catch(() => ({} as any));
+        if (!resetRes.ok || resetJson?.success === false) {
+          const rawError = resetJson?.error;
+          const message =
+            (typeof rawError === 'string' && rawError) ||
+            rawError?.message ||
+            `Reset API failed (${resetRes.status}).`;
+          throw new Error(message);
+        }
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (supabase as any).removeAllChannels?.();
+      } catch {}
+      try {
+        wsRef.current?.close();
+      } catch {}
 
       if (idsToRemove.length > 0) {
         const removeSet = new Set(idsToRemove);
@@ -1416,59 +1478,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         categoriesCleared.push('System Settings');
       }
 
-      // 9. Sync with Server
+      // 9. Sync remaining in-memory users with the Node server after a successful database reset
       if (options.syncWithServer !== false) {
         try {
-          // Required now that destructive admin reset routes are requireAdmin-protected.
-          // Supabase auth token is used as Bearer authorization.
-          const sessionRes = await supabase.auth.getSession();
-          const accessToken = sessionRes.data.session?.access_token;
-          const authHeaders = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
-
-          await fetch('/api/admin/granular-reset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders },
-            body: JSON.stringify({
-              clearMockUsers: Boolean(options.mockFemaleCreators || options.mockMaleCallers),
-              clearAllUsers: Boolean(options.customUsers && (options.mockFemaleCreators || options.mockMaleCallers)),
-              clearAdmin: Boolean(options.adminAccount),
-              clearActiveCalls: Boolean(options.surveillanceLogs || options.callLogs),
-              clearPresence: true,
-              mockIds: idsToRemove,
-              chatMessages: Boolean(options.chatMessages),
-              callLogs: Boolean(options.callLogs || options.quickMatchQueues),
-              friendRequests: Boolean(options.friendRequests || options.friendsList),
-              payoutRequests: Boolean(options.payoutRequests),
-              moderationReports: Boolean(options.surveillanceLogs || options.taxonomiesAndFlags),
-              feedPosts: Boolean(options.feedPosts),
-              favorites: Boolean(options.favoritesList),
-              blockedUsers: Boolean(options.blockedList),
-              homeBanners: Boolean(options.homeBanners),
-              homeQuickLinks: Boolean(options.quickLinks),
-              cmsPolicies: Boolean(options.policyDocuments),
-              systemSettings: Boolean(options.systemSettings),
-              coinPackages: Boolean(options.coinPackages),
-              virtualGiftsCatalog: Boolean(options.virtualGiftsCatalog),
-              creatorGoals: Boolean(options.creatorGoals),
-              creatorAnalytics: Boolean(options.creatorAnalytics),
-              dailyRewardsAndQuests: Boolean(options.dailyRewardsAndQuests),
-              taxonomiesAndFlags: Boolean(options.taxonomiesAndFlags),
-              purgeR2MediaStorage: Boolean(options.profilesMedia || options.r2PurgeAllUploads),
-              purgeAllR2Uploads: Boolean(options.r2PurgeAllUploads),
-              resetBalances: {
-                callerCoins: Boolean(options.userCoins),
-                creatorEarnings: Boolean(options.creatorEarnings),
-                vipTiers: Boolean(options.vipTiers),
-              },
-            }),
-          });
-          await fetch('/api/users/sync-all', {
+          await authFetch('/api/users/sync-all', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ users: currentUsersList, overwrite: true }),
           });
         } catch (e) {
-          console.warn('Server sync warning during granular reset:', e);
+          console.warn('Server memory sync warning during granular reset:', e);
         }
       }
 
@@ -1652,18 +1671,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
         } else if (event.profile) {
           const liveProfile = event.profile;
+          const liveEmail = liveProfile.email ? liveProfile.email.toLowerCase().trim() : null;
           setUsers((prev) => {
-            const exists = prev.some((u) => u.id === liveProfile.id);
+            const exists = prev.some(
+              (u) =>
+                u.id === liveProfile.id ||
+                (liveProfile.authId && (u.authId === liveProfile.authId || u.id === liveProfile.authId)) ||
+                (liveEmail && u.email && u.email.toLowerCase().trim() === liveEmail)
+            );
             if (exists) {
               return prev.map((u) => {
-                if (u.id === liveProfile.id) {
-                  return {
-                    ...u,
-                    ...liveProfile,
-                    onlineStatus: getUserCallStatus(u.id, u.onlineStatus),
-                  };
-                }
-                return u;
+                const isMatch =
+                  u.id === liveProfile.id ||
+                  (liveProfile.authId && (u.authId === liveProfile.authId || u.id === liveProfile.authId)) ||
+                  (liveEmail && u.email && u.email.toLowerCase().trim() === liveEmail);
+                if (!isMatch) return u;
+                return {
+                  ...u,
+                  ...liveProfile,
+                  id: u.id === currentUserIdRef.current ? u.id : liveProfile.id || u.id,
+                  coinBalance:
+                    liveProfile.coinBalance !== undefined ? liveProfile.coinBalance : u.coinBalance,
+                  earningsCoins:
+                    liveProfile.earningsCoins !== undefined ? liveProfile.earningsCoins : u.earningsCoins,
+                  onlineStatus: getUserCallStatus(u.id, u.onlineStatus),
+                };
               });
             }
             return [{ ...liveProfile, onlineStatus: getUserCallStatus(liveProfile.id, 'offline') }, ...prev];
@@ -1859,7 +1891,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       if (isAuthVerify && verifyEmail && verifyCode) {
         // Auto verify from email link
-        fetch('/api/auth/verify-otp', {
+        authFetch('/api/auth/verify-otp', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: verifyEmail, code: verifyCode }),
@@ -1975,7 +2007,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       wsRef.current.send(JSON.stringify({ type: 'admin:get_active_calls' }));
     }
     try {
-      const res = await fetch('/api/admin/active-calls');
+      const res = await authFetch('/api/admin/active-calls');
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.activeCalls)) {
@@ -2017,7 +2049,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const currentProfile = activeUid ? usersRef.current.find((u) => u.id === activeUid) : null;
         const myStatus = (isLoggedInRef.current && activeUid) ? (currentProfile?.onlineStatus || 'online') : 'offline';
 
-        const res = await fetch('/api/presence/heartbeat', {
+        const res = await authFetch('/api/presence/heartbeat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: activeUid, status: myStatus }),
@@ -2086,7 +2118,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const syncUserDirectory = async () => {
       if (isCancelled || isResettingRef.current) return;
       try {
-        const res = await fetch('/api/users');
+        const res = await authFetch('/api/users');
         if (res.ok && !isCancelled) {
           const data = await res.json();
           if (data.success && Array.isArray(data.users)) {
@@ -2128,20 +2160,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       ws.onopen = () => {
         if (isCancelled) return;
-        const prevUser = prevUserIdRef.current;
-        const currentProfile = usersRef.current.find((u) => u.id === currentUserId);
-
-        ws?.send(
-          JSON.stringify({
-            type: 'auth',
-            userId: currentUserId,
-            prevUserId: prevUser,
-            userProfile: currentProfile,
-          })
-        );
-        prevUserIdRef.current = currentUserId;
-
-        ws?.send(JSON.stringify({ type: 'admin:get_active_calls' }));
+        void (async () => {
+          const accessToken = await getAccessToken();
+          ws?.send(
+            JSON.stringify({
+              type: 'auth',
+              accessToken,
+            })
+          );
+          prevUserIdRef.current = currentUserId;
+          ws?.send(JSON.stringify({ type: 'admin:get_active_calls' }));
+        })();
 
         // Send instant heartbeat
         ws?.send(JSON.stringify({ type: 'heartbeat', userId: currentUserId }));
@@ -2174,17 +2203,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               setUsers((prev) => {
                 const serverMap = new Map<string, UserProfile>(data.users.map((u: UserProfile) => [u.id, u]));
                 const merged = prev.map((u) => {
-                  // Never overwrite active logged-in user profile with stale background server broadcast
+                  const serverUser =
+                    serverMap.get(u.id) ||
+                    (u.authId
+                      ? data.users.find((su: UserProfile) => su.id === u.authId || su.authId === u.authId)
+                      : undefined) ||
+                    (u.email
+                      ? data.users.find(
+                          (su: UserProfile) =>
+                            su.email && su.email.toLowerCase().trim() === u.email.toLowerCase().trim()
+                        )
+                      : undefined);
+
                   if (u.id === currentUserIdRef.current) {
-                    return u;
+                    if (!serverUser) return u;
+                    return {
+                      ...u,
+                      coinBalance:
+                        serverUser.coinBalance !== undefined ? serverUser.coinBalance : u.coinBalance,
+                      earningsCoins:
+                        serverUser.earningsCoins !== undefined ? serverUser.earningsCoins : u.earningsCoins,
+                    };
                   }
-                  const serverUser = serverMap.get(u.id);
                   if (!serverUser) return u;
                   const callStatus = getUserCallStatus(u.id, serverUser.onlineStatus || u.onlineStatus || 'offline');
                   return { ...u, ...serverUser, onlineStatus: callStatus };
                 });
                 data.users.forEach((su: UserProfile) => {
-                  if (!merged.some((u) => u.id === su.id)) {
+                  const suEmail = su.email ? su.email.toLowerCase().trim() : null;
+                  const alreadyPresent = merged.some(
+                    (u) =>
+                      u.id === su.id ||
+                      (su.authId && (u.authId === su.authId || u.id === su.authId)) ||
+                      (suEmail && u.email && u.email.toLowerCase().trim() === suEmail)
+                  );
+                  if (!alreadyPresent) {
                     merged.push({ ...su, onlineStatus: getUserCallStatus(su.id, 'offline') });
                   }
                 });
@@ -2194,27 +2247,45 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           } else if (data.type === 'users:updated') {
             if (data.user) {
               setUsers((prev) => {
-                const exists = prev.some((u) => u.id === data.user.id);
-                if (exists) {
-                  return prev.map((u) => {
-                    if (u.id === data.user.id) {
-                      // Always take authoritative coin/earnings balances from server
-                      return {
-                        ...u,
-                        ...data.user,
-                        coinBalance:
-                          data.user.coinBalance !== undefined ? data.user.coinBalance : u.coinBalance,
-                        earningsCoins:
-                          data.user.earningsCoins !== undefined
-                            ? data.user.earningsCoins
-                            : u.earningsCoins,
-                        onlineStatus: u.id === currentUserIdRef.current ? u.onlineStatus : data.user.onlineStatus ?? u.onlineStatus,
-                      };
-                    }
-                    return u;
-                  });
-                }
-                return [data.user, ...prev];
+                const incoming = data.user as UserProfile;
+                const cleanEmail = incoming.email ? incoming.email.toLowerCase().trim() : null;
+                const authId = incoming.authId || null;
+                const remaining = prev.filter((u) => {
+                  if (u.id === incoming.id) return false;
+                  if (authId && (u.id === authId || u.authId === authId || u.authId === incoming.id)) return false;
+                  if (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail) return false;
+                  return true;
+                });
+                const currentId = currentUserIdRef.current;
+                const prior =
+                  prev.find((u) => u.id === incoming.id) ||
+                  prev.find((u) => currentId && u.id === currentId) ||
+                  prev.find((u) => cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail);
+                const keepLoggedInId =
+                  currentId &&
+                  prior &&
+                  (prior.id === currentId ||
+                    incoming.id === currentId ||
+                    incoming.authId === currentId ||
+                    (cleanEmail && prior.email && prior.email.toLowerCase().trim() === cleanEmail));
+                const mergedUser = {
+                  ...(prior || {}),
+                  ...incoming,
+                  id: keepLoggedInId ? currentId : incoming.id,
+                  coinBalance:
+                    incoming.coinBalance !== undefined
+                      ? incoming.coinBalance
+                      : prior?.coinBalance,
+                  earningsCoins:
+                    incoming.earningsCoins !== undefined
+                      ? incoming.earningsCoins
+                      : prior?.earningsCoins,
+                  onlineStatus:
+                    keepLoggedInId
+                      ? prior?.onlineStatus || incoming.onlineStatus
+                      : incoming.onlineStatus ?? prior?.onlineStatus,
+                };
+                return [mergedUser, ...remaining];
               });
             }
           } else if (data.type === 'call:incoming') {
@@ -2283,6 +2354,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               coinsBurned: data.coinsBurned,
               hostCoinsEarned: data.hostCoinsEarned,
               duplicate: data.duplicate,
+            });
+          } else if (data.type === 'wallet:balance_update') {
+            applyWalletBalanceRef.current({
+              userId: data.userId,
+              authId: data.authId,
+              email: data.email,
+              coinBalance: data.coinBalance,
+              earningsCoins: data.earningsCoins,
             });
           } else if (data.type === 'call:failed') {
             setActiveCall(null);
@@ -2554,7 +2633,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             navigator.sendBeacon('/api/supabase/update-status', payload);
             navigator.sendBeacon('/api/presence', payload);
           } else {
-            fetch('/api/supabase/update-status', {
+            authFetch('/api/supabase/update-status', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: payload,
@@ -2616,228 +2695,60 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }, 3000);
   };
 
-  const switchUser = (userOrId: string | UserProfile) => {
-    let target: UserProfile | undefined;
-    let userId: string = '';
+  const switchUser = (_userOrId: string | UserProfile) => {
+    showToast('Sign in required', 'Account switching without a password is disabled. Use email and password.', 'error');
+  };
 
-    if (typeof userOrId === 'object' && userOrId !== null) {
-      target = userOrId;
-      userId = userOrId.id;
-    } else {
-      const searchStr = String(userOrId).trim();
-      target = users.find(
-        (u) =>
-          u.id === searchStr ||
-          (u.email && u.email.toLowerCase() === searchStr.toLowerCase()) ||
-          u.name.toLowerCase() === searchStr.toLowerCase()
-      );
-      userId = target ? target.id : searchStr;
-    }
-
-    if (!target) {
-      console.warn('User target not found for switchUser:', userOrId);
+  const completeAuthenticatedLogin = (profile: UserProfile) => {
+    if (!profile?.id) {
+      showToast('Sign in failed', 'Missing authenticated profile.', 'error');
       return;
     }
-
-    if (target.isBanned) {
-      const bannedUntil = target.bannedUntil;
-      if (bannedUntil) {
-        const expiryTime = new Date(bannedUntil).getTime();
-        if (Date.now() < expiryTime) {
-          const banner = target.bannedByRole === 'team_leader' ? 'your Team Leader' : 'Administration';
-          const reason = target.banReason || 'Policy review';
-          showToast(
-            'Account Suspended 🚫',
-            `This host is suspended by ${banner} until ${new Date(bannedUntil).toLocaleString()}. Reason: "${reason}". Login blocked.`,
-            'error'
-          );
-          return;
-        }
-      } else {
-        showToast(
-          'Account Suspended 🚫',
-          `This account is permanently suspended. Reason: "${target.banReason || 'Violation'}"`,
-          'error'
-        );
-        return;
-      }
-    }
-
-    const oldId = currentUserId;
-    if (oldId && oldId !== userId) {
-      updateUserStatusInSupabase(oldId, 'offline').catch(() => { });
-      fetch('/api/supabase/update-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: oldId, status: 'offline' }),
-      }).catch(() => { });
-    }
-
+    const activeId = profile.id;
+    const oldId = currentUserIdRef.current;
     isLoggedInRef.current = true;
-    currentUserIdRef.current = userId;
-    setCurrentUserId(userId);
+    currentUserIdRef.current = activeId;
+    setCurrentUserId(activeId);
     setIsLoggedIn(true);
     localStorage.setItem('livecall_logged_in', 'true');
-    localStorage.setItem('livecall_current_user_id', userId);
+    localStorage.setItem('livecall_current_user_id', activeId);
 
-    const activeProfile: UserProfile = { ...(target as UserProfile), id: userId, onlineStatus: 'online' as const };
-
+    const activeProfile: UserProfile = { ...profile, id: activeId, onlineStatus: 'online' };
     setUsers((prev) => {
       const cleanEmail = activeProfile.email ? activeProfile.email.toLowerCase().trim() : null;
-      // Filter out previous occurrences by ID or email
       const remaining = prev.filter((u) => {
-        if (u.id === userId) return false;
+        if (u.id === activeId) return false;
+        if (activeProfile.authId && (u.id === activeProfile.authId || u.authId === activeProfile.authId)) return false;
         if (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail) return false;
         return true;
       });
-
-      const next = [
-        activeProfile,
-        ...remaining.map((u) => (oldId && u.id === oldId && oldId !== userId ? { ...u, onlineStatus: 'offline' as const } : u)),
-      ];
+      const next = [activeProfile, ...remaining];
       usersRef.current = next;
       return next;
     });
 
-    updateUserStatusInSupabase(userId, 'online').catch(() => { });
-    fetch('/api/supabase/update-status', {
+    updateUserStatusInSupabase(activeId, 'online').catch(() => {});
+    authFetch('/api/supabase/update-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: userId, status: 'online' }),
-    }).catch(() => { });
-
-    try {
-      localStorage.setItem('livecall_presence_trigger', `${userId}_switch_${Date.now()}`);
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('livecall_presence_sync_channel');
-        bc.postMessage({ type: 'user_switched', userId });
-        bc.close();
-      }
-    } catch (e) { }
+      body: JSON.stringify({ status: 'online' }),
+    }).catch(() => {});
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'auth',
-          userId: userId,
-          prevUserId: oldId,
-          userProfile: target,
-        })
-      );
+      void getAccessToken().then((accessToken) => {
+        wsRef.current?.send(JSON.stringify({ type: 'auth', accessToken, prevUserId: oldId }));
+      });
     }
   };
 
-  const switchRolePersona = (role: UserRole) => {
-    let target = users.find((u) => u.role === role);
-    if (!target && role === 'team_leader') {
-      target = DEFAULT_TEAM_LEADER_USER;
-      setUsers((prev) => [DEFAULT_TEAM_LEADER_USER, ...prev]);
-    }
-    if (target) {
-      const oldId = currentUserId;
-      if (oldId && oldId !== target.id) {
-        updateUserStatusInSupabase(oldId, 'offline').catch(() => { });
-        fetch('/api/supabase/update-status', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: oldId, status: 'offline' }),
-        }).catch(() => { });
-      }
-      isLoggedInRef.current = true;
-      currentUserIdRef.current = target.id;
-      setCurrentUserId(target.id);
-      setIsLoggedIn(true);
-      localStorage.setItem('livecall_logged_in', 'true');
-      localStorage.setItem('livecall_current_user_id', target.id);
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === target.id) return { ...u, onlineStatus: 'online' };
-          if (oldId && u.id === oldId && oldId !== target.id) return { ...u, onlineStatus: 'offline' };
-          return u;
-        })
-      );
-      updateUserStatusInSupabase(target.id, 'online').catch(() => { });
-      fetch('/api/supabase/update-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: target.id, status: 'online' }),
-      }).catch(() => { });
-      try {
-        localStorage.setItem('livecall_presence_trigger', `${target.id}_switch_${Date.now()}`);
-        if (typeof BroadcastChannel !== 'undefined') {
-          const bc = new BroadcastChannel('livecall_presence_sync_channel');
-          bc.postMessage({ type: 'user_switched', userId: target.id });
-          bc.close();
-        }
-      } catch (e) { }
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'auth',
-            userId: target.id,
-            prevUserId: oldId,
-            userProfile: target,
-          })
-        );
-      }
-      showToast('Persona Switched', `Active Mode: ${(role || '').toUpperCase().replace('_', ' ')}`, 'info');
-    }
+  const switchRolePersona = (_role: UserRole) => {
+    showToast('Sign in required', 'Persona switching is disabled. Sign in with the correct account.', 'error');
   };
 
-  const loginUser = (identifier: string): boolean => {
-    const cleanId = identifier.trim().toLowerCase();
-    const found = users.find(
-      (u) =>
-        u.id.toLowerCase() === cleanId ||
-        (u.email && u.email.toLowerCase() === cleanId) ||
-        u.name.toLowerCase() === cleanId ||
-        (u.phone && u.phone === cleanId)
-    );
-    if (found) {
-      const oldId = currentUserId;
-      if (oldId && oldId !== found.id) {
-        updateUserStatusInSupabase(oldId, 'offline').catch(() => { });
-        fetch('/api/supabase/update-status', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: oldId, status: 'offline' }),
-        }).catch(() => { });
-      }
-      isLoggedInRef.current = true;
-      currentUserIdRef.current = found.id;
-      setCurrentUserId(found.id);
-      setIsLoggedIn(true);
-      localStorage.setItem('livecall_logged_in', 'true');
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === found.id) return { ...u, onlineStatus: 'online' };
-          if (oldId && u.id === oldId && oldId !== found.id) return { ...u, onlineStatus: 'offline' };
-          return u;
-        })
-      );
-      updateUserStatusInSupabase(found.id, 'online').catch(() => { });
-      fetch('/api/supabase/update-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: found.id, status: 'online' }),
-      }).catch(() => { });
-      localStorage.setItem('livecall_current_user_id', found.id);
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'auth',
-            userId: found.id,
-            prevUserId: oldId,
-            userProfile: found,
-          })
-        );
-      }
-      showToast('Welcome Back! 👋', `Logged in as ${found.name}`, 'success');
-      return true;
-    }
+  const loginUser = (_identifier: string): boolean => {
+    showToast('Sign in required', 'Use email and password to log in.', 'error');
     return false;
   };
-
   const logoutUser = () => {
     const prevId = currentUserId;
     if (activeCall) {
@@ -2856,12 +2767,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
     }
     updateUserStatusInSupabase(prevId, 'offline').catch(() => { });
-    fetch('/api/supabase/update-status', {
+    authFetch('/api/supabase/update-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: prevId, status: 'offline' }),
     }).catch(() => { });
-    fetch('/api/presence', {
+    authFetch('/api/presence', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: prevId, status: 'offline' }),
@@ -2887,54 +2798,88 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const registerUser = (userData: Partial<UserProfile>): UserProfile => {
-    const newId = (userData.id && isValidUuid(userData.id)) ? userData.id : generateValidUuid();
-    const isFemale = userData.gender === 'female';
-    const role: UserRole = userData.role || (isFemale ? 'female_creator' : 'male_user');
+    const cleanEmail = userData.email ? userData.email.toLowerCase().trim() : null;
+
+    // Collapse duplicate registration attempts for the same email (local + prior stubs)
+    const existingByEmail =
+      cleanEmail
+        ? usersRef.current.find((u) => u.email && u.email.toLowerCase().trim() === cleanEmail)
+        : undefined;
+    const existingById =
+      userData.id
+        ? usersRef.current.find((u) => u.id === userData.id || u.authId === userData.id)
+        : undefined;
+    const existing = existingByEmail || existingById;
+
+    const newId =
+      (existing?.id && isValidUuid(existing.id) && existing.id) ||
+      (userData.id && isValidUuid(userData.id) && userData.id) ||
+      generateValidUuid();
+    const isFemale = userData.gender === 'female' || existing?.gender === 'female';
+    const role: UserRole =
+      userData.role || existing?.role || (isFemale ? 'female_creator' : 'male_user');
 
     const newUser: UserProfile = {
+      ...(existing || {}),
       id: newId,
-      authId: userData.authId || newId,
-      name: userData.name || 'New Member',
-      email: userData.email || 'user@example.com',
-      gender: userData.gender || (role === 'female_creator' ? 'female' : 'male'),
+      authId: userData.authId || existing?.authId || newId,
+      name: userData.name || existing?.name || 'New Member',
+      email: cleanEmail || existing?.email || 'user@example.com',
+      gender: userData.gender || existing?.gender || (role === 'female_creator' || role === 'female_user' ? 'female' : 'male'),
       genderLocked: true, // Permanent Gender Lock
       role: role,
-      age: userData.age || 21,
-      dob: userData.dob || '2003-01-01',
-      nationality: userData.nationality || 'United States',
-      countryCode: userData.countryCode || 'US',
-      spokenLanguages: userData.spokenLanguages || ['English'],
-      bio: userData.bio || 'Excited to make friends and chat!',
-      interests: userData.interests || ['Music', 'Travel'],
-      interestedIn: userData.interestedIn || (isFemale ? ['male'] : ['female']),
-      tags: userData.tags || [],
-      avatarUrl: userData.avatarUrl || (isFemale ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400' : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400'),
-      gallery: userData.gallery || [],
-      introVideoUrl: userData.introVideoUrl || undefined,
-      isVerified: userData.isVerified || false,
-      isOnboarded: userData.isOnboarded ?? false,
-      agreedToTerms: userData.agreedToTerms ?? true,
-      agreedToAdultTerms: userData.agreedToAdultTerms ?? (!isFemale),
-      agreedToHostTerms: userData.agreedToHostTerms ?? (isFemale),
-      kycStatus: userData.kycStatus || 'unsubmitted',
+      age: userData.age || existing?.age || 21,
+      dob: userData.dob || existing?.dob || '2003-01-01',
+      nationality: userData.nationality || existing?.nationality || 'United States',
+      countryCode: userData.countryCode || existing?.countryCode || 'US',
+      spokenLanguages: userData.spokenLanguages || existing?.spokenLanguages || ['English'],
+      bio: userData.bio || existing?.bio || 'Excited to make friends and chat!',
+      interests: userData.interests || existing?.interests || ['Music', 'Travel'],
+      interestedIn: userData.interestedIn || existing?.interestedIn || (isFemale ? ['male'] : ['female']),
+      tags: userData.tags || existing?.tags || [],
+      avatarUrl:
+        userData.avatarUrl ||
+        existing?.avatarUrl ||
+        (isFemale
+          ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'
+          : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400'),
+      gallery: userData.gallery || existing?.gallery || [],
+      introVideoUrl: userData.introVideoUrl || existing?.introVideoUrl || undefined,
+      isVerified: userData.isVerified || existing?.isVerified || false,
+      isOnboarded: userData.isOnboarded ?? existing?.isOnboarded ?? false,
+      agreedToTerms: userData.agreedToTerms ?? existing?.agreedToTerms ?? true,
+      agreedToAdultTerms: userData.agreedToAdultTerms ?? existing?.agreedToAdultTerms ?? !isFemale,
+      agreedToHostTerms: userData.agreedToHostTerms ?? existing?.agreedToHostTerms ?? isFemale,
+      kycStatus: userData.kycStatus || existing?.kycStatus || 'unsubmitted',
       onlineStatus: 'online',
-      createdAt: new Date().toISOString().split('T')[0],
-      coinBalance: isFemale ? 0 : 50, // 50 bonus coins for new male sign up
-      hourlyCoinRate: isFemale ? (userData.hourlyCoinRate || systemSettings.coinBurnRatePerMin) : 0,
-      earningsCoins: 0,
-      totalLifetimeEarnedUSD: 0,
-      emailVerified: userData.emailVerified ?? true,
+      createdAt: existing?.createdAt || new Date().toISOString().split('T')[0],
+      coinBalance: existing?.coinBalance ?? (isFemale ? 0 : 50),
+      hourlyCoinRate: isFemale
+        ? userData.hourlyCoinRate || existing?.hourlyCoinRate || systemSettings.coinBurnRatePerMin
+        : 0,
+      earningsCoins: existing?.earningsCoins || 0,
+      totalLifetimeEarnedUSD: existing?.totalLifetimeEarnedUSD || 0,
+      emailVerified: userData.emailVerified ?? existing?.emailVerified ?? true,
     };
 
-    setUsers((prev) => [newUser, ...prev]);
-    usersRef.current = [newUser, ...usersRef.current];
+    setUsers((prev) => {
+      const remaining = prev.filter((u) => {
+        if (u.id === newId) return false;
+        if (newUser.authId && (u.authId === newUser.authId || u.id === newUser.authId)) return false;
+        if (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail) return false;
+        return true;
+      });
+      const next = [newUser, ...remaining];
+      usersRef.current = next;
+      return next;
+    });
     setCurrentUserId(newId);
     setIsLoggedIn(true);
     localStorage.setItem('livecall_logged_in', 'true');
     localStorage.setItem('livecall_current_user_id', newId);
 
     // Sync new registered user immediately to server
-    fetch('/api/users', {
+    authFetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newUser),
@@ -2951,14 +2896,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'auth',
-          userId: newId,
-          prevUserId: currentUserId,
-          userProfile: newUser,
-        })
-      );
+      void getAccessToken().then((accessToken) => {
+        wsRef.current?.send(JSON.stringify({ type: 'auth', accessToken }));
+      });
     }
 
     showToast(
@@ -3042,7 +2982,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       // 3. Sync to node server & broadcast
-      fetch('/api/users', {
+      authFetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedProfile),
@@ -3061,10 +3001,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     currentPassword: string,
     newPassword: string
   ): { success: boolean; message: string } => {
-    if (!newPassword || newPassword.trim().length < 6) {
-      const msg = 'New password must be at least 6 characters long.';
-      showToast('Password Error', msg, 'error');
-      return { success: false, message: msg };
+    const policyError = getPasswordPolicyError(newPassword);
+    if (policyError) {
+      showToast('Password Error', policyError, 'error');
+      return { success: false, message: policyError };
     }
 
     const targetUser = users.find((u) => u.id === userId);
@@ -3097,7 +3037,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }).catch((e) => console.warn('Supabase Auth password update warning:', e));
 
     if (updatedObj) {
-      fetch('/api/users', {
+      authFetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedObj),
@@ -3121,15 +3061,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!pkg) return;
 
     const totalToAdd = pkg.coins + pkg.bonusCoins;
+    const target = usersRef.current.find((u) => u.id === currentUser.id) || currentUser;
+    const updatedBal = (Number(target.coinBalance) || 0) + totalToAdd;
+    const updatedUserObj: UserProfile = { ...target, coinBalance: updatedBal };
 
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return { ...u, coinBalance: u.coinBalance + totalToAdd };
-        }
-        return u;
-      })
-    );
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === target.id || u.authId === target.id ? { ...u, coinBalance: updatedBal } : u));
+      usersRef.current = next;
+      return next;
+    });
+
+    if (isSupabaseConfigured()) {
+      updateUserProfileInSupabase(target.id, {
+        coinBalance: updatedBal,
+        email: target.email,
+      }).catch(() => {});
+      upsertProfileToSupabase(updatedUserObj).catch(() => {});
+    }
+
+    authFetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedUserObj),
+    }).catch(() => {});
 
     showToast(
       'Coins Purchased! 🪙',
@@ -3276,7 +3230,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     // Sync call end to backend signaling server
-    fetch('/api/calls/sync', {
+    authFetch('/api/calls/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3322,7 +3276,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     // Sync call end to backend signaling server
-    fetch('/api/calls/sync', {
+    authFetch('/api/calls/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3512,6 +3466,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   applyBurnBalancesRef.current = applyBurnBalances;
 
+  applyWalletBalanceRef.current = (payload) => {
+    const { userId, authId, email, coinBalance, earningsCoins } = payload;
+    if (coinBalance === undefined && earningsCoins === undefined) return;
+    const cleanEmail = email ? String(email).toLowerCase().trim() : null;
+    setUsers((prev) => {
+      let matched = false;
+      const next = prev.map((u) => {
+        const isMatch =
+          (userId && (u.id === userId || u.authId === userId)) ||
+          (authId && (u.id === authId || u.authId === authId)) ||
+          (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail);
+        if (!isMatch) return u;
+        matched = true;
+        return {
+          ...u,
+          coinBalance: coinBalance !== undefined ? Number(coinBalance) : u.coinBalance,
+          earningsCoins: earningsCoins !== undefined ? Number(earningsCoins) : u.earningsCoins,
+        };
+      });
+      if (!matched) return prev;
+      usersRef.current = next;
+      return next;
+    });
+  };
+
   // Active call timer — CALLER ONLY triggers server-authoritative minute billing
   useEffect(() => {
     if (!activeCall || activeCall.status !== 'active') {
@@ -3552,7 +3531,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           return;
         }
 
-        const res = await fetch('/api/calls/burn', {
+        const res = await authFetch('/api/calls/burn', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -3751,7 +3730,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
 
     // Sync gift transaction to backend server & Supabase Admin
-    fetch('/api/gifts/send', {
+    authFetch('/api/gifts/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4034,7 +4013,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Load initial LiveKit config from server on mount
   useEffect(() => {
-    fetch('/api/livekit/config')
+    authFetch('/api/livekit/config')
       .then((res) => res.json())
       .then((data) => {
         if (data && (data.apiKey || data.wsUrl)) {
@@ -4093,7 +4072,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const updateLiveKitConfig = async (config: { apiKey: string; apiSecret: string; wsUrl: string }): Promise<boolean> => {
     try {
-      const res = await fetch('/api/livekit/config', {
+      const res = await authFetch('/api/livekit/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
@@ -4305,7 +4284,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     // 3. Sync to node server & broadcast
-    fetch('/api/users', {
+    authFetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(merged),
@@ -4359,7 +4338,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         updateUserProfileInSupabase(userId, { isVerified: nextVerified }).catch(() => {});
         upsertProfileToSupabase(updatedProfile).catch(() => {});
       }
-      fetch('/api/users', {
+      authFetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedProfile),
@@ -4388,7 +4367,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         bc.close();
       }
     } catch (e) { }
-    fetch('/api/presence', {
+    authFetch('/api/presence', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, status: newStatus }),
@@ -4406,33 +4385,62 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const manualGrantCoins = (userId: string, amount: number, reason: string = 'Manual Admin Credit') => {
-    const targetUser = usersRef.current.find((u) => u.id === userId) || users.find((u) => u.id === userId);
+    const targetUser =
+      usersRef.current.find((u) => u.id === userId) ||
+      usersRef.current.find((u) => u.authId === userId) ||
+      users.find((u) => u.id === userId) ||
+      users.find((u) => u.authId === userId);
     if (!targetUser) return;
 
     const currentBal = Number(targetUser.coinBalance) || 0;
     const updatedBal = Math.max(0, currentBal + Number(amount));
     const targetName = targetUser.name || targetUser.id;
     const updatedUserObj: UserProfile = { ...targetUser, coinBalance: updatedBal };
+    const targetEmail = targetUser.email ? targetUser.email.toLowerCase().trim() : null;
 
-    // 1. Update React state & usersRef & localStorage
+    // 1. Update every in-memory match (id / authId / email) so the live wallet HUD refreshes
     setUsers((prev) => {
-      const next = prev.map((u) => (u.id === userId ? updatedUserObj : u));
+      const next = prev.map((u) => {
+        const isMatch =
+          u.id === targetUser.id ||
+          (targetUser.authId && (u.authId === targetUser.authId || u.id === targetUser.authId)) ||
+          (targetEmail && u.email && u.email.toLowerCase().trim() === targetEmail);
+        return isMatch ? { ...u, coinBalance: updatedBal } : u;
+      });
       usersRef.current = next;
       return next;
     });
 
-    // 2. Direct Supabase coin balance update
+    applyWalletBalanceRef.current({
+      userId: targetUser.id,
+      authId: targetUser.authId,
+      email: targetUser.email,
+      coinBalance: updatedBal,
+      earningsCoins: targetUser.earningsCoins,
+    });
+
+    // 2. Persist coin_balance by id, auth_id, and email
     if (isSupabaseConfigured()) {
-      updateUserProfileInSupabase(userId, { coinBalance: updatedBal }).catch((e) =>
-        console.warn('Supabase manual coin grant save error:', e)
-      );
+      updateUserProfileInSupabase(targetUser.id, {
+        coinBalance: updatedBal,
+        email: targetUser.email,
+      }).catch((e) => console.warn('Supabase manual coin grant save error:', e));
       upsertProfileToSupabase(updatedUserObj).catch((e) =>
         console.warn('Supabase manual coin grant upsert error:', e)
       );
     }
 
-    // 3. Server API Sync & Real-time WebSocket Broadcast
-    fetch('/api/users', {
+    authFetch('/api/supabase/update-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: targetUser.id,
+        updates: { coinBalance: updatedBal, email: targetUser.email },
+      }),
+    }).catch(() => {});
+
+    // 3. Server memory + realtime wallet broadcast to the user's session
+    authFetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updatedUserObj),
@@ -4492,7 +4500,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       password: (leaderData as any).password || 'leader123',
     };
 
-    fetch('/api/users', {
+    authFetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(leaderPayload),
@@ -4564,13 +4572,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     // Send to server via dedicated Team Leader creator creation endpoint and standard users API
-    fetch('/api/teamleader/creators', {
+    authFetch('/api/teamleader/creators', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(creatorPayload),
     }).catch((e) => console.warn('Team Leader creator sync notice:', e));
 
-    fetch('/api/users', {
+    authFetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(creatorPayload),
@@ -4600,12 +4608,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           if (isSupabaseConfigured()) {
             upsertProfileToSupabase(updated).catch(() => { });
           }
-          fetch('/api/teamleader/override-rate', {
+          authFetch('/api/teamleader/override-rate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ creatorId, rate: overrideRate }),
           }).catch(() => { });
-          fetch('/api/users', {
+          authFetch('/api/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updated),
@@ -4657,7 +4665,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
 
       // Server sync
-      fetch('/api/teamleader/ban-creator', {
+      authFetch('/api/teamleader/ban-creator', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -4706,7 +4714,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return next;
       });
 
-      fetch('/api/teamleader/unban-creator', {
+      authFetch('/api/teamleader/unban-creator', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ creatorId }),
@@ -4731,7 +4739,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return next;
       });
 
-      fetch('/api/teamleader/delete-creator', {
+      authFetch('/api/teamleader/delete-creator', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ creatorId }),
@@ -4866,7 +4874,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
 
     // Sync transaction to server
-    fetch('/api/gifts/send', {
+    authFetch('/api/gifts/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -6183,7 +6191,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       // Dispatch to server endpoint for WebRTC / WebSocket broadcast
       try {
-        await fetch('/api/admin/terminate-call', {
+        await authFetch('/api/admin/terminate-call', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -6193,7 +6201,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }),
         });
 
-        await fetch('/api/calls/sync', {
+        await authFetch('/api/calls/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -6262,7 +6270,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const text = warningText.trim() || 'Automated Safety Advisory: Please maintain respectful conduct.';
 
       try {
-        await fetch('/api/admin/issue-warning', {
+        await authFetch('/api/admin/issue-warning', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -6385,7 +6393,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
 
     // Sync call to backend signaling server so server presence marks both users busy
-    fetch('/api/calls/sync', {
+    authFetch('/api/calls/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -6640,6 +6648,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         showToast,
         hideToast,
         switchUser,
+        completeAuthenticatedLogin,
         switchRolePersona,
         loginUser,
         logoutUser,

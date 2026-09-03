@@ -10,7 +10,14 @@ import {
   saveLocalMediaBuffer,
   isR2Configured,
 } from '../r2Storage';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, requireAdmin } from '../middleware/auth';
+
+function resolveUploadOwnerUserId(req: express.Request): string | null {
+  const profileId = String((req as any).profileId || (req as any).profile?.id || '').trim();
+  if (profileId) return profileId;
+  const authId = String((req as any).user?.id || '').trim();
+  return authId || null;
+}
 
 export function createStorageRouter(_ctx: ServerRuntime): Router {
   const router = Router();
@@ -21,10 +28,9 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
       const { filename, contentType, fileSize, category } = req.body || {};
       if (!filename) return res.status(400).json({ error: 'Filename is required' });
 
-      // Enforce authenticated user as folder owner — never trust client-supplied userId
-      const ownerUserId = String((req as any).user?.id || '').trim();
+      const ownerUserId = resolveUploadOwnerUserId(req);
       if (!ownerUserId) {
-        return res.status(401).json({ error: 'Authenticated user id is required' });
+        return res.status(400).json({ error: 'A valid userId is required for storage uploads' });
       }
 
       const data = await generateR2PresignedUploadUrl({
@@ -42,9 +48,9 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   });
 
   // Fallback Base64 / Binary server upload directly to R2 and memory cache
-  router.post('/upload', async (req, res) => {
+  router.post('/upload', requireAuth, async (req, res) => {
     try {
-      const { filename, contentType, base64Data, userId, category } = req.body || {};
+      const { filename, contentType, base64Data, category } = req.body || {};
       if (!base64Data) return res.status(400).json({ error: 'base64Data is required' });
 
       const matches = base64Data.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
@@ -57,12 +63,20 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
         buffer = Buffer.from(base64Data, 'base64');
       }
 
+      if (!buffer.length) {
+        return res.status(400).json({ error: 'Uploaded file payload is empty' });
+      }
+
       const cleanName = (filename || 'upload.jpg').replace(/[^a-zA-Z0-9.-]/g, '_');
       const uniquePrefix = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      const storageKey = `uploads/${category || 'media'}/${userId || 'user'}/${uniquePrefix}_${cleanName}`;
+      const ownerUserId = resolveUploadOwnerUserId(req);
+      if (!ownerUserId) {
+        return res.status(401).json({ error: 'Authenticated user is required for storage uploads' });
+      }
+      const storageKey = `uploads/${category || 'media'}/${ownerUserId}/${uniquePrefix}_${cleanName}`;
 
       const publicUrl = await uploadBufferToR2ServerSide(storageKey, buffer, mime, {
-        'uploader-user-id': userId || 'user',
+        'uploader-user-id': ownerUserId,
         'media-category': category || 'media',
       });
 
@@ -124,7 +138,7 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   });
 
   // Fetch R2 credentials & status (masked for security)
-  router.get('/config', (req, res) => {
+  router.get('/config', requireAdmin, (req, res) => {
     const cfg = getR2RuntimeConfig();
     return res.json({
       configured: isR2Configured(),
@@ -136,7 +150,7 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   });
 
   // Update R2 credentials at runtime
-  router.post('/config', (req, res) => {
+  router.post('/config', requireAdmin, (req, res) => {
     try {
       const { accountId, accessKeyId, secretAccessKey, bucketName, publicUrl } = req.body || {};
       updateR2RuntimeConfig({
@@ -153,7 +167,7 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   });
 
   // Test Cloudflare R2 live connectivity
-  router.post('/test', async (req, res) => {
+  router.post('/test', requireAdmin, async (req, res) => {
     try {
       const result = await testR2Connectivity(req.body);
       return res.json(result);
@@ -163,7 +177,7 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   });
 
   // POST Test Cloudflare R2 Bucket Connection
-  router.post('/test-connection', async (req, res) => {
+  router.post('/test-connection', requireAdmin, async (req, res) => {
     try {
       const { accountId, accessKeyId, secretAccessKey, bucketName, publicUrl } = req.body || {};
       const overrideConfig = (accountId || accessKeyId || secretAccessKey || bucketName)

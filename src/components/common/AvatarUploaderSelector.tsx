@@ -11,7 +11,7 @@ import {
   User,
   RefreshCw,
 } from 'lucide-react';
-import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
+import { uploadMediaDirectlyToR2, isPersistableMediaUrl } from '../../utils/r2Storage';
 import {
   FEMALE_PORTRAIT_AVATARS,
   MALE_PORTRAIT_AVATARS,
@@ -69,15 +69,6 @@ export const AvatarUploaderSelector: React.FC<AvatarUploaderSelectorProps> = ({
     setIsUploading(true);
     setUploadProgress(20);
 
-    // 1. Immediately create a high-fidelity data URL for instant and permanent local preview
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      if (e.target?.result) {
-        onAvatarChange(e.target.result as string);
-      }
-    };
-    reader.readAsDataURL(file);
-
     try {
       const res = await uploadMediaDirectlyToR2({
         file,
@@ -85,15 +76,17 @@ export const AvatarUploaderSelector: React.FC<AvatarUploaderSelectorProps> = ({
         onProgress: (p) => setUploadProgress(Math.max(20, p)),
       });
 
-      if (res && res.publicUrl) {
+      if (res?.publicUrl && isPersistableMediaUrl(res.publicUrl)) {
         onAvatarChange(res.publicUrl);
         setUploadSuccess(true);
         setTimeout(() => setUploadSuccess(false), 4000);
+      } else {
+        throw new Error('Upload completed but no cloud storage URL was returned');
       }
     } catch (err: any) {
-      console.warn('Avatar upload to storage note:', err.message);
-      // Keep the reader data URL active so user never loses their uploaded picture
-      setUploadSuccess(true);
+      console.error('Avatar upload to storage failed:', err?.message || err);
+      setUploadError(err?.message || 'Failed to upload image to Cloudflare R2. Please try again.');
+      setUploadSuccess(false);
     } finally {
       setIsUploading(false);
       setUploadProgress(0);

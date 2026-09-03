@@ -11,6 +11,8 @@ import { LanguageSelector } from '../common/LanguageSelector';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { AgencyHostLeaderboard } from './AgencyHostLeaderboard';
 import { AgencyMilestoneAlerts } from './AgencyMilestoneAlerts';
+import { PasswordStrengthField } from '../auth/PasswordStrengthField';
+import { getPasswordPolicyError, isPasswordPolicyValid } from '../../../shared/passwordPolicy';
 import {
   Users,
   UserPlus,
@@ -29,7 +31,6 @@ import {
   AlertTriangle,
   Sparkles,
   Eye,
-  EyeOff,
   Sliders,
   Award,
   Globe,
@@ -110,7 +111,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   const [isProcessingBan, setIsProcessingBan] = useState(false);
 
   // New Creator Form State & Uploading
-  const [showCreatorPassword, setShowCreatorPassword] = useState(false);
   const [isUploadingCreatorAvatar, setIsUploadingCreatorAvatar] = useState(false);
   const [uploadCreatorProgress, setUploadCreatorProgress] = useState(0);
   const [creatorAvatarError, setCreatorAvatarError] = useState<string | null>(null);
@@ -170,7 +170,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   const [newCreatorForm, setNewCreatorForm] = useState({
     name: '',
     email: '',
-    password: 'creator123',
+    password: '',
     age: 22,
     nationality: 'Spain',
     countryCode: 'ES',
@@ -308,6 +308,12 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       return;
     }
 
+    const passwordError = getPasswordPolicyError(newCreatorForm.password);
+    if (passwordError) {
+      showToast('Password Requirements', passwordError, 'error');
+      return;
+    }
+
     const languages = newCreatorForm.spokenLanguages
       .split(',')
       .map((s) => s.trim())
@@ -331,7 +337,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     createCreatorByTeamLeader({
       name: newCreatorForm.name,
       email: newCreatorForm.email || `creator_${Date.now().toString().slice(-4)}@livecall.app`,
-      password: newCreatorForm.password || 'creator123',
+      password: newCreatorForm.password,
       age: Number(newCreatorForm.age) || 22,
       nationality: newCreatorForm.nationality,
       countryCode: newCreatorForm.countryCode,
@@ -348,7 +354,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     setNewCreatorForm({
       name: '',
       email: '',
-      password: 'creator123',
+      password: '',
       age: 22,
       nationality: 'Spain',
       countryCode: 'ES',
@@ -1436,31 +1442,17 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 </div>
               </div>
 
-              {/* Password with Eye Toggle & Age */}
+              {/* Password with strength meter & Age */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">
-                    Default Password <span className="text-rose-400">*</span>
-                  </label>
-                  <div className="relative flex items-center">
-                    <input
-                      type={showCreatorPassword ? 'text' : 'password'}
-                      required
-                      placeholder="creator123"
-                      value={newCreatorForm.password}
-                      onChange={(e) => setNewCreatorForm({ ...newCreatorForm, password: e.target.value })}
-                      className="w-full pl-3 pr-10 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowCreatorPassword(!showCreatorPassword)}
-                      className="absolute right-2.5 p-1 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                      title={showCreatorPassword ? 'Hide Password' : 'Show Password'}
-                    >
-                      {showCreatorPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
+                <PasswordStrengthField
+                  id="tl-creator-password"
+                  label="Default Password"
+                  value={newCreatorForm.password}
+                  onChange={(password) => setNewCreatorForm({ ...newCreatorForm, password })}
+                  placeholder="Create a strong password"
+                  autoComplete="new-password"
+                  inputClassName="w-full pl-10 pr-10 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 font-mono text-xs"
+                />
                 <div>
                   <label className="block text-slate-300 font-semibold mb-1">
                     Age (18+ Mandatory)
@@ -1722,7 +1714,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={isUploadingCreatorAvatar}
+                  disabled={isUploadingCreatorAvatar || !isPasswordPolicyValid(newCreatorForm.password)}
                   className="px-5 py-2 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 rounded-xl text-xs font-bold transition-all shadow-lg shadow-amber-950/50 cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />

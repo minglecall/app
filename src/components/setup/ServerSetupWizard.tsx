@@ -25,6 +25,8 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { ServerDiagnosticInfo, SetupConfigPayload } from '../../types';
+import { PasswordStrengthField } from '../auth/PasswordStrengthField';
+import { getPasswordPolicyError } from '../../../shared/passwordPolicy';
 
 interface ServerSetupWizardProps {
   onComplete?: () => void;
@@ -34,6 +36,7 @@ interface ServerSetupWizardProps {
 export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete, onExit }) => {
   // Authentication State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [setupToken, setSetupToken] = useState('');
   const [authPassword, setAuthPassword] = useState<string>('');
   const [authEmail, setAuthEmail] = useState<string>('admin@livecall.com');
   const [authError, setAuthError] = useState<string>('');
@@ -152,7 +155,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     try {
       const res = await fetch('/api/setup/auth', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({ email: authEmail, password: authPassword }),
       });
 
@@ -160,6 +163,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (data.success) {
+          setSetupToken(data.token || '');
           setIsAuthenticated(true);
           return;
         } else {
@@ -168,26 +172,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
         }
       }
 
-      // If server returned non-JSON (e.g. 404 SPA fallback before server restart)
-      const cleanPass = authPassword.trim();
-      if (cleanPass === 'Admin@12345' || cleanPass === 'creator123' || cleanPass === 'admin123' || cleanPass === 'Password@12345') {
-        setIsAuthenticated(true);
-        return;
-      }
-
-      if (res.status === 404) {
-        setAuthError('Backend API route not yet active in memory. Please restart your dev terminal (Ctrl+C then npm run dev).');
-      } else {
-        setAuthError('Authentication failed. Please check your master password.');
-      }
-    } catch (err: any) {
-      // Fallback for direct offline / initial VPS boot
-      const cleanPass = authPassword.trim();
-      if (cleanPass === 'Admin@12345' || cleanPass === 'creator123' || cleanPass === 'admin123' || cleanPass === 'Password@12345') {
-        setIsAuthenticated(true);
-        return;
-      }
-      setAuthError('Connection error: Please restart the server terminal (Ctrl+C then npm run dev) to load newly added API endpoints.');
+      setAuthError('Authentication failed. Set SETUP_MASTER_KEY in .env or use the admin account password.');
     } finally {
       setAuthLoading(false);
     }
@@ -199,7 +184,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     try {
       const res = await fetch('/api/setup/test-db', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
           supabaseUrl: formData.supabaseUrl,
           serviceRoleKey: formData.supabaseServiceRoleKey,
@@ -224,7 +209,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     try {
       const res = await fetch('/api/setup/test-livekit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
           wsUrl: formData.livekitUrl,
           apiKey: formData.livekitApiKey,
@@ -250,7 +235,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     try {
       const res = await fetch('/api/setup/test-r2', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
           accountId: formData.r2AccountId,
           accessKeyId: formData.r2AccessKeyId,
@@ -278,7 +263,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     try {
       const res = await fetch('/api/setup/test-smtp', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
           host: formData.smtpHost,
           port: formData.smtpPort,
@@ -310,11 +295,21 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
 
   // Save All Configuration & Launch
   const handleSaveAllAndLaunch = async () => {
+    if (formData.adminPassword) {
+      const pwError = getPasswordPolicyError(formData.adminPassword);
+      if (pwError) {
+        setTestStates((prev) => ({
+          ...prev,
+          save: { loading: false, success: false, message: pwError },
+        }));
+        return;
+      }
+    }
     setTestStates((prev) => ({ ...prev, save: { loading: true } }));
     try {
       const res = await fetch('/api/setup/save-all', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify(formData),
       });
       const data = await res.json();
@@ -1182,27 +1177,17 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                 </div>
 
                 <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      New Super Admin Password (Optional override)
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showSecretKey['new_admin_pass'] ? 'text' : 'password'}
-                        value={formData.adminPassword}
-                        onChange={(e) => setFormData({ ...formData, adminPassword: e.target.value })}
-                        placeholder="Leave blank to keep current password"
-                        className="w-full pr-10 pl-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-purple-500"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleSecret('new_admin_pass')}
-                        className="absolute right-3 top-2.5 text-slate-500 hover:text-white"
-                      >
-                        {showSecretKey['new_admin_pass'] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
+                  <PasswordStrengthField
+                    id="setup-admin-password"
+                    label="New Super Admin Password (Optional override)"
+                    value={formData.adminPassword}
+                    onChange={(adminPassword) => setFormData({ ...formData, adminPassword })}
+                    placeholder="Leave blank to keep current password"
+                    autoComplete="new-password"
+                    required={false}
+                    showStrengthUi={Boolean(formData.adminPassword)}
+                    inputClassName="w-full pr-10 pl-10 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-purple-500"
+                  />
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
                     <div>

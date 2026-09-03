@@ -12,7 +12,7 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
   const { livekitConfig } = ctx;
 
   // GET LiveKit Credentials (for admin dashboard settings) — never expose apiSecret
-  router.get('/config', (req, res) => {
+  router.get('/config', requireAdmin, (req, res) => {
     const hasSecret = Boolean(
       livekitConfig.apiSecret &&
       livekitConfig.apiSecret !== 'secret'
@@ -25,14 +25,14 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
 
     res.json({
       configured,
-      apiKey: livekitConfig.apiKey,
+      apiKeyConfigured: Boolean(livekitConfig.apiKey && livekitConfig.apiKey !== 'devkey'),
       apiSecretConfigured: hasSecret,
       wsUrl: livekitConfig.wsUrl,
     });
   });
 
   // POST LiveKit Credentials (save directly from admin dashboard setting)
-  router.post('/config', (req, res) => {
+  router.post('/config', requireAdmin, (req, res) => {
     try {
       const { apiKey, apiSecret, wsUrl } = req.body;
 
@@ -59,8 +59,8 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
       res.json({
         success: true,
         configured,
-        apiKey: livekitConfig.apiKey,
-        apiSecret: livekitConfig.apiSecret,
+        apiKeyConfigured: Boolean(livekitConfig.apiKey),
+        apiSecretConfigured: Boolean(livekitConfig.apiSecret && livekitConfig.apiSecret !== 'secret'),
         wsUrl: livekitConfig.wsUrl,
         message: 'LiveKit API keys updated successfully!',
       });
@@ -73,13 +73,32 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
   // LiveKit Token Generation Endpoint
   router.post('/token', requireAuth, async (req, res) => {
     try {
-      const { roomName, name, isSpectator } = req.body;
-
-      // Identity is derived from the verified session — never trust client-supplied identity
-      const identity = String((req as any).user?.id || '').trim();
+      const { roomName, name } = req.body;
+      const identity = String((req as any).profileId || (req as any).user?.id || '').trim();
+      const profileRole = String((req as any).profile?.role || '');
+      const isSpectator = false;
 
       if (!roomName || !identity) {
         return res.status(400).json({ error: 'roomName and identity are required' });
+      }
+
+      const { activeCalls } = ctx;
+      const isAdmin = profileRole === 'admin';
+      const isAdminTestRoom = String(roomName).startsWith('admin_test_room_');
+      if (isAdminTestRoom && !isAdmin) {
+        return res.status(403).json({ error: 'Admin test rooms require admin privileges.' });
+      }
+      if (!isAdminTestRoom) {
+        const call = activeCalls.get(roomName);
+        if (
+          call &&
+          call.callerId !== identity &&
+          call.receiverId !== identity &&
+          call.callerId !== (req as any).user?.id &&
+          call.receiverId !== (req as any).user?.id
+        ) {
+          return res.status(403).json({ error: 'Not authorized to join this room.' });
+        }
       }
 
       const apiKey = livekitConfig.apiKey;
@@ -142,7 +161,6 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
     res.json({
       configured,
       wsUrl: livekitUrl || null,
-      apiKey: apiKey || null,
     });
   });
 
@@ -224,7 +242,7 @@ export function createLivekitAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Admin Force Terminate Call (Safety Killswitch)
-  router.post('/terminate-call', (req, res) => {
+  router.post('/terminate-call', requireAdmin, (req, res) => {
     try {
       const { callId, reason, adminId } = req.body;
       const call = activeCalls.get(callId);
@@ -274,7 +292,7 @@ export function createLivekitAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Admin Issue Safety Warning to Room
-  router.post('/issue-warning', (req, res) => {
+  router.post('/issue-warning', requireAdmin, (req, res) => {
     try {
       const { callId, warningText } = req.body;
       const call = activeCalls.get(callId);

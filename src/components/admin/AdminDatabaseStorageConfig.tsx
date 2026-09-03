@@ -37,6 +37,7 @@ import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { InfraSystemConfig } from '../../types';
 import { ResetMockDataModal } from './ResetMockDataModal';
 import { getMasterSchemaSql, getMigrationSchemaSql } from '../../utils/schemaSql';
+import { authFetch } from '../../utils/apiClient';
 
 export const AdminDatabaseStorageConfig: React.FC = () => {
   const { showToast, syncAllProfilesToSupabase, purgeAllMockData, users, systemSettings } = useApp();
@@ -100,7 +101,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     setIsSendingTestEmail(true);
     setTestEmailResult(null);
     try {
-      const res = await fetch('/api/auth/test-email', {
+      const res = await authFetch('/api/auth/test-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: testEmailAddress.trim(), name: 'Admin Test Recipient' }),
@@ -178,7 +179,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
 
     // 2. Fetch authoritative persistent config from server admin endpoint
     try {
-      const res = await fetch('/api/admin/email-config');
+      const res = await authFetch('/api/admin/email-config');
       if (res.ok) {
         const data = await res.json();
         if (data.config) {
@@ -212,7 +213,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
 
     // 3. Fallback to public endpoint
     try {
-      const res = await fetch('/api/auth/email-config');
+      const res = await authFetch('/api/auth/email-config');
       if (res.ok) {
         const data = await res.json();
         setSmtpStatus({
@@ -247,7 +248,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     } catch {}
 
     try {
-      const res = await fetch('/api/admin/email-config', {
+      const res = await authFetch('/api/admin/email-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated),
@@ -289,7 +290,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
       localStorage.setItem('livecall_admin_smtp_config', JSON.stringify(smtpForm));
 
       // 2. Server-side disk file persistence
-      const res = await fetch('/api/admin/email-config', {
+      const res = await authFetch('/api/admin/email-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(smtpForm),
@@ -330,7 +331,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
 
   const fetchConfig = async () => {
     try {
-      const res = await fetch('/api/admin/infra-config');
+      const res = await authFetch('/api/admin/infra-config');
       if (res.ok) {
         const text = await res.text();
         try {
@@ -351,7 +352,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     if (e) e.preventDefault();
     setIsSaving(true);
     try {
-      const res = await fetch('/api/admin/infra-config', {
+      const res = await authFetch('/api/admin/infra-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
@@ -437,7 +438,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     setIsTestingR2(true);
     setR2ConnResult(null);
     try {
-      const res = await fetch('/api/storage/test-connection', {
+      const res = await authFetch('/api/storage/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -483,7 +484,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     setIsBenchmarking(true);
     setBenchmarkResult(null);
     try {
-      const res = await fetch('/api/supabase/test-query', {
+      const res = await authFetch('/api/supabase/test-query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -612,7 +613,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
   const handleUpdateSchema = async (showToastNotice: boolean = true) => {
     setIsUpdatingSchema(true);
     try {
-      const res = await fetch('/api/admin/schema');
+      const res = await authFetch('/api/admin/schema');
       if (res.ok) {
         const data = await res.json();
         if (data && data.sql) {

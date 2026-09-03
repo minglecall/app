@@ -8,34 +8,31 @@ import {
   Smartphone,
   Mail,
   User,
-  Calendar,
-  Globe,
   Sparkles,
   ArrowRight,
   LogIn,
   KeyRound,
-  Users,
   AlertCircle,
   RefreshCw,
-  Flame,
   Check,
   Copy,
   Loader2,
   ShieldCheck,
-  ChevronRight,
   Eye,
   EyeOff,
 } from 'lucide-react';
-import { UserGender, UserRole, UserProfile } from '../../types';
-import { getCountryFlag } from '../../utils/flags';
+import { UserRole, UserProfile } from '../../types';
 import {
   signUpWithEmailOtp,
   verifyEmailOtp,
   signInWithEmailPassword,
   resendEmailOtp,
+  requestPasswordResetOtp,
+  resetPasswordWithOtp,
 } from '../../services/supabaseAuthService';
 import { OnboardingWizard } from '../onboarding/OnboardingWizard';
-import { DatePicker, calculateAgeFromDob } from '../common/DatePicker';
+import { PasswordStrengthField } from './PasswordStrengthField';
+import { evaluatePasswordStrength, getPasswordPolicyError } from '../../../shared/passwordPolicy';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -52,10 +49,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   defaultRole = 'male_user',
   onNavigateToTab,
 }) => {
-  const { switchUser, users, currentUser, showToast, updateUserProfile, systemSettings } = useApp();
+  const { completeAuthenticatedLogin, showToast, updateUserProfile } = useApp();
 
-  const [mode, setMode] = useState<'login' | 'register'>(initialMode);
-  const [authMethod, setAuthMethod] = useState<'email' | 'phone' | 'quick'>('email');
+  const [mode, setMode] = useState<'login' | 'register' | 'reset'>(initialMode);
+  const [authMethod, setAuthMethod] = useState<'email' | 'phone'>('email');
 
   // Register Form State
   const [selectedRole, setSelectedRole] = useState<UserRole>(defaultRole);
@@ -82,12 +79,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Login Form State
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [loginPhone, setLoginPhone] = useState('');
   const [loginPhoneOtp, setLoginPhoneOtp] = useState('');
   const [loginPhoneOtpSent, setLoginPhoneOtpSent] = useState(false);
+
+  // Password reset
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [resetOtpSent, setResetOtpSent] = useState(false);
 
   // UI / Error / Loading States
   const [isLoading, setIsLoading] = useState(false);
@@ -102,19 +103,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setShowOnboarding(false);
       setErrorMessage(null);
       setSuccessMessage(null);
-      setShowPassword(false);
-      setShowConfirmPassword(false);
       setShowLoginPassword(false);
       setReceivedOtpCode(null);
       setCopiedOtp(false);
       setIsLoading(false);
+      setResetOtpSent(false);
+      setResetPassword('');
+      setResetConfirmPassword('');
+      setAuthMethod('email');
     }
   }, [isOpen, initialMode, defaultRole]);
 
-  // OTP Timer countdown
+  // OTP Timer countdown (registration OTP screen + password reset)
   useEffect(() => {
     let interval: any = null;
-    if (showOtpScreen && otpTimer > 0) {
+    const otpActive = showOtpScreen || (mode === 'reset' && resetOtpSent);
+    if (otpActive && otpTimer > 0) {
       interval = setInterval(() => {
         setOtpTimer((prev) => prev - 1);
       }, 1000);
@@ -124,7 +128,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [showOtpScreen, otpTimer]);
+  }, [showOtpScreen, resetOtpSent, mode, otpTimer]);
 
   if (!isOpen) return null;
 
@@ -146,8 +150,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setErrorMessage('Please provide a valid email address.');
       return;
     }
-    if (!password || password.length < 6) {
-      setErrorMessage('Password must be at least 6 characters long.');
+    const passwordError = getPasswordPolicyError(password);
+    if (passwordError) {
+      setErrorMessage(passwordError);
       return;
     }
     if (password !== confirmPassword) {
@@ -205,7 +210,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setOtpDigits(newDigits);
         const nextIndex = Math.min(cleaned.length, 5);
         otpInputRefs.current[nextIndex]?.focus();
-        if (cleaned.length === 6) {
+        if (cleaned.length === 6 && mode !== 'reset') {
           handleVerifyOtpCode(cleaned);
         }
         return;
@@ -222,7 +227,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
 
     const fullCode = newDigits.join('');
-    if (fullCode.length === 6 && !newDigits.includes('')) {
+    if (fullCode.length === 6 && !newDigits.includes('') && mode !== 'reset') {
       handleVerifyOtpCode(fullCode);
     }
   };
@@ -255,7 +260,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       
       // Check if user is already onboarded or needs wizard
       if (res.user.isOnboarded) {
-        switchUser(res.user);
+        completeAuthenticatedLogin(res.user);
         if (onNavigateToTab) {
           if (res.user.role === 'admin') {
             onNavigateToTab('admin');
@@ -315,21 +320,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setSuccessMessage(null);
 
     if (authMethod === 'phone') {
-      if (!loginPhone) {
-        setErrorMessage('Please enter your mobile phone number.');
-        return;
-      }
-      if (!loginPhoneOtpSent) {
-        setLoginPhoneOtpSent(true);
-        setLoginPhoneOtp('123456');
-        showToast('SMS OTP Sent 📱', 'Simulated verification code: 123456', 'info');
-        return;
-      }
-      // Match user by phone or default
-      const found = users.find((u) => u.phone === loginPhone) || users[0];
-      switchUser(found.id);
-      showToast('Logged In Successfully', `Welcome back, ${found.name}!`, 'success');
-      onClose();
+      setErrorMessage('Phone login is disabled. Please sign in with email and password.');
       return;
     }
 
@@ -357,7 +348,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setOnboardingProfile(res.user);
         setShowOnboarding(true);
       } else {
-        switchUser(res.user);
+        completeAuthenticatedLogin(res.user);
         showToast('Welcome Back! 👋', `Logged in as ${res.user.name}`, 'success');
         if (onNavigateToTab) {
           if (res.user.role === 'admin') {
@@ -378,9 +369,80 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleQuickAccountSelect = (userId: string) => {
-    switchUser(userId);
-    onClose();
+  const handleRequestResetOtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    const targetEmail = resetEmail.trim().toLowerCase();
+    if (!targetEmail.includes('@')) {
+      setErrorMessage('Please provide a valid email address.');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const res = await requestPasswordResetOtp(targetEmail);
+      if (!res.success) {
+        setErrorMessage(res.error || 'Failed to send reset code.');
+        return;
+      }
+      if (res.otpCode) setReceivedOtpCode(res.otpCode);
+      setResetOtpSent(true);
+      setOtpDigits(['', '', '', '', '', '']);
+      setOtpTimer(60);
+      setCanResend(false);
+      setSuccessMessage(`A 6-digit reset code was sent to ${targetEmail}.`);
+      setTimeout(() => otpInputRefs.current[0]?.focus(), 150);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to send reset code.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCompletePasswordReset = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    const code = otpDigits.join('');
+    if (code.length !== 6) {
+      setErrorMessage('Please enter the full 6-digit verification code.');
+      return;
+    }
+    const passwordError = getPasswordPolicyError(resetPassword);
+    if (passwordError) {
+      setErrorMessage(passwordError);
+      return;
+    }
+    if (resetPassword !== resetConfirmPassword) {
+      setErrorMessage('Passwords do not match. Please check again.');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const res = await resetPasswordWithOtp({
+        email: resetEmail.trim(),
+        token: code,
+        newPassword: resetPassword,
+      });
+      if (!res.success) {
+        setErrorMessage(res.error || 'Password reset failed.');
+        return;
+      }
+      setSuccessMessage(res.message || 'Password updated. You can sign in now.');
+      showToast('Password Reset', 'Your password was updated. Please sign in.', 'success');
+      setMode('login');
+      setLoginEmail(resetEmail.trim());
+      setLoginPassword('');
+      setResetOtpSent(false);
+      setResetPassword('');
+      setResetConfirmPassword('');
+      setReceivedOtpCode(null);
+      setOtpDigits(['', '', '', '', '', '']);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Password reset failed.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // If in Onboarding flow, render full Onboarding Wizard
@@ -390,7 +452,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         user={onboardingProfile}
         onComplete={(updated) => {
           updateUserProfile(updated.id, updated);
-          switchUser(updated);
+          completeAuthenticatedLogin(updated);
           if (onNavigateToTab) {
             onNavigateToTab('profile');
           }
@@ -420,12 +482,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     ? 'Confirm Email OTP'
                     : mode === 'login'
                     ? 'Account Sign In'
+                    : mode === 'reset'
+                    ? 'Reset Password'
                     : '18+ Member Registration'}
                 </h2>
                 {showOtpScreen ? (
                   <p className="text-xs text-slate-400">Enter 6-digit code sent to {email}</p>
                 ) : mode === 'login' ? (
                   <p className="text-xs text-slate-400">Access private calls, creator hosts & coin balances</p>
+                ) : mode === 'reset' ? (
+                  <p className="text-xs text-slate-400">Verify your email, then set a strong new password</p>
                 ) : null}
               </div>
             </div>
@@ -438,8 +504,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </button>
           </div>
 
-          {/* Mode Switcher Tabs (Hidden during OTP) */}
-          {!showOtpScreen && (
+          {/* Mode Switcher Tabs (Hidden during OTP / reset) */}
+          {!showOtpScreen && mode !== 'reset' && (
             <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#090A0D] rounded-xl border border-slate-800/80 mt-4">
               <button
                 type="button"
@@ -470,6 +536,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 Create Account
               </button>
             </div>
+          )}
+          {mode === 'reset' && !showOtpScreen && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode('login');
+                setResetOtpSent(false);
+                setErrorMessage(null);
+                setSuccessMessage(null);
+              }}
+              className="mt-3 text-xs text-slate-400 hover:text-white font-mono"
+            >
+              ← Back to Sign In
+            </button>
           )}
         </div>
 
@@ -732,60 +812,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </div>
 
               {/* Password & Confirm Password */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
-                    PASSWORD *
-                  </label>
-                  <div className="relative">
-                    <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                    <input
-                      type={showPassword ? 'text' : 'password'}
-                      required
-                      placeholder="Min 6 chars"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      autoComplete="new-password"
-                      className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((prev) => !prev)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
-                      title={showPassword ? 'Hide password' : 'Show password'}
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                    >
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
-                    CONFIRM PASSWORD *
-                  </label>
-                  <div className="relative">
-                    <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                    <input
-                      type={showConfirmPassword ? 'text' : 'password'}
-                      required
-                      placeholder="Repeat password"
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      autoComplete="new-password"
-                      className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowConfirmPassword((prev) => !prev)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
-                      title={showConfirmPassword ? 'Hide password' : 'Show password'}
-                      aria-label={showConfirmPassword ? 'Hide confirmation password' : 'Show confirmation password'}
-                    >
-                      {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
+              <div className="space-y-3">
+                <PasswordStrengthField
+                  id="auth-register-password"
+                  label="PASSWORD"
+                  value={password}
+                  onChange={setPassword}
+                  placeholder="Create a strong password"
+                  autoComplete="new-password"
+                />
+                <PasswordStrengthField
+                  id="auth-register-confirm"
+                  label="CONFIRM PASSWORD"
+                  value={confirmPassword}
+                  onChange={setConfirmPassword}
+                  placeholder="Repeat password"
+                  autoComplete="new-password"
+                  showStrengthUi={false}
+                  matchAgainst={password}
+                  showMatchStatus
+                />
               </div>
 
               {/* Security & Zero KYC Notice */}
@@ -798,8 +844,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <button
                 type="submit"
-                disabled={isLoading}
-                className="w-full py-3 bg-gradient-to-r from-rose-600 via-pink-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50"
+                disabled={
+                  isLoading ||
+                  !evaluatePasswordStrength(password).isValid ||
+                  password !== confirmPassword
+                }
+                className="w-full py-3 bg-gradient-to-r from-rose-600 via-pink-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isLoading ? (
                   <>
@@ -814,13 +864,178 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 )}
               </button>
             </form>
+          ) : mode === 'reset' ? (
+            /* ========================================================================= */
+            /* PASSWORD RESET: EMAIL OTP + NEW PASSWORD                                  */
+            /* ========================================================================= */
+            <div className="space-y-4">
+              {!resetOtpSent ? (
+                <form onSubmit={handleRequestResetOtp} className="space-y-3.5">
+                  <p className="text-xs text-slate-400">
+                    Enter the email on your account. We will send a 6-digit code so you can set a new password.
+                  </p>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
+                      EMAIL ADDRESS
+                    </label>
+                    <div className="relative">
+                      <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                      <input
+                        type="email"
+                        required
+                        placeholder="you@example.com"
+                        value={resetEmail}
+                        onChange={(e) => setResetEmail(e.target.value)}
+                        className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                        autoFocus
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isLoading}
+                    className="w-full py-3 bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Sending Reset Code...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Mail className="w-4 h-4" />
+                        <span>Send Reset Code</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={handleCompletePasswordReset} className="space-y-4">
+                  <div className="text-center space-y-1">
+                    <p className="text-xs text-slate-400">
+                      Enter the code sent to <strong className="text-white">{resetEmail}</strong>, then choose a strong password.
+                    </p>
+                  </div>
+
+                  {receivedOtpCode && (
+                    <div className="p-3 bg-emerald-950/40 border border-emerald-500/40 rounded-xl flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-emerald-300 font-mono">
+                        Test OTP: <strong className="tracking-widest">{receivedOtpCode}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(receivedOtpCode);
+                          setCopiedOtp(true);
+                          setTimeout(() => setCopiedOtp(false), 1500);
+                        }}
+                        className="text-[10px] text-emerald-400 hover:text-white flex items-center gap-1"
+                      >
+                        {copiedOtp ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                        {copiedOtp ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-2">
+                      6-DIGIT CODE
+                    </label>
+                    <div className="flex justify-between gap-2">
+                      {otpDigits.map((digit, idx) => (
+                        <input
+                          key={idx}
+                          ref={(el) => {
+                            otpInputRefs.current[idx] = el;
+                          }}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={digit}
+                          onChange={(e) => handleOtpDigitChange(idx, e.target.value)}
+                          onKeyDown={(e) => handleOtpKeyDown(idx, e)}
+                          className="w-10 h-11 sm:w-11 sm:h-12 text-center text-base font-bold font-mono bg-[#0B0D11] border border-slate-800 rounded-xl text-white focus:outline-none focus:border-rose-500"
+                          aria-label={`Digit ${idx + 1}`}
+                        />
+                      ))}
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+                      <span>{canResend ? 'Code expired — resend available' : `Resend in ${otpTimer}s`}</span>
+                      <button
+                        type="button"
+                        disabled={!canResend || isLoading}
+                        onClick={async () => {
+                          setIsLoading(true);
+                          const res = await requestPasswordResetOtp(resetEmail.trim());
+                          setIsLoading(false);
+                          if (res.success) {
+                            if (res.otpCode) setReceivedOtpCode(res.otpCode);
+                            setOtpTimer(60);
+                            setCanResend(false);
+                            setSuccessMessage('A new reset code was sent.');
+                          } else {
+                            setErrorMessage(res.error || 'Failed to resend code.');
+                          }
+                        }}
+                        className="text-rose-400 hover:text-rose-300 disabled:opacity-40"
+                      >
+                        Resend code
+                      </button>
+                    </div>
+                  </div>
+
+                  <PasswordStrengthField
+                    id="auth-reset-password"
+                    label="New Password"
+                    value={resetPassword}
+                    onChange={setResetPassword}
+                    placeholder="Create a strong password"
+                    autoComplete="new-password"
+                  />
+                  <PasswordStrengthField
+                    id="auth-reset-confirm"
+                    label="Confirm New Password"
+                    value={resetConfirmPassword}
+                    onChange={setResetConfirmPassword}
+                    placeholder="Repeat password"
+                    autoComplete="new-password"
+                    showStrengthUi={false}
+                    matchAgainst={resetPassword}
+                    showMatchStatus
+                  />
+
+                  <button
+                    type="submit"
+                    disabled={
+                      isLoading ||
+                      otpDigits.join('').length < 6 ||
+                      !evaluatePasswordStrength(resetPassword).isValid ||
+                      resetPassword !== resetConfirmPassword
+                    }
+                    className="w-full py-3 bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Updating Password...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-4 h-4" />
+                        <span>Reset Password</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+            </div>
           ) : (
             /* ========================================================================= */
-            /* LOGIN FORM (EMAIL, PHONE, QUICK SELECTOR)                                 */
+            /* LOGIN FORM (EMAIL / PHONE)                                                */
             /* ========================================================================= */
             <div className="space-y-4">
               {/* Method Selector Tabs */}
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => setAuthMethod('email')}
@@ -846,19 +1061,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Smartphone className="w-3.5 h-3.5" />
                   <span>Phone OTP</span>
                 </button>
-
-                <button
-                  type="button"
-                  onClick={() => setAuthMethod('quick')}
-                  className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all ${
-                    authMethod === 'quick'
-                      ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/50'
-                      : 'bg-slate-900/60 text-slate-400 border-slate-800 hover:text-white'
-                  }`}
-                >
-                  <Users className="w-3.5 h-3.5" />
-                  <span>Quick Demo</span>
-                </button>
               </div>
 
               {/* Email Login */}
@@ -883,9 +1085,24 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
-                      PASSWORD
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider">
+                        PASSWORD
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMode('reset');
+                          setResetEmail(loginEmail.includes('@') ? loginEmail.trim() : '');
+                          setResetOtpSent(false);
+                          setErrorMessage(null);
+                          setSuccessMessage(null);
+                        }}
+                        className="text-[11px] text-rose-400 hover:text-rose-300 font-mono"
+                      >
+                        Forgot password?
+                      </button>
+                    </div>
                     <div className="relative">
                       <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                       <input
@@ -988,57 +1205,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <LogIn className="w-4 h-4" />
                     <span>Verify & Sign In</span>
                   </button>
-                </div>
-              )}
-
-              {/* Quick Select */}
-              {authMethod === 'quick' && (
-                <div className="space-y-2.5">
-                  <p className="text-[11px] text-slate-400">Click any persona below to log in instantly:</p>
-                  <div className="max-h-60 overflow-y-auto space-y-1.5 custom-scrollbar pr-1">
-                    {users.map((u) => {
-                      const isMale = u.gender === 'male';
-                      const isFemale = u.gender === 'female';
-
-                      return (
-                        <button
-                          key={u.id}
-                          type="button"
-                          onClick={() => handleQuickAccountSelect(u.id)}
-                          className="w-full p-2.5 rounded-xl bg-[#0B0D11] border border-slate-800 hover:border-rose-500/60 hover:bg-rose-500/5 flex items-center justify-between text-left transition-all cursor-pointer group"
-                        >
-                          <div className="flex items-center space-x-3 min-w-0">
-                            <img
-                              src={u.avatarUrl}
-                              alt={u.name}
-                              className="w-9 h-9 rounded-xl object-cover border border-slate-700 shrink-0"
-                            />
-                            <div className="min-w-0">
-                              <div className="flex items-center space-x-1.5">
-                                <span className="text-xs font-bold text-white truncate">{u.name}</span>
-                                <span className="text-xs">{getCountryFlag(u.nationality || '')}</span>
-                              </div>
-                              <div className="flex items-center space-x-1.5 text-[10px] text-slate-400">
-                                <span
-                                  className={`font-semibold ${
-                                    isFemale ? 'text-rose-400' : isMale ? 'text-blue-400' : 'text-purple-400'
-                                  }`}
-                                >
-                                  {(u.role || 'user').replace('_', ' ').toUpperCase()}
-                                </span>
-                                <span>•</span>
-                                <span>{isFemale ? `${systemSettings.coinBurnRatePerMin || 120} coins/min` : `${u.coinBalance || 0} coins`}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="shrink-0 text-slate-500 group-hover:text-rose-400">
-                            <ChevronRight className="w-4 h-4" />
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
               )}
             </div>

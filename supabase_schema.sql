@@ -116,6 +116,18 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_profiles_role_status ON public.profiles(role, online_status);
 CREATE INDEX IF NOT EXISTS idx_profiles_email ON public.profiles(email);
+-- Soft uniqueness for registrations (case-insensitive). Skips quietly if duplicates already exist.
+DO $$
+BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_email_unique_lower
+        ON public.profiles (lower(email))
+        WHERE email IS NOT NULL AND btrim(email) <> '';
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE NOTICE 'idx_profiles_email_unique_lower skipped: duplicate emails already present — clean them before enabling uniqueness';
+    WHEN OTHERS THEN
+        RAISE NOTICE 'idx_profiles_email_unique_lower skipped: %', SQLERRM;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_profiles_geo ON public.profiles(latitude, longitude);
 CREATE INDEX IF NOT EXISTS idx_profiles_team_leader ON public.profiles(team_leader_id);
 CREATE INDEX IF NOT EXISTS idx_profiles_agency ON public.profiles(agency_name);
@@ -325,7 +337,7 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     allowed_zodiac_signs TEXT[] DEFAULT '{}',
     allowed_interests TEXT[] DEFAULT '{}',
     flag_sizes_json TEXT DEFAULT '',
-    show_dev_persona_bar BOOLEAN DEFAULT true,
+    show_dev_persona_bar BOOLEAN DEFAULT false,
     enable_regular_female_coin_earning BOOLEAN DEFAULT false,
     coin_to_usd_ratio NUMERIC DEFAULT 0.01,
     female_payout_ratio_usd NUMERIC DEFAULT 0.008,
@@ -634,6 +646,125 @@ DROP POLICY IF EXISTS "Public full access to favorites" ON public.favorites;
 DROP POLICY IF EXISTS "Public full access to blocked_users" ON public.blocked_users;
 DROP POLICY IF EXISTS "Public full access to creator_goals" ON public.creator_goals;
 DROP POLICY IF EXISTS "Public full access to user_daily_rewards" ON public.user_daily_rewards;
+
+-- Drop current command-specific policies so re-runs are idempotent
+DROP POLICY IF EXISTS "public select profiles" ON public.profiles;
+DROP POLICY IF EXISTS "authenticated insert profiles" ON public.profiles;
+DROP POLICY IF EXISTS "authenticated update profiles" ON public.profiles;
+DROP POLICY IF EXISTS "admin delete profiles" ON public.profiles;
+DROP POLICY IF EXISTS "authenticated select profiles" ON public.profiles;
+DROP POLICY IF EXISTS "owner insert profiles" ON public.profiles;
+DROP POLICY IF EXISTS "owner update profiles" ON public.profiles;
+
+DROP POLICY IF EXISTS "public select matches" ON public.matches;
+DROP POLICY IF EXISTS "authenticated insert matches" ON public.matches;
+DROP POLICY IF EXISTS "authenticated update matches" ON public.matches;
+DROP POLICY IF EXISTS "admin delete matches" ON public.matches;
+
+DROP POLICY IF EXISTS "public select messages" ON public.messages;
+DROP POLICY IF EXISTS "authenticated insert messages" ON public.messages;
+DROP POLICY IF EXISTS "authenticated update messages" ON public.messages;
+DROP POLICY IF EXISTS "admin delete messages" ON public.messages;
+DROP POLICY IF EXISTS "participants select messages" ON public.messages;
+DROP POLICY IF EXISTS "sender insert messages" ON public.messages;
+DROP POLICY IF EXISTS "participants update messages" ON public.messages;
+
+DROP POLICY IF EXISTS "public select call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "authenticated insert call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "authenticated update call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "admin delete call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "participants select call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "admin insert call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "admin update call_logs" ON public.call_logs;
+
+DROP POLICY IF EXISTS "public select friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "authenticated insert friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "authenticated update friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "admin delete friend_requests" ON public.friend_requests;
+
+DROP POLICY IF EXISTS "public select payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "authenticated insert payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "authenticated update payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "admin delete payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "owner select payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "owner insert payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "admin update payout_requests" ON public.payout_requests;
+
+DROP POLICY IF EXISTS "public select country_configs" ON public.country_configs;
+DROP POLICY IF EXISTS "authenticated insert country_configs" ON public.country_configs;
+DROP POLICY IF EXISTS "authenticated update country_configs" ON public.country_configs;
+DROP POLICY IF EXISTS "admin delete country_configs" ON public.country_configs;
+
+DROP POLICY IF EXISTS "public select language_configs" ON public.language_configs;
+DROP POLICY IF EXISTS "authenticated insert language_configs" ON public.language_configs;
+DROP POLICY IF EXISTS "authenticated update language_configs" ON public.language_configs;
+DROP POLICY IF EXISTS "admin delete language_configs" ON public.language_configs;
+
+DROP POLICY IF EXISTS "public select zodiac_configs" ON public.zodiac_configs;
+DROP POLICY IF EXISTS "authenticated insert zodiac_configs" ON public.zodiac_configs;
+DROP POLICY IF EXISTS "authenticated update zodiac_configs" ON public.zodiac_configs;
+DROP POLICY IF EXISTS "admin delete zodiac_configs" ON public.zodiac_configs;
+
+DROP POLICY IF EXISTS "public select interest_configs" ON public.interest_configs;
+DROP POLICY IF EXISTS "authenticated insert interest_configs" ON public.interest_configs;
+DROP POLICY IF EXISTS "authenticated update interest_configs" ON public.interest_configs;
+DROP POLICY IF EXISTS "admin delete interest_configs" ON public.interest_configs;
+
+DROP POLICY IF EXISTS "public select system_configs" ON public.system_configs;
+DROP POLICY IF EXISTS "authenticated insert system_configs" ON public.system_configs;
+DROP POLICY IF EXISTS "authenticated update system_configs" ON public.system_configs;
+DROP POLICY IF EXISTS "admin delete system_configs" ON public.system_configs;
+DROP POLICY IF EXISTS "admin write system_configs" ON public.system_configs;
+
+DROP POLICY IF EXISTS "public select moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "authenticated insert moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "authenticated update moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "admin delete moderation_reports" ON public.moderation_reports;
+
+DROP POLICY IF EXISTS "public select cms_policies" ON public.cms_policies;
+DROP POLICY IF EXISTS "authenticated insert cms_policies" ON public.cms_policies;
+DROP POLICY IF EXISTS "authenticated update cms_policies" ON public.cms_policies;
+DROP POLICY IF EXISTS "admin delete cms_policies" ON public.cms_policies;
+
+DROP POLICY IF EXISTS "public select home_banners" ON public.home_banners;
+DROP POLICY IF EXISTS "authenticated insert home_banners" ON public.home_banners;
+DROP POLICY IF EXISTS "authenticated update home_banners" ON public.home_banners;
+DROP POLICY IF EXISTS "admin delete home_banners" ON public.home_banners;
+
+DROP POLICY IF EXISTS "public select home_quick_links" ON public.home_quick_links;
+DROP POLICY IF EXISTS "authenticated insert home_quick_links" ON public.home_quick_links;
+DROP POLICY IF EXISTS "authenticated update home_quick_links" ON public.home_quick_links;
+DROP POLICY IF EXISTS "admin delete home_quick_links" ON public.home_quick_links;
+
+DROP POLICY IF EXISTS "public select feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "authenticated insert feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "authenticated update feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "admin delete feed_posts" ON public.feed_posts;
+
+DROP POLICY IF EXISTS "public select coin_packages" ON public.coin_packages;
+DROP POLICY IF EXISTS "authenticated insert coin_packages" ON public.coin_packages;
+DROP POLICY IF EXISTS "authenticated update coin_packages" ON public.coin_packages;
+DROP POLICY IF EXISTS "admin delete coin_packages" ON public.coin_packages;
+
+DROP POLICY IF EXISTS "public select favorites" ON public.favorites;
+DROP POLICY IF EXISTS "authenticated insert favorites" ON public.favorites;
+DROP POLICY IF EXISTS "authenticated update favorites" ON public.favorites;
+DROP POLICY IF EXISTS "owner/admin delete favorites" ON public.favorites;
+
+DROP POLICY IF EXISTS "public select blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "authenticated insert blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "authenticated update blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "owner/admin delete blocked_users" ON public.blocked_users;
+
+DROP POLICY IF EXISTS "public select creator_goals" ON public.creator_goals;
+DROP POLICY IF EXISTS "authenticated insert creator_goals" ON public.creator_goals;
+DROP POLICY IF EXISTS "authenticated update creator_goals" ON public.creator_goals;
+DROP POLICY IF EXISTS "admin delete creator_goals" ON public.creator_goals;
+
+DROP POLICY IF EXISTS "public select user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "authenticated insert user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "authenticated update user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "admin delete user_daily_rewards" ON public.user_daily_rewards;
 
 -- PROFILES
 CREATE POLICY "public select profiles" ON public.profiles FOR SELECT USING (true);
@@ -988,7 +1119,28 @@ CREATE POLICY "admin delete user_daily_rewards" ON public.user_daily_rewards
 -- ============================================================================
 CREATE OR REPLACE FUNCTION public.handle_new_auth_user()
 RETURNS TRIGGER AS $$
+DECLARE
+    v_existing_id TEXT;
 BEGIN
+    -- If a profile already exists for this email, link auth_id instead of creating a duplicate male/female row
+    IF NEW.email IS NOT NULL AND NEW.email <> '' THEN
+        SELECT id INTO v_existing_id
+        FROM public.profiles
+        WHERE lower(email) = lower(NEW.email)
+        LIMIT 1;
+
+        IF v_existing_id IS NOT NULL THEN
+            UPDATE public.profiles
+            SET
+                auth_id = NEW.id,
+                email = NEW.email,
+                name = COALESCE(NULLIF(name, ''), NEW.raw_user_meta_data->>'name', NEW.raw_user_meta_data->>'full_name', name),
+                updated_at = now()
+            WHERE id = v_existing_id;
+            RETURN NEW;
+        END IF;
+    END IF;
+
     INSERT INTO public.profiles (
         id,
         auth_id,
@@ -1006,11 +1158,15 @@ BEGIN
     VALUES (
         NEW.id::TEXT,
         NEW.id,
-        COALESCE(NEW.raw_user_meta_data->>'name', split_part(NEW.email, '@', 1), 'New Member'),
+        COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.raw_user_meta_data->>'name', NEW.raw_user_meta_data->>'display_name', split_part(NEW.email, '@', 1), 'New Member'),
         NEW.email,
         COALESCE(NEW.raw_user_meta_data->>'gender', 'male'),
         true,
-        COALESCE(NEW.raw_user_meta_data->>'role', 'male_user'),
+        CASE
+            WHEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user') IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user')
+            THEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user')
+            ELSE 'male_user'
+        END,
         CASE WHEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user') = 'male_user' THEN 50 ELSE 0 END,
         CASE WHEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user') = 'female_creator' THEN 10 ELSE 0 END,
         false,
@@ -1019,7 +1175,7 @@ BEGIN
     )
     ON CONFLICT (id) DO UPDATE SET
         auth_id = EXCLUDED.auth_id,
-        email = EXCLUDED.email,
+        email = COALESCE(EXCLUDED.email, public.profiles.email),
         updated_at = now();
     RETURN NEW;
 END;
@@ -1058,6 +1214,8 @@ ALTER TABLE public.wallet_ledger ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "public select wallet_ledger" ON public.wallet_ledger;
 DROP POLICY IF EXISTS "service role manage wallet_ledger" ON public.wallet_ledger;
+DROP POLICY IF EXISTS "authenticated insert wallet_ledger" ON public.wallet_ledger;
+DROP POLICY IF EXISTS "owner select wallet_ledger" ON public.wallet_ledger;
 CREATE POLICY "public select wallet_ledger" ON public.wallet_ledger FOR SELECT USING (true);
 CREATE POLICY "authenticated insert wallet_ledger" ON public.wallet_ledger FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 
@@ -1620,4 +1778,105 @@ ON CONFLICT (id) DO UPDATE SET
     allowed_interests = EXCLUDED.allowed_interests,
     flag_sizes_json = EXCLUDED.flag_sizes_json,
     updated_at = now();
+
+-- ============================================================================
+-- 18. AUTHZ HARDENING (owner RLS, hide password_hash, admin-only config writes)
+-- ============================================================================
+CREATE OR REPLACE FUNCTION public.current_profile_id()
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(
+    (SELECT p.id FROM public.profiles p WHERE p.auth_id = auth.uid() LIMIT 1),
+    auth.uid()::text
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_admin_user()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.profiles p
+    WHERE p.role = 'admin'
+      AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
+  );
+$$;
+
+REVOKE SELECT (password_hash) ON public.profiles FROM anon, authenticated;
+
+DROP POLICY IF EXISTS "public select profiles" ON public.profiles;
+DROP POLICY IF EXISTS "authenticated insert profiles" ON public.profiles;
+DROP POLICY IF EXISTS "authenticated update profiles" ON public.profiles;
+DROP POLICY IF EXISTS "authenticated select profiles" ON public.profiles;
+DROP POLICY IF EXISTS "owner insert profiles" ON public.profiles;
+DROP POLICY IF EXISTS "owner update profiles" ON public.profiles;
+CREATE POLICY "authenticated select profiles" ON public.profiles FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "owner insert profiles" ON public.profiles FOR INSERT WITH CHECK (
+  auth.uid() IS NOT NULL AND (id = auth.uid()::text OR auth_id = auth.uid() OR id = public.current_profile_id())
+);
+CREATE POLICY "owner update profiles" ON public.profiles FOR UPDATE
+  USING (id = public.current_profile_id() OR public.is_admin_user())
+  WITH CHECK (id = public.current_profile_id() OR public.is_admin_user());
+
+DROP POLICY IF EXISTS "public select messages" ON public.messages;
+DROP POLICY IF EXISTS "authenticated insert messages" ON public.messages;
+DROP POLICY IF EXISTS "authenticated update messages" ON public.messages;
+DROP POLICY IF EXISTS "participants select messages" ON public.messages;
+DROP POLICY IF EXISTS "sender insert messages" ON public.messages;
+DROP POLICY IF EXISTS "participants update messages" ON public.messages;
+CREATE POLICY "participants select messages" ON public.messages FOR SELECT USING (
+  sender_id = public.current_profile_id() OR receiver_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "sender insert messages" ON public.messages FOR INSERT WITH CHECK (
+  sender_id = public.current_profile_id()
+);
+CREATE POLICY "participants update messages" ON public.messages FOR UPDATE USING (
+  sender_id = public.current_profile_id() OR receiver_id = public.current_profile_id() OR public.is_admin_user()
+);
+
+DROP POLICY IF EXISTS "public select call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "authenticated insert call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "authenticated update call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "participants select call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "admin insert call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "admin update call_logs" ON public.call_logs;
+CREATE POLICY "participants select call_logs" ON public.call_logs FOR SELECT USING (
+  caller_id = public.current_profile_id() OR receiver_id = public.current_profile_id() OR host_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "admin insert call_logs" ON public.call_logs FOR INSERT WITH CHECK (public.is_admin_user());
+CREATE POLICY "admin update call_logs" ON public.call_logs FOR UPDATE USING (public.is_admin_user());
+
+DROP POLICY IF EXISTS "public select payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "authenticated insert payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "authenticated update payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "owner select payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "owner insert payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "admin update payout_requests" ON public.payout_requests;
+CREATE POLICY "owner select payout_requests" ON public.payout_requests FOR SELECT USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "owner insert payout_requests" ON public.payout_requests FOR INSERT WITH CHECK (
+  user_id = public.current_profile_id()
+);
+CREATE POLICY "admin update payout_requests" ON public.payout_requests FOR UPDATE USING (public.is_admin_user());
+
+DROP POLICY IF EXISTS "public select wallet_ledger" ON public.wallet_ledger;
+DROP POLICY IF EXISTS "authenticated insert wallet_ledger" ON public.wallet_ledger;
+DROP POLICY IF EXISTS "owner select wallet_ledger" ON public.wallet_ledger;
+CREATE POLICY "owner select wallet_ledger" ON public.wallet_ledger FOR SELECT USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+
+DROP POLICY IF EXISTS "authenticated insert system_configs" ON public.system_configs;
+DROP POLICY IF EXISTS "authenticated update system_configs" ON public.system_configs;
+DROP POLICY IF EXISTS "admin write system_configs" ON public.system_configs;
+CREATE POLICY "admin write system_configs" ON public.system_configs FOR ALL USING (public.is_admin_user()) WITH CHECK (public.is_admin_user());
+
 

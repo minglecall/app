@@ -63,6 +63,8 @@ import { ZodiacSelector } from '../common/ZodiacSelector';
 import { InterestSelector } from '../common/InterestSelector';
 import { SvgFlag } from '../common/SvgFlag';
 import { ZodiacIcon } from '../common/ZodiacIcon';
+import { PasswordStrengthField } from '../auth/PasswordStrengthField';
+import { getPasswordPolicyError, isPasswordPolicyValid } from '../../../shared/passwordPolicy';
 
 const PRESET_AVATARS = [
   'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
@@ -123,8 +125,6 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
-  const [showNewPassword, setShowNewPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [passwordSubmitting, setPasswordSubmitting] = useState(false);
 
   // Avatar upload & R2 storage modal state
@@ -255,8 +255,9 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   // Handle password submission
   const handleChangePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newPasswordInput || newPasswordInput.trim().length < 6) {
-      showToast('Password Too Short', 'New password must be at least 6 characters.', 'error');
+    const policyError = getPasswordPolicyError(newPasswordInput);
+    if (policyError) {
+      showToast('Password Requirements', policyError, 'error');
       return;
     }
     if (newPasswordInput !== confirmPasswordInput) {
@@ -2069,106 +2070,37 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 </div>
               )}
 
-              <div>
-                <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
-                  New Password *
-                </label>
-                <div className="relative">
-                  <input
-                    type={showNewPassword ? 'text' : 'password'}
-                    required
-                    minLength={6}
-                    value={newPasswordInput}
-                    onChange={(e) => setNewPasswordInput(e.target.value)}
-                    placeholder="Enter new password (min. 6 characters)"
-                    className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowNewPassword(!showNewPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                  >
-                    {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
+              <PasswordStrengthField
+                id="profile-new-password"
+                label="New Password"
+                value={newPasswordInput}
+                onChange={setNewPasswordInput}
+                placeholder="Create a strong password"
+                autoComplete="new-password"
+                inputClassName="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 pl-10 pr-10"
+              />
 
-                {/* Password strength meter */}
-                {newPasswordInput && (
-                  <div className="mt-2 space-y-1">
-                    <div className="flex items-center justify-between text-[10px] font-mono">
-                      <span className="text-slate-400">Password Strength:</span>
-                      <span className={`font-bold ${
-                        newPasswordInput.length < 6
-                          ? 'text-rose-400'
-                          : newPasswordInput.length < 9
-                          ? 'text-amber-400'
-                          : 'text-emerald-400'
-                      }`}>
-                        {newPasswordInput.length < 6
-                          ? 'Too Short (< 6 chars)'
-                          : newPasswordInput.length < 9
-                          ? 'Medium Strength'
-                          : 'Strong Password ✓'}
-                      </span>
-                    </div>
-                    <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden flex">
-                      <div
-                        className={`h-full transition-all duration-300 ${
-                          newPasswordInput.length < 6
-                            ? 'w-1/3 bg-rose-500'
-                            : newPasswordInput.length < 9
-                            ? 'w-2/3 bg-amber-500'
-                            : 'w-full bg-emerald-500'
-                        }`}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
-                  Confirm New Password *
-                </label>
-                <div className="relative">
-                  <input
-                    type={showConfirmPassword ? 'text' : 'password'}
-                    required
-                    minLength={6}
-                    value={confirmPasswordInput}
-                    onChange={(e) => setConfirmPasswordInput(e.target.value)}
-                    placeholder="Re-type new password"
-                    className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                  >
-                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-                {confirmPasswordInput && newPasswordInput && (
-                  <div className="mt-1.5 flex items-center space-x-1 text-[11px] font-mono">
-                    {confirmPasswordInput === newPasswordInput ? (
-                      <span className="text-emerald-400 flex items-center space-x-1">
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Passwords match</span>
-                      </span>
-                    ) : (
-                      <span className="text-rose-400 flex items-center space-x-1">
-                        <AlertCircle className="w-3.5 h-3.5" />
-                        <span>Passwords do not match</span>
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
+              <PasswordStrengthField
+                id="profile-confirm-password"
+                label="Confirm New Password"
+                value={confirmPasswordInput}
+                onChange={setConfirmPasswordInput}
+                placeholder="Re-type new password"
+                autoComplete="new-password"
+                showStrengthUi={false}
+                matchAgainst={newPasswordInput}
+                showMatchStatus
+                inputClassName="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 pl-10 pr-10"
+              />
 
               <div className="pt-2">
                 <button
                   type="submit"
-                  disabled={passwordSubmitting || !newPasswordInput || newPasswordInput !== confirmPasswordInput}
+                  disabled={
+                    passwordSubmitting ||
+                    !isPasswordPolicyValid(newPasswordInput) ||
+                    newPasswordInput !== confirmPasswordInput
+                  }
                   className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-mono font-bold text-xs transition-all shadow-lg flex items-center space-x-2 cursor-pointer"
                 >
                   <Lock className="w-3.5 h-3.5" />

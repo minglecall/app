@@ -10,6 +10,7 @@ import {
   deleteProfileAdmin,
   isSupabaseAdminConfigured,
   granularResetSupabaseAdmin,
+  isSupabaseServiceRoleConfigured,
 } from '../supabaseAdmin';
 import { isR2Configured, updateR2RuntimeConfig } from '../r2Storage';
 import { requireAdmin } from '../middleware/auth';
@@ -32,7 +33,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
 
   // Master PostgreSQL / Supabase Schema Fetch Endpoint
   // Single source of truth: /supabase_schema.sql (loaded from disk — no embedded SQL)
-  router.get('/schema', (req, res) => {
+  router.get('/schema', requireAdmin, (req, res) => {
     try {
       const payload = loadAdminSchemaPayload();
       return res.json(payload);
@@ -122,6 +123,13 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
       // 3. If Supabase Admin is configured, perform complete cascading database purge
       let supabaseResult: any = { success: true, clearedTables: [] };
       if (isSupabaseAdminConfigured()) {
+        if (!isSupabaseServiceRoleConfigured()) {
+          return res.status(503).json({
+            success: false,
+            error:
+              'Database reset requires SUPABASE_SERVICE_ROLE_KEY. The anon key cannot bypass RLS, so tables would not actually be purged.',
+          });
+        }
         supabaseResult = await granularResetSupabaseAdmin({
           mockIds: options.mockIds,
           clearAllUsers: Boolean(options.clearAllUsers),
@@ -149,6 +157,13 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
           creatorGoals: Boolean(options.creatorGoals),
           resetBalances: options.resetBalances,
         });
+        if (!supabaseResult?.success) {
+          return res.status(500).json({
+            success: false,
+            error: supabaseResult?.error || 'Database reset failed.',
+            clearedTables: supabaseResult?.clearedTables || [],
+          });
+        }
       }
 
       return res.json({
@@ -162,7 +177,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  router.post('/delete-user', async (req, res) => {
+  router.post('/delete-user', requireAdmin, async (req, res) => {
     try {
       const { userId } = req.body;
       if (!userId) {
@@ -197,7 +212,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // GET Full Unmasked SMTP Configuration for Admin Dashboard
-  router.get('/email-config', (req, res) => {
+  router.get('/email-config', requireAdmin, (req, res) => {
     const rawConfig = getRawSmtpConfigForAdmin();
     res.json({
       success: true,
@@ -206,7 +221,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Save SMTP Configuration dynamically
-  router.post('/email-config', (req, res) => {
+  router.post('/email-config', requireAdmin, (req, res) => {
     try {
       const { host, port, user, pass, from, secure, resendApiKey, showOtpInForm } = req.body;
       updateSmtpRuntimeConfig({
@@ -232,7 +247,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // Real-time Active Calls for Admin Surveillance
-  router.get('/active-calls', (req, res) => {
+  router.get('/active-calls', requireAdmin, (req, res) => {
     res.json({
       success: true,
       activeCalls: getFormattedActiveCalls(),
@@ -241,11 +256,18 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // GET Infrastructure & Storage Parameters
-  router.get('/infra-config', (req, res) => {
+  router.get('/infra-config', requireAdmin, (req, res) => {
+    const mask = (v?: string) => (v ? '••••••••' : '');
     res.json({
       success: true,
       config: {
-        ...infraConfig,
+        supabaseUrl: infraConfig.supabaseUrl,
+        supabaseAnonKey: mask(infraConfig.supabaseAnonKey),
+        r2AccountId: infraConfig.r2AccountId,
+        r2AccessKeyId: infraConfig.r2AccessKeyId ? `${String(infraConfig.r2AccessKeyId).slice(0, 4)}…` : '',
+        r2SecretAccessKey: mask(infraConfig.r2SecretAccessKey),
+        r2BucketName: infraConfig.r2BucketName,
+        r2PublicUrl: infraConfig.r2PublicUrl,
         supabaseConfigured: Boolean(
           infraConfig.supabaseUrl &&
           !infraConfig.supabaseUrl.includes('placeholder') &&
@@ -257,7 +279,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Update Infrastructure & Performance Parameters
-  router.post('/infra-config', (req, res) => {
+  router.post('/infra-config', requireAdmin, (req, res) => {
     try {
       const updates = req.body;
       Object.assign(infraConfig, updates);
@@ -282,7 +304,10 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
       return res.json({
         success: true,
         message: 'Infrastructure parameters updated successfully.',
-        config: infraConfig,
+        config: {
+          r2Configured: isR2Configured(),
+          supabaseConfigured: Boolean(infraConfig.supabaseUrl),
+        },
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Failed to update infrastructure parameters' });
@@ -305,7 +330,7 @@ export function createUsersAdminRouter(ctx: ServerRuntime): Router {
   } = ctx;
 
   // Server-side Bulk Users Sync Endpoint
-  router.post('/sync-all', async (req, res) => {
+  router.post('/sync-all', requireAdmin, async (req, res) => {
     try {
       const { users: incomingUsers, overwrite } = req.body || {};
       if (Array.isArray(incomingUsers)) {
@@ -326,7 +351,7 @@ export function createUsersAdminRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  router.delete('/:id', async (req, res) => {
+  router.delete('/:id', requireAdmin, async (req, res) => {
     try {
       const userId = req.params.id;
       if (!userId) {

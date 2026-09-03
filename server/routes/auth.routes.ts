@@ -12,10 +12,23 @@ import {
   authenticateUserWithPasswordAdmin,
   isProfileBanned,
   hashPassword,
-  comparePassword,
   isSupabaseAdminConfigured,
-  ensureValidUuid,
 } from '../supabaseAdmin';
+import { requireAuth, requireAdmin, sanitizePublicSignupRole } from '../middleware/auth';
+import { getPasswordPolicyError } from '../../shared/passwordPolicy';
+
+/** Pending signup secrets keyed by email — never create orphan profiles with random UUIDs. */
+const pendingSignupByEmail = new Map<
+  string,
+  { passwordHash: string; name?: string; role?: string; updatedAt: number }
+>();
+
+export function consumePendingSignup(email: string) {
+  const key = email.trim().toLowerCase();
+  const pending = pendingSignupByEmail.get(key);
+  if (pending) pendingSignupByEmail.delete(key);
+  return pending || null;
+}
 
 export function createAuthRouter(ctx: ServerRuntime): Router {
   const router = Router();
@@ -43,7 +56,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
       }
 
       const otpCode = generateSixDigitOtp();
-      const showOtpInForm = getShowOtpInForm();
+      const showOtpInForm = process.env.OTP_DEBUG === 'true' && getShowOtpInForm();
       const sendResult = await sendOtpEmail({
         to: email,
         name: name || 'User',
@@ -51,29 +64,22 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         confirmationUrl,
       });
 
-      // If password provided during signup, securely hash with bcrypt & sync to Supabase
+      // Signup only: store pending hash for NEW emails. Never apply password to existing
+      // accounts here — that would allow unauthenticated resets. Use /reset-password after OTP.
       if (password) {
-        const hashedPassword = await hashPassword(password);
-        if (existing) {
-          (existing as any).password_hash = hashedPassword;
-          existing.hasPasswordSet = true;
-          delete (existing as any).password;
-        } else {
-          // Pre-seed in server memory with temporary record
-          const tempUser: any = {
-            id: ensureValidUuid(''),
-            name: name || 'New Member',
-            email: cleanEmail,
-            role: role || 'male_user',
-            password_hash: hashedPassword,
-            hasPasswordSet: true,
-            onlineStatus: 'offline',
-          };
-          serverUsers.set(tempUser.id, tempUser);
+        const policyError = getPasswordPolicyError(password);
+        if (policyError) {
+          return res.status(400).json({ success: false, error: policyError });
         }
-
-        if (isSupabaseAdminConfigured()) {
-          updateUserPasswordAdmin(existing?.id || '', password, cleanEmail).catch(() => {});
+        if (!existing) {
+          const hashedPassword = await hashPassword(password);
+          pendingSignupByEmail.set(cleanEmail, {
+            passwordHash: hashedPassword,
+            name: name || undefined,
+            role: sanitizePublicSignupRole(role),
+            updatedAt: Date.now(),
+          });
+          // Password is applied to Auth/profile after verify + real auth user id exists.
         }
       }
 
@@ -127,102 +133,34 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  // POST Login with Password (Secure server verification with bcrypt & Supabase Auth bridge)
+  // POST Login with Password — Supabase Auth only (no in-memory / hash fallback)
   router.post('/login-password', async (req, res) => {
     try {
       const { email, password } = req.body;
       if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
         return res.status(400).json({ success: false, error: 'Email and password are required' });
       }
+      if (password.trim().length === 0) {
+        return res.status(401).json({ success: false, error: 'Invalid email or password. Please check your credentials.' });
+      }
       const cleanEmail = String(email).trim().toLowerCase();
 
-      // 1. Check & authenticate with Supabase using bcrypt verification
-      if (isSupabaseAdminConfigured()) {
-        const authRes = await authenticateUserWithPasswordAdmin(cleanEmail, password);
-        if (authRes.success && authRes.user) {
-          const normalized = normalizeUserProfile(authRes.user);
-          const existing = serverUsers.get(normalized.id);
-          if (!(normalized as any).password_hash && existing) {
-            (normalized as any).password_hash = (existing as any).password_hash;
-          }
-          serverUsers.set(normalized.id, normalized);
-
-          return res.json({
-            success: true,
-            user: normalized,
-            session: authRes.session,
-          });
-        } else if (authRes.error && (authRes.error.includes('suspended') || authRes.error.includes('banned'))) {
-          return res.status(403).json({ success: false, isBanned: true, error: authRes.error });
-        }
+      if (!isSupabaseAdminConfigured()) {
+        return res.status(503).json({ success: false, error: 'Authentication service is not configured.' });
       }
 
-      // 2. Check in serverUsers memory with bcrypt comparison
-      const matched = Array.from(serverUsers.values()).find(
-        (u) => u.email?.toLowerCase().trim() === cleanEmail || u.name?.toLowerCase().trim() === cleanEmail
-      );
-
-      if (matched) {
-        // Enforce ban check
-        const banCheck = isProfileBanned(matched);
-        if (banCheck.isBanned) {
-          return res.status(403).json({ success: false, isBanned: true, error: banCheck.message });
-        }
-
-        const storedHash = (matched as any).password_hash || (matched as any).password;
-
-        if (storedHash) {
-          const isMatch = await comparePassword(password, storedHash);
-          if (isMatch) {
-            // If stored password was plain text, upgrade to bcrypt in background
-            if (!storedHash.startsWith('$2')) {
-              (matched as any).password_hash = await hashPassword(password);
-              delete (matched as any).password;
-            }
-            if (isSupabaseAdminConfigured()) {
-              updateUserPasswordAdmin(matched.id, password, cleanEmail).catch(() => {});
-            }
-
-            const sanitized: any = { ...matched };
-            delete sanitized.password;
-            delete sanitized.password_hash;
-            sanitized.hasPasswordSet = true;
-            return res.json({ success: true, user: sanitized });
-          }
-          return res.status(401).json({ success: false, error: 'Incorrect password. Please try again.' });
-        }
-
-        if (matched.hasPasswordSet) {
-          return res.status(401).json({ success: false, error: 'Incorrect password. Please try again.' });
-        }
-
-        // Auto-heal profiles without password set (e.g. newly registered / Team Leader created creators)
-        const isCreator = (matched.role as string) === 'female_creator' || (matched.role as string) === 'female_host';
-        const isLeader = (matched.role as string) === 'team_leader' || (matched.role as string) === 'agency_manager';
-        const isAdmin = (matched.role as string) === 'admin' || cleanEmail === 'admin@livecall.com';
-
-        const isDefaultMatch =
-          (isCreator && password === 'creator123') ||
-          (isLeader && password === 'leader123') ||
-          (isAdmin && (password === 'Admin@12345' || password === 'A11mico11*' || password === 'admin123')) ||
-          password === 'Password@12345';
-
-        if (isDefaultMatch) {
-          const newHash = await hashPassword(password);
-          (matched as any).password_hash = newHash;
-          matched.hasPasswordSet = true;
-          delete (matched as any).password;
-
-          if (isSupabaseAdminConfigured()) {
-            updateUserPasswordAdmin(matched.id, password, cleanEmail).catch(() => {});
-          }
-
-          const sanitized: any = { ...matched };
-          delete sanitized.password;
-          delete sanitized.password_hash;
-          sanitized.hasPasswordSet = true;
-          return res.json({ success: true, user: sanitized });
-        }
+      const authRes = await authenticateUserWithPasswordAdmin(cleanEmail, password);
+      if (authRes.success && authRes.user) {
+        const normalized = normalizeUserProfile(authRes.user);
+        serverUsers.set(normalized.id, normalized);
+        return res.json({
+          success: true,
+          user: normalized,
+          session: authRes.session,
+        });
+      }
+      if (authRes.error && (authRes.error.includes('suspended') || authRes.error.includes('banned'))) {
+        return res.status(403).json({ success: false, isBanned: true, error: authRes.error });
       }
 
       return res.status(401).json({ success: false, error: 'Invalid email or password. Please check your credentials.' });
@@ -231,12 +169,15 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  // POST Update User Password (Bcrypt Hash & Supabase sync)
-  router.post('/update-password', async (req, res) => {
+  // POST Update User Password (authenticated — bcrypt hash & Supabase sync)
+  router.post('/update-password', requireAuth, async (req, res) => {
     try {
-      const { userId, email, newPassword } = req.body;
-      if (!newPassword || newPassword.length < 6) {
-        return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+      const { newPassword } = req.body;
+      const userId = String((req as any).profileId || (req as any).user?.id || '');
+      const email = (req as any).user?.email || (req as any).profile?.email;
+      const policyError = getPasswordPolicyError(newPassword);
+      if (policyError) {
+        return res.status(400).json({ success: false, error: policyError });
       }
 
       const passwordHash = await hashPassword(newPassword);
@@ -275,8 +216,77 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
     }
   });
 
+  // POST Password reset via email OTP (unauthenticated; OTP required)
+  router.post('/reset-password', async (req, res) => {
+    try {
+      const { email, token, newPassword } = req.body;
+      if (typeof email !== 'string' || !email.includes('@')) {
+        return res.status(400).json({ success: false, error: 'A valid email address is required.' });
+      }
+      if (typeof token !== 'string' || !token.trim()) {
+        return res.status(400).json({ success: false, error: 'Verification code is required.' });
+      }
+      const policyError = getPasswordPolicyError(newPassword);
+      if (policyError) {
+        return res.status(400).json({ success: false, error: policyError });
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      const verifyResult = verifyStoredOtp(cleanEmail, token.trim());
+      if (!verifyResult.success) {
+        return res.status(400).json({
+          success: false,
+          error: verifyResult.error || 'Invalid or expired OTP code',
+        });
+      }
+
+      const existing = Array.from(serverUsers.values()).find(
+        (u) => u.email?.toLowerCase().trim() === cleanEmail
+      );
+      if (existing) {
+        const banCheck = isProfileBanned(existing);
+        if (banCheck.isBanned) {
+          return res.status(403).json({ success: false, isBanned: true, error: banCheck.message });
+        }
+      }
+
+      const passwordHash = await hashPassword(newPassword);
+      const userId = existing?.id || '';
+
+      if (existing) {
+        (existing as any).password_hash = passwordHash;
+        delete (existing as any).password;
+        existing.hasPasswordSet = true;
+        serverUsers.set(existing.id, existing);
+      }
+
+      if (isSupabaseAdminConfigured()) {
+        const adminRes = await updateUserPasswordAdmin(userId, newPassword, cleanEmail);
+        if (!adminRes.success && !existing) {
+          return res.status(404).json({
+            success: false,
+            error: adminRes.error || 'No account found for this email. Please register instead.',
+          });
+        }
+      } else if (!existing) {
+        return res.status(404).json({
+          success: false,
+          error: 'No account found for this email. Please register instead.',
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: 'Password reset successfully. You can now sign in with your new password.',
+      });
+    } catch (err: any) {
+      console.error('Error in /api/auth/reset-password:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to reset password' });
+    }
+  });
+
   // GET Email & SMTP Configuration Status
-  router.get('/email-config', (req, res) => {
+  router.get('/email-config', requireAdmin, (req, res) => {
     const smtpInfo = getSmtpConfig();
     res.json({
       success: true,
@@ -291,7 +301,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Test Email Dispatch
-  router.post('/test-email', async (req, res) => {
+  router.post('/test-email', requireAdmin, async (req, res) => {
     try {
       const { email, name } = req.body;
       if (!email) return res.status(400).json({ error: 'Destination email is required' });

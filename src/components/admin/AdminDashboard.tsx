@@ -207,7 +207,6 @@ export const AdminDashboard: React.FC = () => {
   const [enableRegularFemaleCoinEarning, setEnableRegularFemaleCoinEarning] = useState<boolean>(
     systemSettings.enableRegularFemaleCoinEarning ?? false
   );
-  const [showDevPersonaBar, setShowDevPersonaBar] = useState(systemSettings.showDevPersonaBar ?? true);
   const [defaultTheme, setDefaultTheme] = useState<'dark' | 'light'>(systemSettings.defaultTheme || 'dark');
   const [videoQualityProfile, setVideoQualityProfile] = useState<'auto' | 'ultra_4k' | 'hd_1080p' | 'high_720p' | 'standard_480p'>(
     systemSettings.videoQualityProfile || 'high_720p'
@@ -288,10 +287,6 @@ export const AdminDashboard: React.FC = () => {
       setEnableRegularFemaleCoinEarning(systemSettings.enableRegularFemaleCoinEarning);
     }
   }, [systemSettings.enableRegularFemaleCoinEarning]);
-
-  useEffect(() => {
-    setShowDevPersonaBar(systemSettings.showDevPersonaBar ?? true);
-  }, [systemSettings.showDevPersonaBar]);
 
   useEffect(() => {
     if (systemSettings.defaultTheme) {
@@ -417,7 +412,7 @@ export const AdminDashboard: React.FC = () => {
       femalePayoutRatioUSD: Number(payoutRatio) || 0.008,
       minPayoutThresholdUSD: Number(minPayout) || 50,
       enableRegularFemaleCoinEarning: Boolean(enableRegularFemaleCoinEarning),
-      showDevPersonaBar: Boolean(showDevPersonaBar),
+      showDevPersonaBar: false,
       defaultTheme: defaultTheme,
       videoQualityProfile: videoQualityProfile,
       quickMatchFreeEnabled: Boolean(quickMatchFreeEnabled),
@@ -1786,53 +1781,6 @@ export const AdminDashboard: React.FC = () => {
             </div>
 
 
-
-            {/* Dev Persona Switcher Bar Toggle */}
-            <div className="sm:col-span-2 p-4 bg-slate-950/80 border border-slate-800 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div>
-                <div className="flex items-center space-x-2">
-                  <span className="text-xs font-bold text-white">Top Dev Persona Switcher Bar</span>
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                    showDevPersonaBar
-                      ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-                      : 'bg-slate-800 text-slate-400 border border-slate-700'
-                  }`}>
-                    {showDevPersonaBar ? 'VISIBLE (DEV TESTING)' : 'HIDDEN (PRODUCTION MODE)'}
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-1 max-w-xl">
-                  Displays the separate top horizontal bar containing all male/female/admin test personas for quick switching.
-                  <strong> Toggle OFF before deploying to real app production.</strong>
-                </p>
-              </div>
-
-              <div className="flex items-center space-x-2 shrink-0">
-                <button
-                  type="button"
-                  id="admin-toggle-dev-bar-btn"
-                  onClick={() => {
-                    const nextVal = !showDevPersonaBar;
-                    setShowDevPersonaBar(nextVal);
-                    updateSystemSettings({ showDevPersonaBar: nextVal });
-                    showToast(
-                      nextVal ? 'Dev Switcher Enabled' : 'Dev Switcher Hidden',
-                      nextVal
-                        ? 'Top persona switcher bar is now visible.'
-                        : 'Top persona switcher bar is hidden (production ready).',
-                      'info'
-                    );
-                  }}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer shadow-md ${
-                    showDevPersonaBar
-                      ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-500/20'
-                      : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-                  }`}
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                  <span>{showDevPersonaBar ? 'Disable / Hide for Prod' : 'Enable Dev Bar'}</span>
-                </button>
-              </div>
-            </div>
 
             {/* FIELD 11: GAMIFIED DAILY REWARDS & ACTIVITY QUESTS MATRIX */}
             <div className="sm:col-span-2 lg:col-span-3 p-5 bg-gradient-to-br from-slate-950 via-amber-950/20 to-slate-950 border border-amber-500/30 rounded-2xl space-y-5">

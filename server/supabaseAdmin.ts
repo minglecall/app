@@ -32,6 +32,18 @@ export function updateSupabaseRuntimeConfig(url?: string, key?: string) {
   }
 }
 
+function decodeJwtRole(token: string): string | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+    return typeof payload?.role === 'string' ? payload.role : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isSupabaseAdminConfigured(): boolean {
   return Boolean(
     supabaseUrl &&
@@ -39,6 +51,11 @@ export function isSupabaseAdminConfigured(): boolean {
     !supabaseUrl.includes('placeholder-project') &&
     !supabaseUrl.includes('your-project-ref')
   );
+}
+
+/** True only when the server key is a service_role JWT (anon keys cannot bypass RLS). */
+export function isSupabaseServiceRoleConfigured(): boolean {
+  return isSupabaseAdminConfigured() && decodeJwtRole(supabaseServiceKey) === 'service_role';
 }
 
 export function getSupabaseAdmin(): SupabaseClient | null {
@@ -107,19 +124,22 @@ export async function hashPassword(plainText: string): Promise<string> {
 }
 
 /**
- * Securely compares a candidate password against a bcrypt hash or legacy string
+ * Securely compares a candidate password against a bcrypt hash only.
+ * Plain-text equality is never accepted (prevents weak / non-hash storage bypasses).
  */
 export async function comparePassword(plainText: string, hashedOrPlain: string): Promise<boolean> {
   if (typeof plainText !== 'string' || typeof hashedOrPlain !== 'string') return false;
   if (!hashedOrPlain || !plainText) return false;
-  if (hashedOrPlain.startsWith('$2a$') || hashedOrPlain.startsWith('$2b$') || hashedOrPlain.startsWith('$2y$')) {
-    try {
-      return await bcrypt.compare(plainText, hashedOrPlain);
-    } catch {
-      return false;
-    }
+  // Reject accidental whitespace-only or padded candidates used to probe auth
+  if (plainText.trim().length === 0) return false;
+  if (!(hashedOrPlain.startsWith('$2a$') || hashedOrPlain.startsWith('$2b$') || hashedOrPlain.startsWith('$2y$'))) {
+    return false;
   }
-  return plainText === hashedOrPlain;
+  try {
+    return await bcrypt.compare(plainText, hashedOrPlain);
+  } catch {
+    return false;
+  }
 }
 
 export function ensureValidUuid(id: string): string {
@@ -187,20 +207,6 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
       }
     }
 
-    // For any profile that still has no password_hash (e.g. newly created by Team Leader / Admin), assign secure default
-    if (!passwordHash) {
-      let defaultPass = 'Password@12345';
-      if (profile.role === 'female_creator' || profile.role === 'female_host') {
-        defaultPass = 'creator123';
-      } else if (profile.role === 'team_leader' || profile.role === 'agency_manager') {
-        defaultPass = 'leader123';
-      } else if (profile.role === 'admin') {
-        defaultPass = 'Admin@12345';
-      }
-      passwordHash = await hashPassword(defaultPass);
-      hasPassword = true;
-    }
-
     // Core standardized profile record (Raw password completely stripped!)
     const payload: Record<string, any> = {
       id: validId,
@@ -248,9 +254,13 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
       coin_earn_override_rate: profile.coinEarnOverrideRate !== undefined && profile.coinEarnOverrideRate !== null ? Number(profile.coinEarnOverrideRate) : (profile.coin_earn_override_rate !== undefined && profile.coin_earn_override_rate !== null ? Number(profile.coin_earn_override_rate) : null),
       commission_percent: profile.commissionPercent !== undefined && profile.commissionPercent !== null ? Number(profile.commissionPercent) : (profile.commission_percent !== undefined && profile.commission_percent !== null ? Number(profile.commission_percent) : null),
       team_leader_note: profile.teamLeaderNote || profile.team_leader_note || null,
-      password_hash: passwordHash,
       has_password_set: hasPassword,
     };
+    // Only write password_hash when explicitly provided — never null-out an existing hash
+    if (passwordHash) {
+      payload.password_hash = passwordHash;
+      payload.has_password_set = true;
+    }
 
     console.log(`[Supabase Admin] Upserting profile for user ${payload.name} (${validId}) into Supabase...`);
 
@@ -585,7 +595,9 @@ export async function updateUserPasswordAdmin(
 }
 
 /**
- * Authenticate user with email and password server-side using bcrypt verification
+ * Authenticate with Supabase Auth ONLY.
+ * Never accepts profiles.password_hash as a login authority, and never
+ * overwrites Auth passwords during verification (that allowed forged passwords).
  */
 export async function authenticateUserWithPasswordAdmin(
   email: string,
@@ -598,130 +610,53 @@ export async function authenticateUserWithPasswordAdmin(
 
   try {
     const cleanEmail = email.trim().toLowerCase();
+    const password = typeof passwordCandidate === 'string' ? passwordCandidate : '';
+    if (!cleanEmail || !password || password.trim().length === 0) {
+      return { success: false, error: 'Invalid email or password. Please check your credentials.' };
+    }
 
-    // 1. Fetch user profile from Supabase profiles table
-    const { data: profile, error } = await client
+    const { data: authData, error: authError } = await client.auth.signInWithPassword({
+      email: cleanEmail,
+      password,
+    });
+
+    if (authError || !authData?.user) {
+      return { success: false, error: 'Invalid email or password. Please check your credentials.' };
+    }
+
+    const { data: profile } = await client
       .from('profiles')
       .select('*')
       .eq('email', cleanEmail)
       .limit(1)
       .maybeSingle();
 
-    if (error) {
-      console.warn('[Supabase Admin] Auth profile lookup error:', error.message);
-    }
-
     if (profile) {
-      const storedHash = (profile as any).password_hash || (profile as any).password;
-
-      if (storedHash) {
-        const isMatch = await comparePassword(passwordCandidate, storedHash);
-        if (isMatch) {
-          // Check active ban
-          const banCheck = isProfileBanned(profile);
-          if (banCheck.isBanned) {
-            return {
-              success: false,
-              error: banCheck.message,
-            };
-          }
-
-          // If stored password was legacy plain text, automatically upgrade to bcrypt!
-          if (!storedHash.startsWith('$2')) {
-            const upgradedHash = await hashPassword(passwordCandidate);
-            client.from('profiles').update({ password_hash: upgradedHash, has_password_set: true } as any).eq('id', profile.id).then(() => {});
-          }
-
-          // Strip password and password_hash from returned user payload
-          const sanitized = { ...profile };
-          delete (sanitized as any).password;
-          delete (sanitized as any).password_hash;
-          sanitized.hasPasswordSet = true;
-
-          return { success: true, user: sanitized };
-        }
-      } else if (!profile.has_password_set && !profile.hasPasswordSet) {
-        // Auto-heal profiles that have null password_hash (e.g. newly created by Team Leader / Admin)
-        const isCreator = profile.role === 'female_creator' || profile.role === 'female_host';
-        const isLeader = profile.role === 'team_leader' || profile.role === 'agency_manager';
-        const isAdmin = profile.role === 'admin' || cleanEmail === 'admin@livecall.com';
-
-        const isDefaultMatch =
-          (isCreator && passwordCandidate === 'creator123') ||
-          (isLeader && passwordCandidate === 'leader123') ||
-          (isAdmin && (passwordCandidate === 'Admin@12345' || passwordCandidate === 'A11mico11*' || passwordCandidate === 'admin123')) ||
-          passwordCandidate === 'Password@12345';
-
-        if (isDefaultMatch) {
-          // Check active ban
-          const banCheck = isProfileBanned(profile);
-          if (banCheck.isBanned) {
-            return {
-              success: false,
-              error: banCheck.message,
-            };
-          }
-
-          console.log(`[Supabase Admin] Auto-healing missing password_hash for user ${profile.name} (${cleanEmail})...`);
-          const newHash = await hashPassword(passwordCandidate);
-          await client
-            .from('profiles')
-            .update({ password_hash: newHash, has_password_set: true } as any)
-            .eq('id', profile.id);
-
-          updateUserPasswordAdmin(profile.id, passwordCandidate, cleanEmail).catch(() => {});
-
-          const sanitized = { ...profile, hasPasswordSet: true };
-          delete (sanitized as any).password;
-          delete (sanitized as any).password_hash;
-          return { success: true, user: sanitized };
-        }
+      const banCheck = isProfileBanned(profile);
+      if (banCheck.isBanned) {
+        return { success: false, error: banCheck.message };
       }
     }
 
-    // 2. Fallback to Supabase Auth signInWithPassword
-    try {
-      const { data: authData, error: authError } = await client.auth.signInWithPassword({
-        email: cleanEmail,
-        password: passwordCandidate,
-      });
-
-      if (!authError && authData?.user) {
-        if (profile) {
-          const banCheck = isProfileBanned(profile);
-          if (banCheck.isBanned) {
-            return {
-              success: false,
-              error: banCheck.message,
-            };
-          }
-        }
-
-        // Auto-sync password_hash into profiles table
-        const newHash = await hashPassword(passwordCandidate);
-        if (profile) {
-          client.from('profiles').update({ password_hash: newHash, has_password_set: true } as any).eq('id', profile.id).then(() => {});
-        }
-
-        const sanitized = profile ? { ...profile } : {
+    const sanitized = profile
+      ? { ...profile }
+      : {
           id: authData.user.id,
           name: authData.user.user_metadata?.full_name || 'Member',
           email: cleanEmail,
-          role: authData.user.user_metadata?.role || 'male_user',
+          role: 'male_user',
           isOnboarded: true,
           onlineStatus: 'online',
         };
-        delete (sanitized as any).password;
-        delete (sanitized as any).password_hash;
-        sanitized.hasPasswordSet = true;
-
-        return { success: true, user: sanitized, session: authData.session };
-      }
-    } catch (e: any) {
-      console.warn('[Supabase Admin] Supabase auth fallback notice:', e.message);
+    delete (sanitized as any).password;
+    delete (sanitized as any).password_hash;
+    sanitized.hasPasswordSet = true;
+    if (authData.user.id) {
+      sanitized.auth_id = authData.user.id;
+      sanitized.authId = authData.user.id;
     }
 
-    return { success: false, error: 'Invalid email or password. Please check your credentials.' };
+    return { success: true, user: sanitized, session: authData.session };
   } catch (err: any) {
     console.error('[Supabase Admin] authenticateUserWithPasswordAdmin exception:', err);
     return { success: false, error: err.message };
@@ -825,10 +760,28 @@ export async function granularResetSupabaseAdmin(options: {
   if (!client) {
     return { success: false, clearedTables: [], error: 'Supabase service role admin is not configured.' };
   }
+  if (!isSupabaseServiceRoleConfigured()) {
+    return {
+      success: false,
+      clearedTables: [],
+      error:
+        'Database reset requires SUPABASE_SERVICE_ROLE_KEY. The anon key cannot bypass RLS, so tables would not actually be purged.',
+    };
+  }
 
   const clearedTables: string[] = [];
+  const failedOps: string[] = [];
 
   try {
+    const recordDelete = (table: string, error: { message: string } | null | undefined) => {
+      if (!error) {
+        clearedTables.push(table);
+        return;
+      }
+      failedOps.push(`${table}: ${error.message}`);
+      console.warn(`[Supabase Admin Reset] ${table} purge warning:`, error.message);
+    };
+
     // Optional: purge Cloudflare R2 uploads before DB deletion
     if (options.purgeR2MediaStorage) {
       clearLocalMediaCache();
@@ -850,8 +803,7 @@ export async function granularResetSupabaseAdmin(options: {
           .from('messages')
           .delete()
           .eq('type', 'gift');
-        if (!giftMsgErr) clearedTables.push('gift_messages');
-        else console.warn('[Supabase Admin Reset] gift message purge warning:', giftMsgErr.message);
+        recordDelete('gift_messages', giftMsgErr);
       } catch (err: any) {
         console.warn('[Supabase Admin Reset] gift message purge exception:', err?.message || err);
       }
@@ -864,121 +816,110 @@ export async function granularResetSupabaseAdmin(options: {
             virtual_gifts_json: JSON.stringify(VIRTUAL_GIFTS),
           })
           .eq('id', 'default');
-        if (!sysErr) clearedTables.push('system_configs.virtual_gifts_json');
-        else console.warn('[Supabase Admin Reset] system virtual gifts update warning:', sysErr.message);
+        recordDelete('system_configs.virtual_gifts_json', sysErr);
       } catch (err: any) {
         console.warn('[Supabase Admin Reset] system virtual gifts update exception:', err?.message || err);
       }
     }
 
+    // PostgREST requires a filter on DELETE/UPDATE. PK columns are NOT NULL,
+    // so `col IS NOT NULL` matches every row without fake UUID/text sentinels.
+    const deleteAllRows = (table: string, notNullColumn: string) =>
+      (client.from(table) as any).delete().not(notNullColumn, 'is', null);
+
     // 1. Delete Messages Table
     if (options.chatMessages) {
-      const { error } = await client.from('messages').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('messages');
-      else console.warn('[Supabase Admin Reset] messages purge warning:', error.message);
+      const { error } = await deleteAllRows('messages', 'id');
+      recordDelete('messages', error);
     }
 
     // 2. Delete Call Logs Table
     if (options.callLogs) {
-      const { error } = await client.from('call_logs').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('call_logs');
-      else console.warn('[Supabase Admin Reset] call_logs purge warning:', error.message);
+      const { error } = await deleteAllRows('call_logs', 'id');
+      recordDelete('call_logs', error);
     }
 
     // 3. Delete Matches Table
     if (options.callLogs || options.chatMessages) {
-      const { error } = await client.from('matches').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('matches');
-      else console.warn('[Supabase Admin Reset] matches purge warning:', error.message);
+      const { error } = await deleteAllRows('matches', 'id');
+      recordDelete('matches', error);
     }
 
     // 4. Delete Friend Requests Table
     if (options.friendRequests) {
-      const { error } = await client.from('friend_requests').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('friend_requests');
-      else console.warn('[Supabase Admin Reset] friend_requests purge warning:', error.message);
+      const { error } = await deleteAllRows('friend_requests', 'id');
+      recordDelete('friend_requests', error);
     }
 
     // 5. Delete Payout Requests Table
     if (options.payoutRequests) {
-      const { error } = await client.from('payout_requests').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('payout_requests');
-      else console.warn('[Supabase Admin Reset] payout_requests purge warning:', error.message);
+      const { error } = await deleteAllRows('payout_requests', 'id');
+      recordDelete('payout_requests', error);
     }
 
     // 6. Delete Moderation Reports Table
     if (options.moderationReports) {
-      const { error } = await client.from('moderation_reports').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('moderation_reports');
-      else console.warn('[Supabase Admin Reset] moderation_reports purge warning:', error.message);
+      const { error } = await deleteAllRows('moderation_reports', 'id');
+      recordDelete('moderation_reports', error);
     }
 
     // 7. Delete Feed Posts Table
     if (options.feedPosts) {
-      const { error } = await client.from('feed_posts').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('feed_posts');
-      else console.warn('[Supabase Admin Reset] feed_posts purge warning:', error.message);
+      const { error } = await deleteAllRows('feed_posts', 'id');
+      recordDelete('feed_posts', error);
     }
 
     // 7a. Delete CMS / System Admin Tables
     if (options.homeBanners) {
-      const { error } = await client.from('home_banners').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('home_banners');
-      else console.warn('[Supabase Admin Reset] home_banners purge warning:', error.message);
+      const { error } = await deleteAllRows('home_banners', 'id');
+      recordDelete('home_banners', error);
     }
 
     if (options.homeQuickLinks) {
-      const { error } = await client.from('home_quick_links').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('home_quick_links');
-      else console.warn('[Supabase Admin Reset] home_quick_links purge warning:', error.message);
+      const { error } = await deleteAllRows('home_quick_links', 'id');
+      recordDelete('home_quick_links', error);
     }
 
     if (options.cmsPolicies) {
-      const { error } = await client.from('cms_policies').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('cms_policies');
-      else console.warn('[Supabase Admin Reset] cms_policies purge warning:', error.message);
+      const { error } = await deleteAllRows('cms_policies', 'id');
+      recordDelete('cms_policies', error);
     }
 
     if (options.systemSettings) {
-      const { error } = await client.from('system_configs').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('system_configs');
-      else console.warn('[Supabase Admin Reset] system_configs purge warning:', error.message);
+      const { error } = await deleteAllRows('system_configs', 'id');
+      recordDelete('system_configs', error);
     }
 
     if (options.coinPackages) {
-      const { error } = await client.from('coin_packages').delete().neq('id', '___non_existent___');
-      if (!error) clearedTables.push('coin_packages');
-      else console.warn('[Supabase Admin Reset] coin_packages purge warning:', error.message);
+      const { error } = await deleteAllRows('coin_packages', 'id');
+      recordDelete('coin_packages', error);
     }
 
     // 8. Delete Favorites Table
     if (options.favorites) {
-      const { error } = await client.from('favorites').delete().neq('user_id', '___non_existent___');
-      if (!error) clearedTables.push('favorites');
-      else console.warn('[Supabase Admin Reset] favorites purge warning:', error.message);
+      const { error } = await deleteAllRows('favorites', 'user_id');
+      recordDelete('favorites', error);
     }
 
     // 9. Delete Blocked Users Table
     if (options.blockedUsers) {
-      const { error } = await client.from('blocked_users').delete().neq('user_id', '___non_existent___');
-      if (!error) clearedTables.push('blocked_users');
-      else console.warn('[Supabase Admin Reset] blocked_users purge warning:', error.message);
+      const { error } = await deleteAllRows('blocked_users', 'user_id');
+      recordDelete('blocked_users', error);
     }
 
     // 10. Delete Creator Goals Table
     if (options.creatorGoals) {
-      const { error } = await client.from('creator_goals').delete().neq('creator_id', '___non_existent___');
-      if (!error) clearedTables.push('creator_goals');
-      else console.warn('[Supabase Admin Reset] creator_goals purge warning:', error.message);
+      const { error } = await deleteAllRows('creator_goals', 'creator_id');
+      recordDelete('creator_goals', error);
     }
 
     // 10a. Delete Creator Analytics / Metrics Table
     if (options.creatorAnalytics) {
       try {
-        const { error } = await client.from('creator_metrics').delete().neq('creator_id', '___non_existent___');
-        if (!error) clearedTables.push('creator_metrics');
-        else console.warn('[Supabase Admin Reset] creator_metrics purge warning:', error.message);
+        const { error } = await deleteAllRows('creator_metrics', 'creator_id');
+        recordDelete('creator_metrics', error);
       } catch (err: any) {
+        failedOps.push(`creator_metrics: ${err?.message || err}`);
         console.warn('[Supabase Admin Reset] creator_metrics purge exception:', err?.message || err);
       }
     }
@@ -986,22 +927,17 @@ export async function granularResetSupabaseAdmin(options: {
     // 10b. Delete Taxonomies, Tags & Moderation Flags
     if (options.taxonomiesAndFlags) {
       try {
-        const blocks: Array<{ table: string; filter: string; value: string }> = [
-          { table: 'country_configs', filter: 'code', value: '___non_existent___' },
-          { table: 'language_configs', filter: 'code', value: '___non_existent___' },
-          { table: 'zodiac_configs', filter: 'key', value: '___non_existent___' },
-          { table: 'interest_configs', filter: 'id', value: '___non_existent___' },
-          { table: 'moderation_reports', filter: 'id', value: '___non_existent___' },
+        const blocks: Array<{ table: string; filter: string }> = [
+          { table: 'country_configs', filter: 'code' },
+          { table: 'language_configs', filter: 'code' },
+          { table: 'zodiac_configs', filter: 'key' },
+          { table: 'interest_configs', filter: 'id' },
+          { table: 'moderation_reports', filter: 'id' },
         ];
 
-        const anyClient = client as any;
         for (const b of blocks) {
-          const { error } = await anyClient
-            .from(b.table as any)
-            .delete()
-            .neq(b.filter as any, b.value);
-          if (!error) clearedTables.push(b.table);
-          else console.warn(`[Supabase Admin Reset] ${b.table} purge warning:`, error.message);
+          const { error } = await deleteAllRows(b.table, b.filter);
+          recordDelete(b.table, error);
         }
       } catch (err: any) {
         console.warn('[Supabase Admin Reset] taxonomiesAndFlags purge exception:', err?.message || err);
@@ -1010,9 +946,8 @@ export async function granularResetSupabaseAdmin(options: {
 
     // 10b. Delete User Daily Rewards Table
     if (options.clearAllUsers || options.creatorGoals || options.dailyRewardsAndQuests) {
-      const { error } = await client.from('user_daily_rewards').delete().neq('user_id', '___non_existent___');
-      if (!error) clearedTables.push('user_daily_rewards');
-      else console.warn('[Supabase Admin Reset] user_daily_rewards purge warning:', error.message);
+      const { error } = await deleteAllRows('user_daily_rewards', 'user_id');
+      recordDelete('user_daily_rewards', error);
     }
 
     // 11. Reset Financial Balances on Profiles Table
@@ -1030,21 +965,18 @@ export async function granularResetSupabaseAdmin(options: {
       if (Object.keys(updates).length > 0) {
         const { error } = await (client.from('profiles') as any)
           .update(updates)
-          .neq('id', '___non_existent___');
-        if (!error) clearedTables.push('balances_reset');
-        else console.warn('[Supabase Admin Reset] balances update warning:', error.message);
+          .not('id', 'is', null);
+        recordDelete('balances_reset', error);
       }
     }
 
     // 12. Delete User Profiles (Cascade order safe)
     if (options.mockIds && options.mockIds.length > 0) {
       const { error } = await client.from('profiles').delete().in('id', options.mockIds);
-      if (!error) clearedTables.push(`profiles (${options.mockIds.length} mock users)`);
-      else console.warn('[Supabase Admin Reset] mock profiles deletion warning:', error.message);
+      recordDelete(`profiles (${options.mockIds.length} mock users)`, error);
     } else if (options.clearAllUsers) {
       const { error } = await client.from('profiles').delete().neq('role', 'admin');
-      if (!error) clearedTables.push('profiles (all non-admin users)');
-      else console.warn('[Supabase Admin Reset] non-admin profiles deletion warning:', error.message);
+      recordDelete('profiles (all non-admin users)', error);
     }
 
     // 13. Admin Account Restoration
@@ -1064,6 +996,14 @@ export async function granularResetSupabaseAdmin(options: {
         updated_at: new Date().toISOString(),
       }, { onConflict: 'id' });
       clearedTables.push('admin_restored');
+    }
+
+    if (failedOps.length > 0) {
+      return {
+        success: false,
+        clearedTables,
+        error: `Some reset operations failed: ${failedOps.join('; ')}`,
+      };
     }
 
     return { success: true, clearedTables };
@@ -1207,7 +1147,7 @@ export async function updateUserProfileAdmin(
     // If 0 rows updated and email provided, update by email match
     const cleanEmail = (updates.email || payload.email) ? String(updates.email || payload.email).toLowerCase().trim() : null;
     if (!res.data && cleanEmail) {
-      res = await client.from('profiles').update(payload).eq('email', cleanEmail).select().maybeSingle();
+      res = await client.from('profiles').update(payload).ilike('email', cleanEmail).select().maybeSingle();
     }
 
     if (res.error) {

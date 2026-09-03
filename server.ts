@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -27,6 +28,7 @@ import {
   fetchCreatorMetricsAdmin,
   upsertCreatorMetricsAdmin,
 } from './server/supabaseAdmin';
+import { getPasswordPolicyError } from './shared/passwordPolicy';
 import {
   testR2Connectivity,
   updateR2RuntimeConfig,
@@ -46,6 +48,16 @@ import {
   createUsersAdminRouter,
   createCallRouter,
 } from './server/routes';
+import {
+  requireAuth,
+  requireAdmin,
+  requireTeamLeader,
+  verifyAccessToken,
+  stripPrivilegedProfileFields,
+  sanitizePublicSignupRole,
+  callerOwnsCreator,
+} from './server/middleware/auth';
+import { VIRTUAL_GIFTS } from './src/constants/appDefaults';
 
 dotenv.config();
 
@@ -146,7 +158,6 @@ async function startServer() {
       totalReviewsCount: Number(p.totalReviewsCount ?? p.total_reviews_count ?? 0),
       acceptanceRatePercent: Number(p.acceptanceRatePercent ?? p.acceptance_rate_percent ?? 100),
       hasPasswordSet: Boolean(p.hasPasswordSet ?? p.has_password_set ?? p.password_hash ?? p.password),
-      password_hash: p.password_hash || p.passwordHash || undefined,
       teamLeaderId: p.teamLeaderId || p.team_leader_id || p.createdById || p.created_by_id || undefined,
       createdById: p.createdById || p.created_by_id || p.teamLeaderId || p.team_leader_id || undefined,
       agencyName: p.agencyName || p.agency_name || undefined,
@@ -439,108 +450,87 @@ async function startServer() {
 
         switch (msg.type) {
           case 'auth': {
-            const { userId, prevUserId, userProfile } = msg;
-
             const existingIdx = connectedSockets.findIndex((c) => c.ws === ws);
-            const oldUserId = prevUserId || (existingIdx !== -1 ? connectedSockets[existingIdx].userId : null);
+            const oldUserId = msg.prevUserId || (existingIdx !== -1 ? connectedSockets[existingIdx].userId : null);
 
-            if (!userId) {
-              authenticatedUserId = null;
+            void (async () => {
+              const verified = await verifyAccessToken(String(msg.accessToken || ''));
+              const userId = verified?.profile?.id || verified?.user?.id || '';
+
+              if (!userId) {
+                authenticatedUserId = null;
+                sendJson(ws, { type: 'auth:error', error: 'Valid access token required.' });
+                if (existingIdx !== -1) {
+                  connectedSockets[existingIdx].userId = '';
+                }
+                ws.close();
+                return;
+              }
+
+              authenticatedUserId = userId;
               if (existingIdx !== -1) {
-                connectedSockets[existingIdx].userId = '';
+                connectedSockets[existingIdx].userId = userId;
+              } else {
+                connectedSockets.push({ id: socketId, userId, ws });
               }
-              if (oldUserId) {
-                presenceMap.set(oldUserId, 'offline');
-                userLastSeen.delete(oldUserId);
-                const oldU = serverUsers.get(oldUserId);
-                if (oldU) oldU.onlineStatus = 'offline';
-                if (isSupabaseAdminConfigured()) {
-                  updateUserStatusAdmin(oldUserId, 'offline').catch(() => {});
-                }
-                broadcastPresence();
-                broadcastUsers();
-              }
-              return;
-            }
 
-            authenticatedUserId = userId;
-
-            // If userProfile provided, persist/merge into serverUsers
-            if (userProfile && userProfile.id) {
-              const existing = serverUsers.get(userProfile.id);
-              serverUsers.set(userProfile.id, {
-                ...(existing || {}),
-                ...userProfile,
-                onlineStatus: 'online',
-              });
-            }
-
-            // Track this socket connection cleanly
-            if (existingIdx !== -1) {
-              connectedSockets[existingIdx].userId = userId;
-            } else {
-              connectedSockets.push({ id: socketId, userId, ws });
-            }
-
-            // If switched away from another persona on this device, mark old user offline if no other device has them
-            if (oldUserId && oldUserId !== userId) {
-              const stillConnectedOld = connectedSockets.some((c) => c.userId === oldUserId && c.ws !== ws);
-              if (!stillConnectedOld) {
-                presenceMap.set(oldUserId, 'offline');
-                userLastSeen.delete(oldUserId);
-                const oldU = serverUsers.get(oldUserId);
-                if (oldU) oldU.onlineStatus = 'offline';
-                if (isSupabaseAdminConfigured()) {
-                  updateUserStatusAdmin(oldUserId, 'offline').catch(() => {});
+              if (oldUserId && oldUserId !== userId) {
+                const stillConnectedOld = connectedSockets.some((c) => c.userId === oldUserId && c.ws !== ws);
+                if (!stillConnectedOld) {
+                  presenceMap.set(oldUserId, 'offline');
+                  userLastSeen.delete(oldUserId);
+                  const oldU = serverUsers.get(oldUserId);
+                  if (oldU) oldU.onlineStatus = 'offline';
+                  if (isSupabaseAdminConfigured()) {
+                    updateUserStatusAdmin(oldUserId, 'offline').catch(() => {});
+                  }
                 }
               }
-            }
 
-            // Mark new authenticated user online/busy
-            const isBusy = Array.from(activeCalls.values()).some(
-              (c) => (c.callerId === userId || c.receiverId === userId) && c.status !== 'ended'
-            );
-            presenceMap.set(userId, isBusy ? 'busy' : 'online');
-            userLastSeen.set(userId, Date.now());
-            const currentUserObj = serverUsers.get(userId);
-            if (currentUserObj) currentUserObj.onlineStatus = isBusy ? 'busy' : 'online';
+              const isBusy = Array.from(activeCalls.values()).some(
+                (c) => (c.callerId === userId || c.receiverId === userId) && c.status !== 'ended'
+              );
+              presenceMap.set(userId, isBusy ? 'busy' : 'online');
+              userLastSeen.set(userId, Date.now());
+              const currentUserObj = serverUsers.get(userId);
+              if (currentUserObj) currentUserObj.onlineStatus = isBusy ? 'busy' : 'online';
 
-            if (isSupabaseAdminConfigured()) {
-              updateUserStatusAdmin(userId, isBusy ? 'busy' : 'online').catch(() => {});
-            }
-
-            // Send full initial state to this newly authenticated client
-            sendJson(ws, { type: 'presence:all', presence: getFormattedPresence() });
-            sendJson(ws, { type: 'users:all', users: getFormattedUsers() });
-            sendJson(ws, { type: 'quick_match:live_hosts', liveHostIds: Array.from(quickMatchLiveHosts) });
-            sendJson(ws, { type: 'quick_match:active_callers', activeCallerIds: Array.from(quickMatchActiveCallers) });
-            sendJson(ws, { type: 'creator_metrics:all', metrics: getFormattedCreatorMetrics() });
-            sendJson(ws, {
-              type: 'admin:active_calls_update',
-              activeCalls: getFormattedActiveCalls(),
-            });
-
-            // Resync ongoing call if user reconnected
-            const existingCall = Array.from(activeCalls.values()).find(
-              (c) => (c.callerId === userId || c.receiverId === userId) && c.status !== 'ended'
-            );
-            if (existingCall) {
+              sendJson(ws, { type: 'auth:ok', userId });
+              sendJson(ws, { type: 'presence:all', presence: getFormattedPresence() });
+              sendJson(ws, { type: 'users:all', users: getFormattedUsers() });
+              sendJson(ws, { type: 'quick_match:live_hosts', liveHostIds: Array.from(quickMatchLiveHosts) });
+              sendJson(ws, { type: 'quick_match:active_callers', activeCallerIds: Array.from(quickMatchActiveCallers) });
+              sendJson(ws, { type: 'creator_metrics:all', metrics: getFormattedCreatorMetrics() });
               sendJson(ws, {
-                type: existingCall.status === 'ringing' ? 'call:incoming' : 'call:accepted',
-                callId: existingCall.id,
-                callerId: existingCall.callerId,
-                receiverId: existingCall.receiverId,
-                startTime: existingCall.startTime,
+                type: 'admin:active_calls_update',
+                activeCalls: getFormattedActiveCalls(),
               });
-            }
-
-            // Broadcast presence and users to all connected devices immediately
-            broadcastPresence();
-            broadcastUsers();
-            broadcastActiveCalls();
-            break;
+              const existingCall = Array.from(activeCalls.values()).find(
+                (c) => (c.callerId === userId || c.receiverId === userId) && c.status !== 'ended'
+              );
+              if (existingCall) {
+                sendJson(ws, {
+                  type: existingCall.status === 'ringing' ? 'call:incoming' : 'call:accepted',
+                  callId: existingCall.id,
+                  callerId: existingCall.callerId,
+                  receiverId: existingCall.receiverId,
+                  startTime: existingCall.startTime,
+                });
+              }
+              broadcastPresence();
+              broadcastUsers();
+              broadcastActiveCalls();
+            })();
+            return;
           }
+        }
 
+        if (!authenticatedUserId) {
+          sendJson(ws, { type: 'auth:error', error: 'Authenticate with a valid access token first.' });
+          return;
+        }
+
+        switch (msg.type) {
           case 'admin:get_active_calls': {
             sendJson(ws, {
               type: 'admin:active_calls_update',
@@ -550,7 +540,8 @@ async function startServer() {
           }
 
           case 'presence:update': {
-            const { userId, status } = msg;
+            const userId = authenticatedUserId;
+            const { status } = msg;
             if (userId && (status === 'online' || status === 'busy' || status === 'offline')) {
               if (status === 'offline') {
                 userLastSeen.delete(userId);
@@ -575,14 +566,19 @@ async function startServer() {
             break;
           }
           case 'user:update': {
-            const { userId, userProfile } = msg;
-            if (userProfile && (userId || userProfile.id)) {
-              const targetId = userId || userProfile.id;
+            const { userProfile } = msg;
+            if (userProfile) {
+              const targetId = authenticatedUserId;
               const cleanEmail = userProfile.email ? String(userProfile.email).toLowerCase().trim() : null;
               const existing = serverUsers.get(targetId);
+              const sanitizedProfile = stripPrivilegedProfileFields(userProfile || {});
               const normalized = normalizeUserProfile({
                 ...(existing || {}),
-                ...userProfile,
+                ...sanitizedProfile,
+                id: targetId,
+                role: existing?.role,
+                coinBalance: existing?.coinBalance,
+                earningsCoins: existing?.earningsCoins,
                 countryCode: userProfile.countryCode || userProfile.country_code || existing?.countryCode,
                 country_code: userProfile.countryCode || userProfile.country_code || existing?.countryCode,
                 nationality: userProfile.nationality || existing?.nationality,
@@ -614,7 +610,7 @@ async function startServer() {
           }
 
           case 'heartbeat': {
-            const targetId = msg.userId || authenticatedUserId;
+            const targetId = authenticatedUserId;
             if (targetId) {
               userLastSeen.set(targetId, Date.now());
               const currentStatus = getAuthoritativeStatus(targetId);
@@ -631,7 +627,8 @@ async function startServer() {
           }
 
           case 'call:initiate': {
-            const { callerId, receiverId } = msg;
+            const callerId = authenticatedUserId;
+            const { receiverId } = msg;
             if (!callerId || !receiverId) return;
 
             // Check receiver status if explicitly marked offline or busy
@@ -1282,7 +1279,7 @@ async function startServer() {
   // =========================================================================
 
   // GET All Authoritative Users
-  app.get('/api/users', (req, res) => {
+  app.get('/api/users', requireAuth, (req, res) => {
     res.json({
       success: true,
       users: getFormattedUsers(),
@@ -1292,24 +1289,64 @@ async function startServer() {
   });
 
   // POST Create or Update User (Registration / Profile edits from any device)
-  app.post('/api/users', async (req, res) => {
+  app.post('/api/users', requireAuth, async (req, res) => {
     try {
-      const rawUser = req.body as any;
-      if (!rawUser || !rawUser.id) {
+      const callerProfile = (req as any).profile;
+      const callerId = String((req as any).profileId || (req as any).user?.id || '');
+      const isAdmin = callerProfile?.role === 'admin';
+      let rawUser = req.body as any;
+      if (!rawUser) {
         return res.status(400).json({ error: 'User object with valid id is required' });
+      }
+      if (!isAdmin) {
+        rawUser = { ...stripPrivilegedProfileFields(rawUser), id: callerId, role: callerProfile?.role };
+      }
+      if (!rawUser.id) {
+        rawUser.id = callerId;
+      }
+      if (!isAdmin && String(rawUser.id) !== callerId) {
+        return res.status(403).json({ success: false, error: { message: 'Cannot modify another user.', code: 'FORBIDDEN' } });
       }
 
       const cleanEmail = rawUser.email ? String(rawUser.email).toLowerCase().trim() : null;
-      const existing = serverUsers.get(rawUser.id);
+
+      // Keep the posted id when it already exists. Only fall back to email match for brand-new rows.
+      // Forcing email-canonical ids was rewriting the real user into an orphan UUID so wallet top-ups vanished.
+      let canonicalId = String(rawUser.id);
+      if (!serverUsers.has(canonicalId) && cleanEmail) {
+        const emailMatch = Array.from(serverUsers.values()).find(
+          (u) => u.email && u.email.toLowerCase().trim() === cleanEmail
+        );
+        if (emailMatch?.id) {
+          canonicalId = emailMatch.id;
+        }
+      }
+
+      const existing = serverUsers.get(canonicalId) || serverUsers.get(rawUser.id);
       const merged = {
         ...(existing || {}),
         ...rawUser,
+        id: canonicalId,
+        coinBalance:
+          rawUser.coinBalance !== undefined
+            ? Number(rawUser.coinBalance)
+            : existing?.coinBalance,
+        earningsCoins:
+          rawUser.earningsCoins !== undefined
+            ? Number(rawUser.earningsCoins)
+            : existing?.earningsCoins,
         country_code: rawUser.countryCode || rawUser.country_code || existing?.countryCode,
       };
       const updatedUser: UserProfile = normalizeUserProfile(merged);
 
       // Handle password hashing if raw password or password_hash supplied
       if (rawUser.password || rawUser.password_hash) {
+        if (rawUser.password) {
+          const pwError = getPasswordPolicyError(rawUser.password);
+          if (pwError) {
+            return res.status(400).json({ success: false, error: pwError });
+          }
+        }
         const hash = rawUser.password_hash || (await hashPassword(rawUser.password));
         (updatedUser as any).password_hash = hash;
         updatedUser.hasPasswordSet = true;
@@ -1332,10 +1369,13 @@ async function startServer() {
       }
 
       serverUsers.set(updatedUser.id, updatedUser);
+
+      // Collapse any other in-memory rows that share this email (legacy orphan temps)
       if (cleanEmail) {
-        for (const [sId, sUser] of serverUsers.entries()) {
+        for (const [sId, sUser] of Array.from(serverUsers.entries())) {
+          if (sId === updatedUser.id) continue;
           if (sUser.email && sUser.email.toLowerCase().trim() === cleanEmail) {
-            serverUsers.set(sId, { ...sUser, ...updatedUser, id: sId });
+            serverUsers.delete(sId);
           }
         }
       }
@@ -1351,6 +1391,14 @@ async function startServer() {
         user: updatedUser,
         users: getFormattedUsers(),
       });
+      broadcastAll({
+        type: 'wallet:balance_update',
+        userId: updatedUser.id,
+        authId: updatedUser.authId,
+        email: updatedUser.email,
+        coinBalance: updatedUser.coinBalance,
+        earningsCoins: updatedUser.earningsCoins,
+      });
       broadcastPresence();
 
       return res.json({
@@ -1365,9 +1413,15 @@ async function startServer() {
   });
 
   // POST Directly update profile in Supabase PostgreSQL via Supabase Admin (Bypasses client RLS restrictions)
-  app.post('/api/supabase/update-profile', async (req, res) => {
+  app.post('/api/supabase/update-profile', requireAuth, async (req, res) => {
     try {
-      const { userId, updates } = req.body;
+      const callerId = String((req as any).profileId || (req as any).user?.id || '');
+      const isAdmin = (req as any).profile?.role === 'admin';
+      let { userId, updates } = req.body;
+      if (!isAdmin) {
+        userId = callerId;
+        updates = stripPrivilegedProfileFields(updates || {});
+      }
       if (!userId || !updates) {
         return res.status(400).json({ success: false, error: 'userId and updates object are required' });
       }
@@ -1399,12 +1453,15 @@ async function startServer() {
       });
       serverUsers.set(userId, normalized);
 
-      // Update matching email aliases
       if (normalized.email) {
         const cleanEmail = normalized.email.toLowerCase().trim();
         for (const [sId, sUser] of serverUsers.entries()) {
-          if (sUser.email && sUser.email.toLowerCase().trim() === cleanEmail) {
-            serverUsers.set(sId, { ...sUser, ...normalized, id: sId });
+          if (sId !== userId && sUser.email && sUser.email.toLowerCase().trim() === cleanEmail) {
+            serverUsers.set(sId, {
+              ...sUser,
+              coinBalance: normalized.coinBalance,
+              earningsCoins: normalized.earningsCoins,
+            });
           }
         }
       }
@@ -1413,6 +1470,14 @@ async function startServer() {
         type: 'users:updated',
         user: normalized,
         users: getFormattedUsers(),
+      });
+      broadcastAll({
+        type: 'wallet:balance_update',
+        userId: normalized.id,
+        authId: normalized.authId,
+        email: normalized.email,
+        coinBalance: normalized.coinBalance,
+        earningsCoins: normalized.earningsCoins,
       });
 
       return res.json({ success: true, message: 'Profile updated in Supabase and synchronized.' });
@@ -1423,9 +1488,14 @@ async function startServer() {
   });
 
   // POST Upsert Full Profile in Supabase PostgreSQL via Supabase Admin
-  app.post('/api/supabase/upsert-profile', async (req, res) => {
+  app.post('/api/supabase/upsert-profile', requireAuth, async (req, res) => {
     try {
-      const rawUser = req.body as any;
+      const callerId = String((req as any).profileId || (req as any).user?.id || '');
+      const isAdmin = (req as any).profile?.role === 'admin';
+      let rawUser = req.body as any;
+      if (!isAdmin) {
+        rawUser = { ...stripPrivilegedProfileFields(rawUser || {}), id: callerId, role: (req as any).profile?.role };
+      }
       if (!rawUser || !rawUser.id) {
         return res.status(400).json({ success: false, error: 'Valid user profile object is required' });
       }
@@ -1467,7 +1537,7 @@ async function startServer() {
   // POST /api/calls/burn is handled by createCallRouter (requireAuth, server-computed amounts)
 
   // POST /api/calls/sync - Sync call end status to server
-  app.post('/api/calls/sync', async (req, res) => {
+  app.post('/api/calls/sync', requireAuth, async (req, res) => {
     try {
       const { callId, callerId, receiverId, status } = req.body;
       if (callId && status === 'ended') {
@@ -1489,39 +1559,27 @@ async function startServer() {
   // ============================================================================
 
   // GET Managed Creators for Team Leader
-  app.get('/api/teamleader/creators', (req, res) => {
+  app.get('/api/teamleader/creators', requireTeamLeader, (req, res) => {
     try {
-      const leaderId = req.query.leaderId as string | undefined;
-      const agencyName = req.query.agencyName as string | undefined;
+      const leader = (req as any).profile;
+      const leaderId = String(leader?.id || (req as any).profileId || '');
+      const agencyName = leader?.agencyName;
+      const isAdmin = leader?.role === 'admin';
       const allUsers = getFormattedUsers();
 
       const creators = allUsers.filter((u) => {
         const isFemale = u.gender === 'female' || (u.role as string) === 'female_creator' || (u.role as string) === 'female_host';
         if (!isFemale) return false;
-
-        if (leaderId) {
-          // Direct assignment
-          if (u.teamLeaderId === leaderId || u.createdById === leaderId) {
-            return true;
-          }
-          // Agency assignment
-          if (agencyName && u.agencyName === agencyName) {
-            return true;
-          }
-          // Default demo fallback for demo team leader
-          if (leaderId === 'admin_user' || leaderId.includes('teamleader')) {
-            return true;
-          }
-          return false;
-        }
-
-        return true;
+        if (isAdmin) return true;
+        return callerOwnsCreator(leader, u);
       });
 
       return res.json({
         success: true,
         creators,
         count: creators.length,
+        leaderId,
+        agencyName,
       });
     } catch (err: any) {
       console.error('Error in GET /api/teamleader/creators:', err);
@@ -1530,19 +1588,25 @@ async function startServer() {
   });
 
   // POST Create Managed Creator by Team Leader
-  app.post('/api/teamleader/creators', async (req, res) => {
+  app.post('/api/teamleader/creators', requireTeamLeader, async (req, res) => {
     try {
+      const leader = (req as any).profile;
+      const leaderId = String(leader?.id || (req as any).profileId || '');
       const payload = req.body;
       if (!payload || !payload.name) {
         return res.status(400).json({ success: false, error: 'Creator name is required' });
       }
 
       const validId = payload.id || ensureValidUuid('');
-      const creatorPassword = payload.password || 'creator123';
+      const creatorPassword = String(payload.password || '');
+      const creatorPasswordError = getPasswordPolicyError(creatorPassword);
+      if (creatorPasswordError) {
+        return res.status(400).json({ success: false, error: creatorPasswordError });
+      }
       const passwordHash = await hashPassword(creatorPassword);
 
       const normalizedCreator = normalizeUserProfile({
-        ...payload,
+        ...stripPrivilegedProfileFields(payload),
         id: validId,
         gender: 'female',
         genderLocked: true,
@@ -1551,6 +1615,9 @@ async function startServer() {
         agreedToTerms: true,
         agreedToHostTerms: true,
         hasPasswordSet: true,
+        teamLeaderId: leaderId,
+        createdById: leaderId,
+        agencyName: leader?.agencyName || payload.agencyName,
       });
 
       (normalizedCreator as any).password_hash = passwordHash;
@@ -1587,7 +1654,7 @@ async function startServer() {
   });
 
   // POST Update Creator Coin Earn Override Rate
-  app.post('/api/teamleader/override-rate', async (req, res) => {
+  app.post('/api/teamleader/override-rate', requireTeamLeader, async (req, res) => {
     try {
       const { creatorId, rate } = req.body;
       if (!creatorId || rate === undefined) {
@@ -1596,6 +1663,10 @@ async function startServer() {
 
       const numericRate = Number(rate);
       const existing = serverUsers.get(creatorId);
+      const leader = (req as any).profile;
+      if (existing && !callerOwnsCreator(leader, existing)) {
+        return res.status(403).json({ success: false, error: 'Not authorized for this creator.' });
+      }
       if (existing) {
         const updated: UserProfile = {
           ...existing,
@@ -1624,11 +1695,17 @@ async function startServer() {
   });
 
   // POST Ban Female Host by Team Leader for N Days
-  app.post('/api/teamleader/ban-creator', async (req, res) => {
+  app.post('/api/teamleader/ban-creator', requireTeamLeader, async (req, res) => {
     try {
-      const { leaderId, creatorId, days, reason } = req.body;
+      const leader = (req as any).profile;
+      const leaderId = String(leader?.id || (req as any).profileId || '');
+      const { creatorId, days, reason } = req.body;
       if (!creatorId) {
         return res.status(400).json({ success: false, error: 'Creator ID is required' });
+      }
+      const target = serverUsers.get(creatorId);
+      if (target && !callerOwnsCreator(leader, target)) {
+        return res.status(403).json({ success: false, error: 'Not authorized for this creator.' });
       }
 
       const banDays = Number(days) || 7;
@@ -1685,7 +1762,7 @@ async function startServer() {
   });
 
   // POST Unban Female Host by Team Leader
-  app.post('/api/teamleader/unban-creator', async (req, res) => {
+  app.post('/api/teamleader/unban-creator', requireTeamLeader, async (req, res) => {
     try {
       const { creatorId } = req.body;
       if (!creatorId) {
@@ -1693,6 +1770,10 @@ async function startServer() {
       }
 
       let updatedUser: any = serverUsers.get(creatorId);
+      const leader = (req as any).profile;
+      if (updatedUser && !callerOwnsCreator(leader, updatedUser)) {
+        return res.status(403).json({ success: false, error: 'Not authorized for this creator.' });
+      }
       if (updatedUser) {
         updatedUser.isBanned = false;
         updatedUser.is_banned = false;
@@ -1736,7 +1817,7 @@ async function startServer() {
   });
 
   // POST Delete Female Host by Team Leader
-  app.post('/api/teamleader/delete-creator', async (req, res) => {
+  app.post('/api/teamleader/delete-creator', requireTeamLeader, async (req, res) => {
     try {
       const { creatorId } = req.body;
       if (!creatorId) {
@@ -1744,6 +1825,10 @@ async function startServer() {
       }
 
       const existing = serverUsers.get(creatorId);
+      const leader = (req as any).profile;
+      if (existing && !callerOwnsCreator(leader, existing)) {
+        return res.status(403).json({ success: false, error: 'Not authorized for this creator.' });
+      }
       const creatorName = existing?.name || 'Female Host';
 
       serverUsers.delete(creatorId);
@@ -1771,7 +1856,7 @@ async function startServer() {
   });
 
   // Dedicated Supabase Bulk Profile Upsert Endpoint
-  app.post('/api/supabase/bulk-upsert-profiles', async (req, res) => {
+  app.post('/api/supabase/bulk-upsert-profiles', requireAdmin, async (req, res) => {
     try {
       const { profiles } = req.body;
       if (!profiles || !Array.isArray(profiles)) {
@@ -1796,11 +1881,12 @@ async function startServer() {
   });
 
   // Dedicated Supabase Status Update Endpoint (Updates online_status in Supabase database)
-  app.post('/api/supabase/update-status', async (req, res) => {
+  app.post('/api/supabase/update-status', requireAuth, async (req, res) => {
     try {
-      const { userId, status } = req.body;
+      const userId = String((req as any).profileId || (req as any).user?.id || '');
+      const { status } = req.body;
       if (!userId || !status) {
-        return res.status(400).json({ success: false, error: 'userId and status required' });
+        return res.status(400).json({ success: false, error: 'status required' });
       }
 
       if (status === 'offline') {
@@ -1832,7 +1918,7 @@ async function startServer() {
   });
 
   // Dedicated Presence REST Endpoint
-  app.get('/api/supabase/user-statuses', async (req, res) => {
+  app.get('/api/supabase/user-statuses', requireAuth, async (req, res) => {
     try {
       if (isSupabaseAdminConfigured()) {
         const result = await fetchUserStatusesAdmin();
@@ -1857,7 +1943,7 @@ async function startServer() {
   });
 
   // Fetch all Supabase profiles
-  app.get('/api/supabase/profiles', async (req, res) => {
+  app.get('/api/supabase/profiles', requireAuth, async (req, res) => {
     try {
       const result = await fetchProfilesAdmin();
       return res.json(result);
@@ -1880,9 +1966,9 @@ async function startServer() {
   // =========================================================================
   // USER DAILY REWARDS & QUESTS API ENDPOINTS
   // =========================================================================
-  app.post('/api/rewards/get', async (req, res) => {
+  app.post('/api/rewards/get', requireAuth, async (req, res) => {
     try {
-      const { userId } = req.body || {};
+      const userId = String((req as any).profileId || (req as any).user?.id || '');
       if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
       const result = await fetchUserDailyRewardsAdmin(userId);
       return res.json(result);
@@ -1891,9 +1977,10 @@ async function startServer() {
     }
   });
 
-  app.post('/api/rewards/update', async (req, res) => {
+  app.post('/api/rewards/update', requireAuth, async (req, res) => {
     try {
-      const record = req.body || {};
+      const callerId = String((req as any).profileId || (req as any).user?.id || '');
+      const record = { ...(req.body || {}), userId: callerId, user_id: callerId };
       if (!record?.userId && !record?.user_id) {
         return res.status(400).json({ success: false, error: 'Missing userId' });
       }
@@ -1909,23 +1996,33 @@ async function startServer() {
   });
 
   // Process real-time virtual gift transaction
-  app.post('/api/gifts/send', async (req, res) => {
+  app.post('/api/gifts/send', requireAuth, async (req, res) => {
     try {
-      const { senderId, receiverId, giftId, giftCost, hostCoinsEarned, tlCoinsEarned, tlId } = req.body;
+      const senderId = String((req as any).profileId || (req as any).user?.id || '');
+      const { receiverId, giftId } = req.body;
+      const catalogGift = VIRTUAL_GIFTS.find((g) => g.id === giftId);
+      const giftCost = Number(catalogGift?.coinCost || 0);
+      if (!senderId || !receiverId || !catalogGift || giftCost <= 0) {
+        return res.status(400).json({ success: false, error: 'Invalid gift.' });
+      }
 
       const sender = serverUsers.get(senderId);
       const receiver = serverUsers.get(receiverId);
 
-      if (sender && giftCost > 0) {
-        sender.coinBalance = Math.max(0, (sender.coinBalance || 0) - giftCost);
-        serverUsers.set(senderId, sender);
-        if (isSupabaseAdminConfigured()) {
-          upsertProfileAdmin(sender).catch(() => {});
-        }
+      if (!sender || (sender.coinBalance || 0) < giftCost) {
+        return res.status(400).json({ success: false, error: 'Insufficient coins.' });
       }
 
-      // Strict Earning Policy: ONLY female creators or Team Leader managed hosts earn coins!
+      sender.coinBalance = Math.max(0, (sender.coinBalance || 0) - giftCost);
+      serverUsers.set(senderId, sender);
+      if (isSupabaseAdminConfigured()) {
+        upsertProfileAdmin(sender).catch(() => {});
+      }
+
       const isEligibleHost = receiver && (receiver.role === 'female_creator' || receiver.role === 'female_host' || Boolean(receiver.teamLeaderId || receiver.createdById));
+      const hostCoinsEarned = isEligibleHost ? Math.max(1, Math.round(giftCost * 0.5)) : 0;
+      const tlCoinsEarned = isEligibleHost ? Math.max(0, Math.round(giftCost * 0.1)) : 0;
+      const tlId = receiver?.teamLeaderId || receiver?.createdById;
 
       if (receiver && hostCoinsEarned > 0 && isEligibleHost) {
         receiver.earningsCoins = (receiver.earningsCoins || 0) + hostCoinsEarned;
@@ -1959,7 +2056,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/supabase/test-query', async (req, res) => {
+  app.post('/api/supabase/test-query', requireAdmin, async (req, res) => {
     const startTime = performance.now();
     try {
       // Simulate pooling query execution & latency measurement
@@ -1993,6 +2090,12 @@ async function startServer() {
 
   let isSetupLocked = process.env.SETUP_LOCKED === 'true';
   const setupAuthTokens = new Set<string>();
+
+  const requireSetupSession = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const token = String(req.headers['x-setup-token'] || req.body?.setupToken || '');
+    if (token && setupAuthTokens.has(token)) return next();
+    return requireAdmin(req, res, next);
+  };
 
   // Helper to persist key-value pairs into .env file
   function updateEnvFile(updates: Record<string, string | number | boolean | undefined>) {
@@ -2079,7 +2182,7 @@ async function startServer() {
         supabaseAnonKey: process.env.VITE_SUPABASE_ANON_KEY || '',
         supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ? '••••••••' : '',
         livekitUrl: livekitConfig.wsUrl,
-        livekitApiKey: livekitConfig.apiKey,
+        livekitApiKey: livekitConfig.apiKey ? '••••••••' : '',
         livekitApiSecret: livekitConfig.apiSecret ? '••••••••' : '',
         r2AccountId: infraConfig.r2AccountId,
         r2AccessKeyId: infraConfig.r2AccessKeyId,
@@ -2111,26 +2214,20 @@ async function startServer() {
       const storedHash = (adminUser as any)?.password_hash;
       let isValid = false;
 
-      if (storedHash) {
+      const masterKey = process.env.SETUP_MASTER_KEY;
+      if (masterKey && password === masterKey) {
+        isValid = true;
+      }
+
+      if (!isValid && storedHash) {
         isValid = await comparePassword(password, storedHash);
       }
 
-      // Default master setup keys for initial VPS boot
       if (!isValid) {
-        isValid =
-          password === 'Admin@12345' ||
-          password === 'creator123' ||
-          password === 'admin123' ||
-          password === 'Password@12345' ||
-          (process.env.SETUP_MASTER_KEY != null &&
-            password === process.env.SETUP_MASTER_KEY);
+        return res.status(401).json({ success: false, error: 'Incorrect master password. Set SETUP_MASTER_KEY or use the admin account password.' });
       }
 
-      if (!isValid) {
-        return res.status(401).json({ success: false, error: 'Incorrect master password.' });
-      }
-
-      const token = `setup_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+      const token = `setup_${crypto.randomBytes(24).toString('hex')}`;
       setupAuthTokens.add(token);
 
       return res.json({
@@ -2144,7 +2241,7 @@ async function startServer() {
   });
 
   // POST /api/setup/test-db: Test Supabase connection
-  app.post('/api/setup/test-db', async (req, res) => {
+  app.post('/api/setup/test-db', requireSetupSession, async (req, res) => {
     try {
       const { supabaseUrl, serviceRoleKey } = req.body;
       const result = await testSupabaseConnectivity(supabaseUrl, serviceRoleKey);
@@ -2155,7 +2252,7 @@ async function startServer() {
   });
 
   // POST /api/setup/test-livekit: Test LiveKit token generation & config
-  app.post('/api/setup/test-livekit', async (req, res) => {
+  app.post('/api/setup/test-livekit', requireSetupSession, async (req, res) => {
     try {
       const { wsUrl, apiKey, apiSecret } = req.body;
       const url = (wsUrl || livekitConfig.wsUrl || '').trim();
@@ -2187,7 +2284,7 @@ async function startServer() {
   });
 
   // POST /api/setup/test-r2: Test Cloudflare R2 / S3 storage
-  app.post('/api/setup/test-r2', async (req, res) => {
+  app.post('/api/setup/test-r2', requireSetupSession, async (req, res) => {
     try {
       const { accountId, accessKeyId, secretAccessKey, bucketName, publicUrl } = req.body;
 
@@ -2209,7 +2306,7 @@ async function startServer() {
   });
 
   // POST /api/setup/test-smtp: Test email dispatch
-  app.post('/api/setup/test-smtp', async (req, res) => {
+  app.post('/api/setup/test-smtp', requireSetupSession, async (req, res) => {
     try {
       const { host, port, user, pass, from, secure, resendApiKey, targetEmail } = req.body;
 
@@ -2244,7 +2341,7 @@ async function startServer() {
   });
 
   // POST /api/setup/save-all: Save all credentials to .env and apply live
-  app.post('/api/setup/save-all', async (req, res) => {
+  app.post('/api/setup/save-all', requireSetupSession, async (req, res) => {
     try {
       const {
         supabaseUrl,
@@ -2354,7 +2451,11 @@ async function startServer() {
       }
 
       // Update admin password if requested
-      if (adminPassword && adminPassword.length >= 6) {
+      if (adminPassword) {
+        const adminPwError = getPasswordPolicyError(adminPassword);
+        if (adminPwError) {
+          return res.status(400).json({ success: false, error: adminPwError });
+        }
         const hashed = await hashPassword(adminPassword);
         for (const [id, u] of serverUsers.entries()) {
           if (u.role === 'admin' || u.email === 'admin@livecall.com') {
@@ -2377,7 +2478,7 @@ async function startServer() {
   });
 
   // POST /api/setup/lock: Toggle installer lock
-  app.post('/api/setup/lock', (req, res) => {
+  app.post('/api/setup/lock', requireSetupSession, (req, res) => {
     const { locked } = req.body;
     isSetupLocked = Boolean(locked);
     updateEnvFile({ SETUP_LOCKED: isSetupLocked ? 'true' : 'false' });
