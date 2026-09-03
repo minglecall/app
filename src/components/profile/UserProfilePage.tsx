@@ -53,8 +53,8 @@ import {
   getUserEffectiveLocation,
 } from '../../utils/location';
 import { getCountryFlag } from '../../utils/flags';
-import { uploadMediaDirectlyToR2, normalizeMediaUrl } from '../../utils/r2Storage';
-import { getUserRoleLabel } from '../../types';
+import { uploadMediaDirectlyToR2, normalizeMediaUrl, isPersistableMediaUrl } from '../../utils/r2Storage';
+import { getUserRoleLabel, getFemaleRoleMark } from '../../types';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { CountrySelector } from '../common/CountrySelector';
@@ -151,11 +151,6 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       return;
     }
 
-    // 1. Instant local preview
-    const localUrl = URL.createObjectURL(file);
-    updateUserProfile(currentUser.id, { avatarUrl: localUrl });
-    setFormData((prev) => ({ ...prev, avatarUrl: localUrl }));
-
     setIsUploadingAvatar(true);
     setAvatarUploadProgress(15);
 
@@ -167,8 +162,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
         onProgress: (percent) => setAvatarUploadProgress(Math.max(15, percent)),
       });
 
-      // Update user in Supabase & AppContext
-      if (result && result.publicUrl) {
+      if (result?.publicUrl && isPersistableMediaUrl(result.publicUrl)) {
         updateUserProfile(currentUser.id, {
           avatarUrl: result.publicUrl,
         });
@@ -177,18 +171,23 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           ...prev,
           avatarUrl: result.publicUrl,
         }));
-      }
 
-      showToast(
-        'Profile Picture Updated ☁️',
-        'Your new profile picture was uploaded to Cloudflare R2 and synced across your account.',
-        'success'
-      );
-      setIsAvatarModalOpen(false);
+        showToast(
+          'Profile Picture Updated',
+          'Your new profile picture was uploaded to Cloudflare R2.',
+          'success'
+        );
+        setIsAvatarModalOpen(false);
+      } else {
+        throw new Error('Upload completed but no cloud storage URL was returned');
+      }
     } catch (err: any) {
-      console.warn('Avatar upload note, fallback to local preview:', err.message);
-      showToast('Profile Picture Updated ✨', 'New photo applied to your profile.', 'success');
-      setIsAvatarModalOpen(false);
+      console.error('Avatar upload failed:', err?.message || err);
+      showToast(
+        'Upload Failed',
+        err?.message || 'Could not upload your profile photo to Cloudflare R2. Please try again.',
+        'error'
+      );
     } finally {
       setIsUploadingAvatar(false);
       setAvatarUploadProgress(0);
@@ -569,10 +568,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   </span>
                 )}
                 <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-black uppercase tracking-wider border ${
-                    getUserRoleLabel(currentUser) === 'Female Creator'
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-black uppercase tracking-wider border inline-flex items-center gap-1 ${
+                    getFemaleRoleMark(currentUser) === 'creator'
                       ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
-                      : getUserRoleLabel(currentUser) === 'Female User'
+                      : getFemaleRoleMark(currentUser) === 'user'
                       ? 'bg-pink-500/20 border-pink-500/40 text-pink-300'
                       : getUserRoleLabel(currentUser) === 'Male User'
                       ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
@@ -584,6 +583,9 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   }`}
                 >
                   {getUserRoleLabel(currentUser)}
+                  {getFemaleRoleMark(currentUser) === 'creator' && (
+                    <span className="opacity-80 normal-case">· Creator</span>
+                  )}
                 </span>
 
                 {/* Quick Avatar Change Button */}
@@ -2278,9 +2280,17 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             <UnifiedImageUploader
               currentImageUrl={formData.avatarUrl || currentUser.avatarUrl}
               onImageUploaded={(newUrl) => {
+                if (!isPersistableMediaUrl(newUrl)) {
+                  showToast(
+                    'Upload Failed',
+                    'Photo preview was shown locally, but the file was not saved to Cloudflare R2.',
+                    'error'
+                  );
+                  return;
+                }
                 updateUserProfile(currentUser.id, { avatarUrl: newUrl });
                 setFormData((prev) => ({ ...prev, avatarUrl: newUrl }));
-                showToast('Profile Picture Updated ✨', 'New photo applied and saved to profile!', 'success');
+                showToast('Profile Picture Updated', 'New photo uploaded to Cloudflare R2 and saved to your profile.', 'success');
               }}
               userId={currentUser.id}
               category="avatar"

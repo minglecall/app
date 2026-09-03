@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Coins,
@@ -60,6 +60,7 @@ import {
 import { getFallbackAvatar } from '../../utils/avatars';
 import { InvoiceDetailModal } from './InvoiceDetailModal';
 import { TransactionReceipt, WalletLedgerEntry, UserProfile } from '../../types';
+import { supabase } from '../../lib/supabase';
 
 interface MaleUserAnalyticsDashboardProps {
   user?: UserProfile;
@@ -118,10 +119,39 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
     );
   }, [callLogs, activeUser.id, currentUser.role]);
 
-  // Live Wallet Ledger
+  // Live Wallet Ledger (prefer authoritative wallet_ledger API)
+  const [ledgerRows, setLedgerRows] = useState<any[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadLedger = async () => {
+      try {
+        const sessionRes = await supabase.auth.getSession();
+        const accessToken = sessionRes.data.session?.access_token;
+        if (!accessToken) {
+          if (!cancelled) setLedgerRows(null);
+          return;
+        }
+        const res = await fetch(`/api/calls/wallet-ledger?userId=${encodeURIComponent(activeUser.id)}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!cancelled && json?.success && Array.isArray(json.data)) {
+          setLedgerRows(json.data);
+        }
+      } catch {
+        if (!cancelled) setLedgerRows(null);
+      }
+    };
+    loadLedger();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeUser.id]);
+
   const walletLedger = useMemo(() => {
-    return computeWalletLedger(activeUser, callLogs);
-  }, [activeUser, callLogs]);
+    return computeWalletLedger(activeUser, callLogs, ledgerRows);
+  }, [activeUser, callLogs, ledgerRows]);
 
   // Live Receipts
   const transactionReceipts = useMemo(() => {

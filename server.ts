@@ -44,6 +44,7 @@ import {
   createLivekitAdminRouter,
   createAdminRouter,
   createUsersAdminRouter,
+  createCallRouter,
 } from './server/routes';
 
 dotenv.config();
@@ -64,6 +65,7 @@ interface CallState {
   coinsSpent?: number;
   coinsEarned?: number;
   durationSeconds?: number;
+  billedMinutes?: number;
 }
 
 async function startServer() {
@@ -71,7 +73,7 @@ async function startServer() {
   const httpServer = createServer(app);
   const PORT = 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '25mb' }));
   app.use(express.text({ type: ['text/plain', 'text/*', 'application/json'] }));
 
   // Middleware to auto-parse string bodies (e.g. from navigator.sendBeacon)
@@ -731,14 +733,16 @@ async function startServer() {
           }
 
           case 'call:accept': {
-            const { callId, initialSpent, initialHostCoins, initialTlCoins } = msg;
+            const { callId } = msg;
             const call = activeCalls.get(callId);
             if (!call) return;
 
             call.status = 'active';
             call.startTime = Date.now();
-            call.coinsSpent = Number(initialSpent) || 0;
-            call.coinsEarned = Number(initialHostCoins) || 0;
+            // Billing is server-authoritative via POST /api/calls/burn — do not trust client amounts
+            call.coinsSpent = call.coinsSpent || 0;
+            call.coinsEarned = call.coinsEarned || 0;
+            call.billedMinutes = call.billedMinutes || 0;
 
             // Record answered call & recalculate response health score
             const hostMetrics = creatorMetricsMap.get(call.receiverId);
@@ -769,8 +773,6 @@ async function startServer() {
               callerId: call.callerId,
               receiverId: call.receiverId,
               startTime: call.startTime,
-              initialSpent: call.coinsSpent,
-              initialHostCoins: call.coinsEarned,
             };
 
             sendToUser(call.callerId, payload);
@@ -1272,6 +1274,7 @@ async function startServer() {
   app.use('/api/admin', createAdminRouter(runtime));
   app.use('/api/admin', createLivekitAdminRouter(runtime));
   app.use('/api/users', createUsersAdminRouter(runtime));
+  app.use('/api/calls', createCallRouter(runtime));
 
   // =========================================================================
   // USER & PRESENCE SYNCHRONIZATION API ENDPOINTS
@@ -1460,65 +1463,7 @@ async function startServer() {
     }
   });
 
-  // POST /api/calls/burn - Authoritative server-side call coin burn & credit sync
-  app.post('/api/calls/burn', async (req, res) => {
-    try {
-      const { callId, callerId, receiverId, coinsBurned, hostCoinsEarned, tlCoinsEarned, tlId, durationSeconds } = req.body;
-      
-      const call = activeCalls.get(callId);
-      if (call) {
-        call.coinsSpent = (call.coinsSpent || 0) + (Number(coinsBurned) || 0);
-        call.coinsEarned = (call.coinsEarned || 0) + (Number(hostCoinsEarned) || 0);
-        if (durationSeconds !== undefined) {
-          call.durationSeconds = Number(durationSeconds);
-        }
-      }
-
-      // Update caller balance in server memory & Supabase
-      if (callerId && Number(coinsBurned) > 0) {
-        const caller = serverUsers.get(callerId);
-        if (caller) {
-          caller.coinBalance = Math.max(0, (caller.coinBalance || 0) - Number(coinsBurned));
-          serverUsers.set(callerId, caller);
-          if (isSupabaseAdminConfigured()) {
-            updateUserProfileAdmin(callerId, { coinBalance: caller.coinBalance }).catch(() => {});
-          }
-        }
-      }
-
-      // Update host earnings in server memory & Supabase
-      if (receiverId && Number(hostCoinsEarned) > 0) {
-        const host = serverUsers.get(receiverId);
-        if (host) {
-          host.earningsCoins = (host.earningsCoins || 0) + Number(hostCoinsEarned);
-          serverUsers.set(receiverId, host);
-          if (isSupabaseAdminConfigured()) {
-            updateUserProfileAdmin(receiverId, { earningsCoins: host.earningsCoins }).catch(() => {});
-          }
-        }
-      }
-
-      // Update Team Leader commission in server memory & Supabase
-      if (tlId && Number(tlCoinsEarned) > 0) {
-        const tl = serverUsers.get(tlId);
-        if (tl) {
-          tl.earningsCoins = (tl.earningsCoins || 0) + Number(tlCoinsEarned);
-          serverUsers.set(tlId, tl);
-          if (isSupabaseAdminConfigured()) {
-            updateUserProfileAdmin(tlId, { earningsCoins: tl.earningsCoins }).catch(() => {});
-          }
-        }
-      }
-
-      broadcastUsers();
-      broadcastActiveCalls();
-
-      return res.json({ success: true });
-    } catch (e: any) {
-      console.error('Error in /api/calls/burn:', e);
-      return res.status(500).json({ success: false, error: e.message });
-    }
-  });
+  // POST /api/calls/burn is handled by createCallRouter (requireAuth, server-computed amounts)
 
   // POST /api/calls/sync - Sync call end status to server
   app.post('/api/calls/sync', async (req, res) => {

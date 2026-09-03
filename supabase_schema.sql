@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     kyc_status TEXT NOT NULL DEFAULT 'unsubmitted' CHECK (kyc_status IN ('unsubmitted', 'pending', 'verified', 'rejected')),
     kyc_documents JSONB,
     online_status TEXT NOT NULL DEFAULT 'online' CHECK (online_status IN ('online', 'busy', 'offline', 'in_call')),
-    role TEXT NOT NULL DEFAULT 'male_user' CHECK (role IN ('male_user', 'female_creator', 'female_host', 'other_user', 'admin', 'team_leader', 'agency_manager')),
+    role TEXT NOT NULL DEFAULT 'male_user' CHECK (role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user', 'admin', 'team_leader', 'agency_manager')),
     coin_balance BIGINT NOT NULL DEFAULT 50,
     vip_tier TEXT NOT NULL DEFAULT 'none' CHECK (vip_tier IN ('none', 'bronze', 'silver', 'gold', 'diamond')),
     hourly_coin_rate INT NOT NULL DEFAULT 10,
@@ -102,6 +102,17 @@ ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS commission_percent NUMERIC 
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS team_leader_note TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS has_password_set BOOLEAN DEFAULT false;
+
+-- Allow female_user alongside female_creator (idempotent for existing DBs)
+DO $$
+BEGIN
+    ALTER TABLE public.profiles DROP CONSTRAINT IF EXISTS profiles_role_check;
+    ALTER TABLE public.profiles
+        ADD CONSTRAINT profiles_role_check
+        CHECK (role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user', 'admin', 'team_leader', 'agency_manager'));
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_profiles_role_status ON public.profiles(role, online_status);
 CREATE INDEX IF NOT EXISTS idx_profiles_email ON public.profiles(email);
@@ -1020,53 +1031,232 @@ CREATE TRIGGER on_auth_user_created
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_auth_user();
 
 -- ============================================================================
--- 16.5 ATOMIC CALL COIN BURNING STORED PROCEDURE
+-- 16.5 IMMUTABLE WALLET LEDGER (append-only call billing)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.wallet_ledger (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    call_id TEXT,
+    transaction_type TEXT NOT NULL CHECK (transaction_type IN ('CALL_DEBIT', 'HOST_EARN', 'TL_EARN')),
+    amount NUMERIC NOT NULL,
+    balance_after NUMERIC NOT NULL,
+    billing_minute INT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS wallet_ledger_unique_billing_idx
+    ON public.wallet_ledger (call_id, billing_minute, transaction_type, user_id);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_user_created
+    ON public.wallet_ledger (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_call
+    ON public.wallet_ledger (call_id, billing_minute);
+
+ALTER TABLE public.wallet_ledger ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "public select wallet_ledger" ON public.wallet_ledger;
+DROP POLICY IF EXISTS "service role manage wallet_ledger" ON public.wallet_ledger;
+CREATE POLICY "public select wallet_ledger" ON public.wallet_ledger FOR SELECT USING (true);
+CREATE POLICY "authenticated insert wallet_ledger" ON public.wallet_ledger FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+
+-- ============================================================================
+-- 16.6 ATOMIC CALL COIN BURNING STORED PROCEDURE
+-- Server-authoritative debit/credit with row locks + append-only ledger.
+-- Unique (call_id, billing_minute, transaction_type, user_id) prevents duplicate burns.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION public.burn_call_coins_atomic(
     p_caller_id TEXT,
     p_receiver_id TEXT,
     p_tl_id TEXT,
+    p_call_id TEXT,
+    p_billing_minute INT,
     p_coins_burned INT,
     p_host_coins_earned INT,
-    p_tl_coins_earned INT
+    p_tl_coins_earned INT,
+    p_metadata JSONB DEFAULT '{}'::jsonb
 )
 RETURNS JSONB AS $$
 DECLARE
     v_caller_balance BIGINT;
     v_host_earnings BIGINT := 0;
     v_tl_earnings BIGINT := 0;
+    v_host_earned INT;
+    v_tl_earned INT;
+    v_receiver_role TEXT;
 BEGIN
-    -- Check and debit caller
+    IF p_call_id IS NULL OR p_billing_minute IS NULL OR p_billing_minute < 1 THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'new_caller_balance', 0,
+            'new_host_earnings', 0,
+            'error_message', 'Invalid call_id or billing_minute'
+        );
+    END IF;
+
+    IF p_coins_burned IS NULL OR p_coins_burned <= 0 THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'new_caller_balance', 0,
+            'new_host_earnings', 0,
+            'error_message', 'Invalid coins_burned'
+        );
+    END IF;
+
+    -- Enforce invariant: hostEarned + tlEarned <= coinsBurned
+    v_host_earned := GREATEST(0, COALESCE(p_host_coins_earned, 0));
+    v_tl_earned := GREATEST(0, COALESCE(p_tl_coins_earned, 0));
+    IF (v_host_earned + v_tl_earned) > p_coins_burned THEN
+        IF v_tl_earned > p_coins_burned THEN
+            v_tl_earned := p_coins_burned;
+            v_host_earned := 0;
+        ELSE
+            v_host_earned := p_coins_burned - v_tl_earned;
+        END IF;
+    END IF;
+
+    -- Idempotent re-hit: already billed this minute for this caller
+    IF EXISTS (
+        SELECT 1 FROM public.wallet_ledger
+        WHERE call_id = p_call_id
+          AND billing_minute = p_billing_minute
+          AND transaction_type = 'CALL_DEBIT'
+          AND user_id = p_caller_id
+    ) THEN
+        SELECT coin_balance INTO v_caller_balance FROM public.profiles WHERE id = p_caller_id;
+        IF p_receiver_id IS NOT NULL AND p_receiver_id <> '' THEN
+            SELECT earnings_coins INTO v_host_earnings FROM public.profiles WHERE id = p_receiver_id;
+        END IF;
+        IF p_tl_id IS NOT NULL AND p_tl_id <> '' THEN
+            SELECT earnings_coins INTO v_tl_earnings FROM public.profiles WHERE id = p_tl_id;
+        END IF;
+
+        RETURN jsonb_build_object(
+            'success', true,
+            'new_caller_balance', COALESCE(v_caller_balance, 0),
+            'new_host_earnings', COALESCE(v_host_earnings, 0),
+            'new_tl_earnings', COALESCE(v_tl_earnings, 0),
+            'error_message', NULL,
+            'duplicate', true,
+            'coins_burned', p_coins_burned,
+            'host_coins_earned', v_host_earned,
+            'tl_coins_earned', v_tl_earned
+        );
+    END IF;
+
+    -- Lock caller row and fail hard on insufficient balance
+    SELECT coin_balance INTO v_caller_balance
+    FROM public.profiles
+    WHERE id = p_caller_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'new_caller_balance', 0,
+            'new_host_earnings', 0,
+            'error_message', 'Caller profile not found'
+        );
+    END IF;
+
+    IF v_caller_balance < p_coins_burned THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'new_caller_balance', v_caller_balance,
+            'new_host_earnings', 0,
+            'error_message', 'INSUFFICIENT_BALANCE',
+            'code', 'INSUFFICIENT_BALANCE'
+        );
+    END IF;
+
+    -- Atomically debit caller (never allow negative)
     UPDATE public.profiles
-    SET coin_balance = GREATEST(0, coin_balance - p_coins_burned),
+    SET coin_balance = coin_balance - p_coins_burned,
         updated_at = now()
     WHERE id = p_caller_id
     RETURNING coin_balance INTO v_caller_balance;
 
-    -- Credit host if eligible and coins earned > 0
-    IF p_host_coins_earned > 0 AND p_receiver_id IS NOT NULL THEN
-        UPDATE public.profiles
-        SET earnings_coins = earnings_coins + p_host_coins_earned,
-            total_call_minutes = total_call_minutes + 1,
-            updated_at = now()
-        WHERE id = p_receiver_id
-        RETURNING earnings_coins INTO v_host_earnings;
+    INSERT INTO public.wallet_ledger (
+        user_id, call_id, transaction_type, amount, balance_after, billing_minute, metadata
+    ) VALUES (
+        p_caller_id, p_call_id, 'CALL_DEBIT', -p_coins_burned, v_caller_balance, p_billing_minute,
+        COALESCE(p_metadata, '{}'::jsonb) || jsonb_build_object('side', 'caller')
+    );
+
+    -- Credit female_creator host only (server passes 0 for non-creators)
+    IF v_host_earned > 0 AND p_receiver_id IS NOT NULL AND p_receiver_id <> '' THEN
+        SELECT role INTO v_receiver_role FROM public.profiles WHERE id = p_receiver_id FOR UPDATE;
+
+        IF v_receiver_role IN ('female_creator', 'female_host') THEN
+            UPDATE public.profiles
+            SET earnings_coins = earnings_coins + v_host_earned,
+                total_call_minutes = COALESCE(total_call_minutes, 0) + 1,
+                updated_at = now()
+            WHERE id = p_receiver_id
+            RETURNING earnings_coins INTO v_host_earnings;
+
+            INSERT INTO public.wallet_ledger (
+                user_id, call_id, transaction_type, amount, balance_after, billing_minute, metadata
+            ) VALUES (
+                p_receiver_id, p_call_id, 'HOST_EARN', v_host_earned, v_host_earnings, p_billing_minute,
+                COALESCE(p_metadata, '{}'::jsonb) || jsonb_build_object('side', 'host')
+            );
+        ELSE
+            v_host_earned := 0;
+        END IF;
     END IF;
 
-    -- Credit Team Leader if applicable
-    IF p_tl_coins_earned > 0 AND p_tl_id IS NOT NULL THEN
+    -- Credit team leader only when TL id present and share > 0 (server gates female_creator)
+    IF v_tl_earned > 0 AND p_tl_id IS NOT NULL AND p_tl_id <> '' THEN
         UPDATE public.profiles
-        SET earnings_coins = earnings_coins + p_tl_coins_earned,
+        SET earnings_coins = earnings_coins + v_tl_earned,
             updated_at = now()
         WHERE id = p_tl_id
         RETURNING earnings_coins INTO v_tl_earnings;
+
+        IF FOUND THEN
+            INSERT INTO public.wallet_ledger (
+                user_id, call_id, transaction_type, amount, balance_after, billing_minute, metadata
+            ) VALUES (
+                p_tl_id, p_call_id, 'TL_EARN', v_tl_earned, v_tl_earnings, p_billing_minute,
+                COALESCE(p_metadata, '{}'::jsonb) || jsonb_build_object('side', 'team_leader')
+            );
+        ELSE
+            v_tl_earned := 0;
+            v_tl_earnings := 0;
+        END IF;
+    ELSE
+        v_tl_earned := 0;
     END IF;
 
     RETURN jsonb_build_object(
         'success', true,
-        'callerBalance', v_caller_balance,
-        'hostEarnings', v_host_earnings,
-        'tlEarnings', v_tl_earnings
+        'new_caller_balance', v_caller_balance,
+        'new_host_earnings', COALESCE(v_host_earnings, 0),
+        'new_tl_earnings', COALESCE(v_tl_earnings, 0),
+        'error_message', NULL,
+        'duplicate', false,
+        'coins_burned', p_coins_burned,
+        'host_coins_earned', v_host_earned,
+        'tl_coins_earned', v_tl_earned
+    );
+EXCEPTION WHEN unique_violation THEN
+    -- Concurrent duplicate burn — treat as idempotent success
+    SELECT coin_balance INTO v_caller_balance FROM public.profiles WHERE id = p_caller_id;
+    IF p_receiver_id IS NOT NULL AND p_receiver_id <> '' THEN
+        SELECT earnings_coins INTO v_host_earnings FROM public.profiles WHERE id = p_receiver_id;
+    END IF;
+    RETURN jsonb_build_object(
+        'success', true,
+        'new_caller_balance', COALESCE(v_caller_balance, 0),
+        'new_host_earnings', COALESCE(v_host_earnings, 0),
+        'new_tl_earnings', COALESCE(v_tl_earnings, 0),
+        'error_message', NULL,
+        'duplicate', true,
+        'coins_burned', p_coins_burned,
+        'host_coins_earned', GREATEST(0, COALESCE(p_host_coins_earned, 0)),
+        'tl_coins_earned', GREATEST(0, COALESCE(p_tl_coins_earned, 0))
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -1098,6 +1288,10 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND tablename = 'friend_requests') THEN
         ALTER PUBLICATION supabase_realtime ADD TABLE public.friend_requests;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND tablename = 'wallet_ledger') THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.wallet_ledger;
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND tablename = 'feed_posts') THEN

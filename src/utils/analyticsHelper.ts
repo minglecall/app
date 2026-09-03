@@ -520,12 +520,74 @@ export function computeTransactionReceipts(
 }
 
 /**
+ * Build wallet ledger entries from authoritative wallet_ledger rows.
+ * Falls back to synthetic call_logs reconstruction when ledger is empty.
+ */
+export function mapWalletLedgerRows(
+  rows: Array<{
+    id: string;
+    userId: string;
+    callId?: string;
+    transactionType: string;
+    amount: number;
+    balanceAfter: number;
+    billingMinute?: number;
+    metadata?: Record<string, any>;
+    createdAt?: string;
+  }>
+): WalletLedgerEntry[] {
+  return rows.map((row) => {
+    const isDebit = row.transactionType === 'CALL_DEBIT' || Number(row.amount) < 0;
+    const category: WalletLedgerEntry['category'] =
+      row.transactionType === 'HOST_EARN' || row.transactionType === 'TL_EARN'
+        ? 'host_earning'
+        : 'call_spend';
+    const title =
+      row.transactionType === 'CALL_DEBIT'
+        ? `Call billing · minute ${row.billingMinute ?? '?'}`
+        : row.transactionType === 'HOST_EARN'
+        ? `Host earnings · minute ${row.billingMinute ?? '?'}`
+        : row.transactionType === 'TL_EARN'
+        ? `Team leader commission · minute ${row.billingMinute ?? '?'}`
+        : 'Wallet entry';
+
+    return {
+      id: row.id,
+      userId: row.userId,
+      type: isDebit ? 'debit' : 'credit',
+      category,
+      title,
+      description: row.callId ? `Call ${row.callId}` : undefined,
+      coins: Number(row.amount) || 0,
+      balanceAfter: Number(row.balanceAfter) || 0,
+      timestamp: row.createdAt ? new Date(row.createdAt).toLocaleString() : 'Recent',
+      referenceId: row.callId || row.id,
+    };
+  });
+}
+
+/**
  * Build wallet ledger entries
  */
 export function computeWalletLedger(
   user: UserProfile,
-  callLogs: CallLogItem[]
+  callLogs: CallLogItem[],
+  ledgerRows?: Array<{
+    id: string;
+    userId: string;
+    callId?: string;
+    transactionType: string;
+    amount: number;
+    balanceAfter: number;
+    billingMinute?: number;
+    metadata?: Record<string, any>;
+    createdAt?: string;
+  }> | null
 ): WalletLedgerEntry[] {
+  if (ledgerRows && ledgerRows.length > 0) {
+    return mapWalletLedgerRows(ledgerRows);
+  }
+
   const userLogs = callLogs.filter((l) => l.callerId === user.id);
   const list: WalletLedgerEntry[] = [
     {
@@ -560,4 +622,17 @@ export function computeWalletLedger(
   });
 
   return list.reverse();
+}
+
+/**
+ * Platform retention from a burned minute using creator split rules.
+ * female_creator: host% + tl% to parties, remainder platform.
+ * otherwise: 100% platform.
+ */
+export function computePlatformRetentionCoins(
+  coinsBurned: number,
+  hostEarned: number,
+  tlEarned: number
+): number {
+  return Math.max(0, (coinsBurned || 0) - (hostEarned || 0) - (tlEarned || 0));
 }

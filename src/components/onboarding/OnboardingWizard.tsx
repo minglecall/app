@@ -18,7 +18,7 @@ import {
   ChevronDown,
   Search,
 } from 'lucide-react';
-import { UserProfile, OnboardingFormData, getUserRoleLabel } from '../../types';
+import { UserProfile, OnboardingFormData, getUserRoleLabel, getFemaleRoleMark } from '../../types';
 import { completeUserProfileOnboarding } from '../../services/supabaseAuthService';
 import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { getAllowedCountries, findCountryByCodeOrName, CountryItem } from '../../utils/countries';
@@ -419,10 +419,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 <h2 className="text-lg font-black text-white flex items-center space-x-2">
                   <span>Profile Onboarding & Registration</span>
                   <span
-                    className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded-full border ${
-                      getUserRoleLabel(user) === 'Female Creator'
+                    className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${
+                      getFemaleRoleMark(user) === 'creator'
                         ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-                        : getUserRoleLabel(user) === 'Female User'
+                        : getFemaleRoleMark(user) === 'user'
                         ? 'bg-pink-500/20 text-pink-300 border-pink-500/30'
                         : getUserRoleLabel(user) === 'Male User'
                         ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
@@ -430,6 +430,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     }`}
                   >
                     {getUserRoleLabel(user)}
+                    {getFemaleRoleMark(user) === 'creator' && <span className="opacity-80">· Creator</span>}
                   </span>
                 </h2>
                 <p className="text-xs text-slate-400">

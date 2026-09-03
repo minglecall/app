@@ -17,6 +17,7 @@ export interface CallState {
   coinsSpent?: number;
   coinsEarned?: number;
   durationSeconds?: number;
+  billedMinutes?: number;
 }
 
 export interface LiveKitRuntimeConfig {

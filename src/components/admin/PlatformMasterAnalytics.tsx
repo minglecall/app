@@ -55,6 +55,43 @@ export const PlatformMasterAnalytics: React.FC<PlatformMasterAnalyticsProps> = (
     return callLogs.reduce((acc, l) => acc + (l.coinsSpent || 0), 0);
   }, [callLogs]);
 
+  // Creator split (40/10) vs platform retention (50% or 100% for non-creators)
+  const { totalHostEarned, totalTlEarned, totalPlatformRetained } = useMemo(() => {
+    const hostShare = (systemSettings.femaleHostSharePercent ?? 40) / 100;
+    const tlShare = (systemSettings.teamLeaderSharePercent ?? 10) / 100;
+    let host = 0;
+    let tl = 0;
+    let platform = 0;
+
+    callLogs.forEach((l) => {
+      const burned = l.coinsSpent || 0;
+      const hostEarned = l.coinsEarned || 0;
+      // Prefer persisted TL commission when present; otherwise infer from creator calls
+      const tlEarned = (l as any).teamLeaderEarnedCoins ?? 0;
+      if (hostEarned > 0) {
+        host += hostEarned;
+        tl += tlEarned;
+        platform += Math.max(0, burned - hostEarned - tlEarned);
+      } else {
+        // Non-creator / unmanaged: 100% platform
+        platform += burned;
+      }
+    });
+
+    // Sanity: if TL missing on older logs with host earnings, estimate remaining platform share
+    if (host > 0 && tl === 0) {
+      // leave as-is; platform already = burned - host
+    }
+
+    return {
+      totalHostEarned: host,
+      totalTlEarned: tl,
+      totalPlatformRetained: platform,
+      hostShare,
+      tlShare,
+    };
+  }, [callLogs, systemSettings.femaleHostSharePercent, systemSettings.teamLeaderSharePercent]);
+
   const totalCoinSpendUSD = useMemo(() => {
     return totalCoinsBurned * (systemSettings.coinToUSDRatio || 0.01);
   }, [totalCoinsBurned, systemSettings.coinToUSDRatio]);
@@ -93,7 +130,8 @@ export const PlatformMasterAnalytics: React.FC<PlatformMasterAnalyticsProps> = (
   const hostSharePercent = systemSettings.femaleHostSharePercent ?? 40;
   const leaderSharePercent = systemSettings.teamLeaderSharePercent ?? 10;
   const platformMarginPercent = Math.max(0, 100 - hostSharePercent - leaderSharePercent);
-  const estimatedPlatformNetUSD = (totalCoinSpendUSD * platformMarginPercent) / 100;
+  const estimatedPlatformNetUSD =
+    totalPlatformRetained * (systemSettings.coinToUSDRatio || 0.01);
 
   // 2. Team Leaders / Agencies Aggregation
   const teamLeaders = useMemo(() => {
@@ -352,7 +390,7 @@ export const PlatformMasterAnalytics: React.FC<PlatformMasterAnalyticsProps> = (
               {totalCoinsBurned.toLocaleString()} <span className="text-[10px] font-normal text-slate-400">🪙</span>
             </div>
             <div className="text-[10px] text-amber-400">
-              ~${totalCoinSpendUSD.toFixed(2)} USD value
+              ~${totalCoinSpendUSD.toFixed(2)} USD · Host {totalHostEarned.toLocaleString()} · TL {totalTlEarned.toLocaleString()} · Platform {totalPlatformRetained.toLocaleString()} 🪙
             </div>
           </div>
 
@@ -366,7 +404,7 @@ export const PlatformMasterAnalytics: React.FC<PlatformMasterAnalyticsProps> = (
               ${estimatedPlatformNetUSD.toFixed(2)}
             </div>
             <div className="text-[10px] text-indigo-300">
-              {platformMarginPercent}% Platform Take
+              Retained from burns (creator 40/10/50 · else 100%)
             </div>
           </div>
 

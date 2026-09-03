@@ -728,6 +728,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const currentUserIdRef = useRef<string>(currentUserId);
   const adminActiveCallsRef = useRef<AdminActiveCall[]>(adminActiveCalls);
   const activeCallRef = useRef<CallSession | null>(activeCall);
+  const billedMinutesRef = useRef<Set<number>>(new Set());
+  const burnInFlightRef = useRef<Set<number>>(new Set());
+  const endCallRef = useRef<() => void>(() => {});
+  const applyBurnBalancesRef = useRef<(payload: any) => void>(() => {});
 
   useEffect(() => {
     usersRef.current = users;
@@ -2194,10 +2198,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 if (exists) {
                   return prev.map((u) => {
                     if (u.id === data.user.id) {
-                      if (u.id === currentUserIdRef.current) {
-                        return { ...u, ...data.user, onlineStatus: u.onlineStatus };
-                      }
-                      return { ...u, ...data.user };
+                      // Always take authoritative coin/earnings balances from server
+                      return {
+                        ...u,
+                        ...data.user,
+                        coinBalance:
+                          data.user.coinBalance !== undefined ? data.user.coinBalance : u.coinBalance,
+                        earningsCoins:
+                          data.user.earningsCoins !== undefined
+                            ? data.user.earningsCoins
+                            : u.earningsCoins,
+                        onlineStatus: u.id === currentUserIdRef.current ? u.onlineStatus : data.user.onlineStatus ?? u.onlineStatus,
+                      };
                     }
                     return u;
                   });
@@ -2234,18 +2246,44 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             });
           } else if (data.type === 'call:accepted') {
             const { startTime } = data;
+            billedMinutesRef.current.clear();
+            burnInFlightRef.current.clear();
             setActiveCall((prev) => {
               if (!prev) return null;
               return {
                 ...prev,
                 status: 'active',
                 startTime: startTime || Date.now(),
+                billedMinutes: 0,
               };
             });
             showToast('Call Connected! 📹', '1-on-1 WebRTC Video Call connected live.', 'success');
           } else if (data.type === 'call:ended') {
+            billedMinutesRef.current.clear();
+            burnInFlightRef.current.clear();
             setActiveCall(null);
-            showToast('Call Ended', 'The call was ended or declined.', 'info');
+            if (data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE') {
+              showToast('Call Ended', 'Call ended due to insufficient coin balance.', 'error');
+            } else {
+              showToast('Call Ended', 'The call was ended or declined.', 'info');
+            }
+          } else if (data.type === 'wallet:burn_result') {
+            // Authoritative balances from server billing — update HUD immediately
+            applyBurnBalancesRef.current({
+              callId: data.callId,
+              callerId: data.callerId,
+              receiverId: data.receiverId,
+              tlId: data.tlId,
+              newCallerBalance: data.newCallerBalance,
+              newHostEarnings: data.newHostEarnings,
+              newTlEarnings: data.newTlEarnings,
+              callCoinsSpent: data.callCoinsSpent,
+              callCoinsEarned: data.callCoinsEarned,
+              billingMinute: data.billingMinute,
+              coinsBurned: data.coinsBurned,
+              hostCoinsEarned: data.hostCoinsEarned,
+              duplicate: data.duplicate,
+            });
           } else if (data.type === 'call:failed') {
             setActiveCall(null);
             showToast('Call Unavailable 🚫', data.reason || 'User is offline or unavailable.', 'error');
@@ -2935,6 +2973,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     let genderLockAttempted = false;
     let updatedProfile: UserProfile | null = null;
 
+    const sanitizedUpdates: Partial<UserProfile> = { ...updates };
+    if (
+      sanitizedUpdates.avatarUrl !== undefined &&
+      (sanitizedUpdates.avatarUrl.startsWith('blob:') || sanitizedUpdates.avatarUrl.startsWith('data:'))
+    ) {
+      delete sanitizedUpdates.avatarUrl;
+    }
+    if (sanitizedUpdates.gallery) {
+      sanitizedUpdates.gallery = sanitizedUpdates.gallery.filter(
+        (url) => url && !url.startsWith('blob:') && !url.startsWith('data:')
+      );
+    }
+
+    if (Object.keys(sanitizedUpdates).length === 0) {
+      return;
+    }
+
     setUsers((prev) => {
       const targetUser = prev.find((u) => u.id === userId);
       const targetEmail = targetUser?.email ? targetUser.email.toLowerCase().trim() : null;
@@ -2943,11 +2998,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const isMatch = u.id === userId || (targetEmail && u.email && u.email.toLowerCase().trim() === targetEmail);
         if (isMatch) {
           // Guard permanent gender lock
-          if (u.genderLocked && updates.gender && updates.gender !== u.gender) {
+          if (u.genderLocked && sanitizedUpdates.gender && sanitizedUpdates.gender !== u.gender) {
             genderLockAttempted = true;
-            delete updates.gender;
+            delete sanitizedUpdates.gender;
           }
-          const merged = { ...u, ...updates };
+          const merged = { ...u, ...sanitizedUpdates };
           if (u.id === userId || !updatedProfile) {
             updatedProfile = merged;
           }
@@ -2974,8 +3029,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // 2. Direct Supabase column update by user ID and by email
       if (isSupabaseConfigured()) {
         const enrichedUpdates: Partial<UserProfile> = {
-          ...updates,
-          email: updates.email || (updatedProfile as UserProfile).email,
+          ...sanitizedUpdates,
+          email: sanitizedUpdates.email || (updatedProfile as UserProfile).email,
           authId: (updatedProfile as UserProfile).authId,
         };
         updateUserProfileInSupabase(userId, enrichedUpdates).catch((e) =>
@@ -3181,91 +3236,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
     }
 
-    const callerId = activeCall.callerId;
-    const receiverId = activeCall.receiverId;
-    const ratePerMin = getEffectiveCallRate(receiverId, callerId);
-
-    const receiverUser = users.find((u) => u.id === receiverId);
-    const isReceiverTlCreated = Boolean(receiverUser?.teamLeaderId);
-    // Strict Earning Policy: ONLY female creators or Team Leader managed hosts earn coins! Regular females & males earn 0.
-    const isEligibleFemaleCreator = receiverUser?.role === 'female_creator' || receiverUser?.role === 'female_host' || isReceiverTlCreated;
-    const canReceiverEarn = isEligibleFemaleCreator;
-    const hostSharePercent = systemSettings.femaleHostSharePercent ?? 40;
-    const tlSharePercent = systemSettings.teamLeaderSharePercent ?? 10;
-
-    // Upfront Minute 1 Burn calculation
-    const initialSpent = ratePerMin;
-    const initialHostCoins = canReceiverEarn
-      ? ((receiverUser?.coinEarnOverrideRate !== undefined && receiverUser.coinEarnOverrideRate !== null && receiverUser.coinEarnOverrideRate > 0)
-        ? Math.min(initialSpent, receiverUser.coinEarnOverrideRate)
-        : Math.max(1, Math.round(initialSpent * (hostSharePercent / 100))))
-      : 0;
-
-    const initialTlCoins = (isReceiverTlCreated && receiverUser?.teamLeaderId)
-      ? Math.max(1, Math.round(initialSpent * (tlSharePercent / 100)))
-      : 0;
-
-    // Deduct Minute 1 from caller, credit host & TL in local state
-    setUsers((prevUsers) =>
-      prevUsers.map((u) => {
-        if (u.id === callerId) {
-          return { ...u, coinBalance: Math.max(0, u.coinBalance - initialSpent) };
-        }
-        if (u.id === receiverId) {
-          const newCoins = canReceiverEarn ? (u.earningsCoins || 0) + initialHostCoins : (u.earningsCoins || 0);
-          return {
-            ...u,
-            earningsCoins: newCoins,
-            totalLifetimeEarnedUSD: newCoins * systemSettings.femalePayoutRatioUSD,
-            totalCallMinutes: (u.totalCallMinutes || 0) + 1,
-            totalCallsHosted: (u.totalCallsHosted || 0) + 1,
-          };
-        }
-        if (initialTlCoins > 0 && receiverUser?.teamLeaderId && (u.id === receiverUser.teamLeaderId || u.id === receiverUser.createdById)) {
-          const newTlCoins = (u.earningsCoins || 0) + initialTlCoins;
-          return {
-            ...u,
-            earningsCoins: newTlCoins,
-            totalLifetimeEarnedUSD: newTlCoins * systemSettings.femalePayoutRatioUSD,
-          };
-        }
-        return u;
-      })
-    );
-
-    // Sync upfront burn to backend server and Supabase Admin
-    fetch('/api/calls/burn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        callId: activeCall.id,
-        callerId,
-        receiverId,
-        coinsBurned: initialSpent,
-        hostCoinsEarned: initialHostCoins,
-        tlCoinsEarned: initialTlCoins,
-        tlId: receiverUser?.teamLeaderId || receiverUser?.createdById,
-        durationSeconds: 0,
-      }),
-    }).catch(() => {});
-
+    // Do NOT compute or apply coin burns here — caller-only server billing owns minute 1+
     setActiveCall((prev) => {
       if (!prev) return null;
       return {
         ...prev,
         status: 'active',
         startTime: Date.now(),
-        coinsSpent: initialSpent,
-        coinsEarned: initialHostCoins,
+        billedMinutes: 0,
+        coinsSpent: 0,
+        coinsEarned: 0,
       };
     });
 
+    const receiverUser = users.find((u) => u.id === activeCall.receiverId);
     const receiverName = receiverUser ? receiverUser.name : 'Creator';
+    const ratePerMin = getEffectiveCallRate(activeCall.receiverId, activeCall.callerId);
     const isFriendCall = isFriend(activeCall.receiverId) || isFriend(activeCall.callerId);
 
     showToast(
       'Call Connected! 📹',
-      `Live 1-on-1 Call connected with ${receiverName}. ${isFriendCall ? '✨ Friend Rate: ' + ratePerMin + ' 🪙/min' : '🪙 Rate: ' + ratePerMin + ' 🪙/min'} (Minute 1 billed).`,
+      `Live 1-on-1 Call connected with ${receiverName}. ${isFriendCall ? '✨ Friend Rate: ' + ratePerMin + ' 🪙/min' : '🪙 Rate: ' + ratePerMin + ' 🪙/min'}. Billing is server-authoritative.`,
       'success'
     );
   };
@@ -3431,8 +3422,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Remove from active admin call list
     setAdminActiveCalls((prev) => prev.filter((c) => c.id !== endedCall.id && c.hostId !== endedCall.receiverId && c.callerId !== endedCall.callerId));
 
+    billedMinutesRef.current.clear();
+    burnInFlightRef.current.clear();
     setActiveCall(null);
   };
+
+  // Keep endCallRef fresh for the billing interval (avoids stale closures)
+  endCallRef.current = endCall;
 
   const toggleFastTestMode = () => {
     const next = !fastTestMode;
@@ -3444,122 +3440,199 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
   };
 
-  // Active call timer effect (Accurate recurring per-minute coin burning)
+  // Apply authoritative burn balances from server response / WS broadcast
+  const applyBurnBalances = useCallback((payload: {
+    callId?: string;
+    callerId?: string;
+    receiverId?: string;
+    tlId?: string | null;
+    newCallerBalance?: number;
+    newHostEarnings?: number;
+    newTlEarnings?: number;
+    callCoinsSpent?: number;
+    callCoinsEarned?: number;
+    billingMinute?: number;
+    coinsBurned?: number;
+    hostCoinsEarned?: number;
+    duplicate?: boolean;
+  }) => {
+    const {
+      callId,
+      callerId,
+      receiverId,
+      tlId,
+      newCallerBalance,
+      newHostEarnings,
+      newTlEarnings,
+      callCoinsSpent,
+      callCoinsEarned,
+      billingMinute,
+    } = payload;
+
+    if (typeof newCallerBalance === 'number' || typeof newHostEarnings === 'number' || typeof newTlEarnings === 'number') {
+      setUsers((prev) =>
+        prev.map((u) => {
+          if (callerId && u.id === callerId && typeof newCallerBalance === 'number') {
+            return { ...u, coinBalance: newCallerBalance };
+          }
+          if (receiverId && u.id === receiverId && typeof newHostEarnings === 'number') {
+            return {
+              ...u,
+              earningsCoins: newHostEarnings,
+              totalLifetimeEarnedUSD: newHostEarnings * (systemSettings.femalePayoutRatioUSD ?? 0.008),
+            };
+          }
+          if (tlId && u.id === tlId && typeof newTlEarnings === 'number') {
+            return {
+              ...u,
+              earningsCoins: newTlEarnings,
+              totalLifetimeEarnedUSD: newTlEarnings * (systemSettings.femalePayoutRatioUSD ?? 0.008),
+            };
+          }
+          return u;
+        })
+      );
+    }
+
+    if (billingMinute && billingMinute > 0) {
+      billedMinutesRef.current.add(billingMinute);
+    }
+
+    setActiveCall((prev) => {
+      if (!prev) return null;
+      if (callId && prev.id !== callId) return prev;
+      return {
+        ...prev,
+        billedMinutes: Math.max(prev.billedMinutes || 0, billingMinute || 0),
+        coinsSpent: typeof callCoinsSpent === 'number' ? callCoinsSpent : prev.coinsSpent,
+        coinsEarned: typeof callCoinsEarned === 'number' ? callCoinsEarned : prev.coinsEarned,
+      };
+    });
+  }, [systemSettings.femalePayoutRatioUSD]);
+
+  applyBurnBalancesRef.current = applyBurnBalances;
+
+  // Active call timer — CALLER ONLY triggers server-authoritative minute billing
   useEffect(() => {
-    if (!activeCall || activeCall.status !== 'active') return;
+    if (!activeCall || activeCall.status !== 'active') {
+      if (!activeCall) {
+        billedMinutesRef.current.clear();
+        burnInFlightRef.current.clear();
+      }
+      return;
+    }
+
+    // Single billing authority: only the caller runs burn checks
+    if (currentUser.id !== activeCall.callerId) {
+      // Receivers still tick duration for HUD, but never burn
+      const interval = setInterval(() => {
+        setActiveCall((prev) => {
+          if (!prev || prev.status !== 'active') return prev;
+          return { ...prev, durationSeconds: prev.durationSeconds + 1 };
+        });
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+
+    const callId = activeCall.id;
+    const tickCheckSeconds = fastTestMode ? 3 : 60;
+
+    const requestBurn = async (billingMinute: number) => {
+      if (billedMinutesRef.current.has(billingMinute) || burnInFlightRef.current.has(billingMinute)) {
+        return;
+      }
+      burnInFlightRef.current.add(billingMinute);
+
+      try {
+        const sessionRes = await supabase.auth.getSession();
+        const accessToken = sessionRes.data.session?.access_token;
+        if (!accessToken) {
+          burnInFlightRef.current.delete(billingMinute);
+          showToast('Billing Error', 'Authentication required for call billing.', 'error');
+          return;
+        }
+
+        const res = await fetch('/api/calls/burn', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ callId, billingMinute }),
+        });
+
+        const json = await res.json().catch(() => ({}));
+        const code = json?.error?.code || json?.status || json?.code;
+
+        if (code === 'INSUFFICIENT_BALANCE' || res.status === 402) {
+          // Do not mark minute as billed — unpaid minute must not increment coinsSpent
+          burnInFlightRef.current.delete(billingMinute);
+          showToast(
+            'Call Auto-Terminated',
+            'Insufficient coin balance for the next minute.',
+            'error'
+          );
+          endCallRef.current();
+          return;
+        }
+
+        if (!res.ok || !json?.success) {
+          burnInFlightRef.current.delete(billingMinute);
+          console.warn('[billing] burn failed:', json?.error || res.statusText);
+          return;
+        }
+
+        const data = json.data || {};
+        billedMinutesRef.current.add(billingMinute);
+        burnInFlightRef.current.delete(billingMinute);
+
+        applyBurnBalances({
+          callId,
+          callerId: activeCall.callerId,
+          receiverId: activeCall.receiverId,
+          tlId: data.tlId,
+          newCallerBalance: data.newCallerBalance,
+          newHostEarnings: data.newHostEarnings,
+          newTlEarnings: data.newTlEarnings,
+          callCoinsSpent: data.callCoinsSpent,
+          callCoinsEarned: data.callCoinsEarned,
+          billingMinute: data.billedMinutes || billingMinute,
+          coinsBurned: data.coinsBurned,
+          hostCoinsEarned: data.hostCoinsEarned,
+          duplicate: data.duplicate,
+        });
+      } catch (err) {
+        burnInFlightRef.current.delete(billingMinute);
+        console.warn('[billing] burn request error:', err);
+      }
+    };
+
+    // Bill minute 1 immediately when call becomes active
+    if (!billedMinutesRef.current.has(1)) {
+      requestBurn(1);
+    }
 
     const interval = setInterval(() => {
-      setActiveCall((prevCall) => {
-        if (!prevCall) return null;
+      setActiveCall((prev) => {
+        if (!prev || prev.status !== 'active') return prev;
 
-        const newDuration = prevCall.durationSeconds + 1;
-        const tickCheckSeconds = fastTestMode ? 3 : 60; // 3s in test mode, 60s in normal mode
+        const newDuration = prev.durationSeconds + 1;
+        const expectedMinute = Math.floor(newDuration / tickCheckSeconds) + 1;
 
-        let additionalSpent = 0;
-        let additionalEarned = 0;
-
-        // Recurring minute burn occurs after each minute interval
-        if (newDuration > 0 && newDuration % tickCheckSeconds === 0) {
-          const ratePerMin = getEffectiveCallRate(prevCall.receiverId, prevCall.callerId);
-          additionalSpent = ratePerMin;
-
-          const hostSharePercent = systemSettings.femaleHostSharePercent ?? 40;
-          const tlSharePercent = systemSettings.teamLeaderSharePercent ?? 10;
-
-          // Deduct from caller, credit female creator (supporting custom Team Leader coin override rate & TL commission)
-          setUsers((prevUsers) => {
-            const caller = prevUsers.find((u) => u.id === prevCall.callerId);
-            const receiver = prevUsers.find((u) => u.id === prevCall.receiverId);
-
-            // Check if caller ran out of coins
-            if (caller && caller.coinBalance < additionalSpent) {
-              setTimeout(() => {
-                showToast(
-                  'Call Auto-Terminated',
-                  'Caller coin balance reached 0 during active call.',
-                  'error'
-                );
-                endCall();
-              }, 10);
-              return prevUsers;
-            }
-
-            const isReceiverTlCreated = Boolean(receiver?.teamLeaderId);
-            // Strict Earning: only female creators or Team Leader managed hosts earn coins
-            const isEligibleFemaleCreator = receiver?.role === 'female_creator' || receiver?.role === 'female_host' || isReceiverTlCreated;
-            const canReceiverEarn = isEligibleFemaleCreator;
-
-            // Calculate host earning from female host share % of burn rate (strictly capped to not exceed burn)
-            const effectiveEarnRate = canReceiverEarn
-              ? ((receiver?.coinEarnOverrideRate !== undefined && receiver.coinEarnOverrideRate !== null && receiver.coinEarnOverrideRate > 0)
-                ? Math.min(additionalSpent, receiver.coinEarnOverrideRate)
-                : Math.max(1, Math.round(additionalSpent * (hostSharePercent / 100))))
-              : 0;
-            additionalEarned = effectiveEarnRate;
-
-            // Calculate Team Leader override commission if host belongs to a TL
-            const tlCommission = (isReceiverTlCreated && receiver?.teamLeaderId)
-              ? Math.max(1, Math.round(additionalSpent * (tlSharePercent / 100)))
-              : 0;
-
-            // Sync recurring burn to backend server & Supabase Admin
-            fetch('/api/calls/burn', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                callId: prevCall.id,
-                callerId: prevCall.callerId,
-                receiverId: prevCall.receiverId,
-                coinsBurned: additionalSpent,
-                hostCoinsEarned: effectiveEarnRate,
-                tlCoinsEarned: tlCommission,
-                tlId: receiver?.teamLeaderId || receiver?.createdById,
-                durationSeconds: newDuration,
-              }),
-            }).catch(() => {});
-
-            return prevUsers.map((u) => {
-              // 1. Male caller deduction
-              if (u.id === prevCall.callerId) {
-                return { ...u, coinBalance: Math.max(0, u.coinBalance - additionalSpent) };
-              }
-              // 2. Female host earning credit
-              if (u.id === prevCall.receiverId) {
-                const newCoins = canReceiverEarn ? (u.earningsCoins || 0) + effectiveEarnRate : (u.earningsCoins || 0);
-                const newUSD = newCoins * systemSettings.femalePayoutRatioUSD;
-                return {
-                  ...u,
-                  earningsCoins: newCoins,
-                  totalLifetimeEarnedUSD: newUSD,
-                  totalCallMinutes: (u.totalCallMinutes || 0) + 1,
-                };
-              }
-              // 3. Team Leader override commission credit
-              if (tlCommission > 0 && receiver?.teamLeaderId && (u.id === receiver.teamLeaderId || u.id === receiver.createdById)) {
-                const newTlCoins = (u.earningsCoins || 0) + tlCommission;
-                const newTlUSD = newTlCoins * systemSettings.femalePayoutRatioUSD;
-                return {
-                  ...u,
-                  earningsCoins: newTlCoins,
-                  totalLifetimeEarnedUSD: newTlUSD,
-                };
-              }
-              return u;
-            });
-          });
+        if (expectedMinute > (prev.billedMinutes || 0) && expectedMinute > 1) {
+          // Fire-and-forget; billedMinutes updated when server responds
+          void requestBurn(expectedMinute);
         }
 
         return {
-          ...prevCall,
+          ...prev,
           durationSeconds: newDuration,
-          coinsSpent: prevCall.coinsSpent + additionalSpent,
-          coinsEarned: prevCall.coinsEarned + additionalEarned,
         };
       });
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [activeCall, fastTestMode, systemSettings, friends]);
+  }, [activeCall?.id, activeCall?.status, activeCall?.callerId, currentUser.id, fastTestMode, applyBurnBalances]);
 
   // Real-time synchronization of current activeCall with adminActiveCalls
   useEffect(() => {

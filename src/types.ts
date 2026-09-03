@@ -3,33 +3,53 @@ export type UserRole = 'male_user' | 'female_user' | 'female_creator' | 'female_
 export type OnlineStatus = 'online' | 'busy' | 'offline' | 'in_call';
 
 /**
- * Derives the exact user-facing role label according to business rules:
- * - Admin -> "Admin"
- * - Team Leader -> "Team Leader"
- * - Other -> "Other User"
- * - Male -> "Male User"
- * - Female with Team Leader OR explicitly female_creator -> "Female Creator"
- * - Regular Female without Team Leader -> "Female User"
+ * Derives the user-facing role label.
+ * Backend roles remain female_user / female_creator; frontend shows both as "Female".
+ * Use getFemaleRoleMark() for admin-only subtype badges (Creator vs User).
  */
 export function getUserRoleLabel(user?: { role?: string; gender?: string; teamLeaderId?: string | null } | null): string {
   if (!user) return 'Male User';
   const role = user.role;
   const gender = user.gender;
-  const hasTeamLeader = Boolean(user.teamLeaderId);
 
   if (role === 'admin') return 'Admin';
   if (role === 'team_leader' || role === 'agency_manager') return 'Team Leader';
   if (role === 'other_user' || gender === 'other') return 'Other User';
 
-  if (gender === 'female' || role === 'female_user' || role === 'female_creator') {
-    // Only Team Leader created female hosts are Female Creators!
-    if (role === 'female_creator' || hasTeamLeader) {
-      return 'Female Creator';
-    }
-    return 'Female User';
+  if (
+    gender === 'female' ||
+    role === 'female_user' ||
+    role === 'female_creator' ||
+    role === 'female_host'
+  ) {
+    return 'Female';
   }
 
   return 'Male User';
+}
+
+/** Admin subtype mark for female accounts (backend: female_creator vs female_user). */
+export function getFemaleRoleMark(
+  user?: { role?: string; gender?: string; teamLeaderId?: string | null } | null
+): 'creator' | 'user' | null {
+  if (!user) return null;
+  const role = user.role;
+  const gender = user.gender;
+  const isFemale =
+    gender === 'female' ||
+    role === 'female_user' ||
+    role === 'female_creator' ||
+    role === 'female_host';
+  if (!isFemale) return null;
+  if (role === 'female_creator' || role === 'female_host' || Boolean(user.teamLeaderId)) {
+    return 'creator';
+  }
+  return 'user';
+}
+
+/** True when receiver is eligible for call host share (female_creator path). */
+export function isFemaleCreatorRole(role?: string | null): boolean {
+  return role === 'female_creator' || role === 'female_host';
 }
 
 export interface CreatorMoment {
@@ -325,6 +345,8 @@ export interface CallLogItem {
   durationSeconds: number;
   coinsSpent: number;
   coinsEarned: number;
+  teamLeaderEarnedCoins?: number;
+  teamLeaderId?: string;
   timestamp: string;
   wasFriendCall: boolean;
   isAudioOnly?: boolean;

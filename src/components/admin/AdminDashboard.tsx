@@ -55,7 +55,7 @@ import {
   Upload,
   Rocket,
 } from 'lucide-react';
-import { CoinPackage, UserProfile, AdminActiveCall, getUserRoleLabel, VirtualGift } from '../../types';
+import { CoinPackage, UserProfile, AdminActiveCall, getUserRoleLabel, getFemaleRoleMark, VirtualGift } from '../../types';
 import { getUserEffectiveLocation } from '../../utils/location';
 import { ManualCoinModal } from './ManualCoinModal';
 import { EditUserModal } from './EditUserModal';
@@ -548,18 +548,20 @@ export const AdminDashboard: React.FC = () => {
 
   const filteredUsers = users.filter((u) => {
     const roleLabel = getUserRoleLabel(u);
+    const femaleMark = getFemaleRoleMark(u);
     const matchesSearch =
       (u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) ||
       (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()) ||
       (u.role || '').toLowerCase().includes(userSearchQuery.toLowerCase()) ||
       roleLabel.toLowerCase().includes(userSearchQuery.toLowerCase()) ||
+      (femaleMark === 'creator' && 'creator'.includes(userSearchQuery.toLowerCase())) ||
       (u.id || '').toLowerCase().includes(userSearchQuery.toLowerCase());
 
     if (!matchesSearch) return false;
     if (userRoleFilter === 'all') return true;
     if (userRoleFilter === 'male_user') return roleLabel === 'Male User';
-    if (userRoleFilter === 'female_user') return roleLabel === 'Female User';
-    if (userRoleFilter === 'female_creator') return roleLabel === 'Female Creator';
+    if (userRoleFilter === 'female_user') return femaleMark === 'user';
+    if (userRoleFilter === 'female_creator') return femaleMark === 'creator';
     if (userRoleFilter === 'team_leader') return roleLabel === 'Team Leader';
     if (userRoleFilter === 'other_user') return roleLabel === 'Other User';
     if (userRoleFilter === 'admin') return roleLabel === 'Admin';
@@ -3574,8 +3576,8 @@ export const AdminDashboard: React.FC = () => {
             {[
               { id: 'all', label: 'All Users', count: users.length, color: 'border-slate-700 bg-slate-800/80 text-slate-200' },
               { id: 'male_user', label: 'Male Users', count: users.filter((u) => getUserRoleLabel(u) === 'Male User').length, color: 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300' },
-              { id: 'female_user', label: 'Female Users', count: users.filter((u) => getUserRoleLabel(u) === 'Female User').length, color: 'border-pink-500/30 bg-pink-500/10 text-pink-300' },
-              { id: 'female_creator', label: 'Female Creators (TL Hosts)', count: users.filter((u) => getUserRoleLabel(u) === 'Female Creator').length, color: 'border-rose-500/30 bg-rose-500/10 text-rose-300' },
+              { id: 'female_user', label: 'Female Users', count: users.filter((u) => getFemaleRoleMark(u) === 'user').length, color: 'border-pink-500/30 bg-pink-500/10 text-pink-300' },
+              { id: 'female_creator', label: 'Female Creators (TL Hosts)', count: users.filter((u) => getFemaleRoleMark(u) === 'creator').length, color: 'border-rose-500/30 bg-rose-500/10 text-rose-300' },
               { id: 'team_leader', label: 'Team Leaders', count: users.filter((u) => getUserRoleLabel(u) === 'Team Leader').length, color: 'border-amber-500/30 bg-amber-500/10 text-amber-300' },
               { id: 'other_user', label: 'Other Users', count: users.filter((u) => getUserRoleLabel(u) === 'Other User').length, color: 'border-teal-500/30 bg-teal-500/10 text-teal-300' },
               { id: 'admin', label: 'Admins', count: users.filter((u) => getUserRoleLabel(u) === 'Admin').length, color: 'border-purple-500/30 bg-purple-500/10 text-purple-300' },
@@ -3655,10 +3657,10 @@ export const AdminDashboard: React.FC = () => {
                       </td>
                       <td className="p-3">
                         <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold font-mono border ${
-                            getUserRoleLabel(u) === 'Female Creator'
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold font-mono border ${
+                            getFemaleRoleMark(u) === 'creator'
                               ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
-                              : getUserRoleLabel(u) === 'Female User'
+                              : getFemaleRoleMark(u) === 'user'
                               ? 'bg-pink-500/15 text-pink-300 border-pink-500/30'
                               : getUserRoleLabel(u) === 'Male User'
                               ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
@@ -3670,6 +3672,12 @@ export const AdminDashboard: React.FC = () => {
                           }`}
                         >
                           {getUserRoleLabel(u)}
+                          {getFemaleRoleMark(u) === 'creator' && (
+                            <span className="ml-0.5 px-1 rounded bg-rose-500/30 text-[9px] uppercase tracking-wide">Creator</span>
+                          )}
+                          {getFemaleRoleMark(u) === 'user' && (
+                            <span className="ml-0.5 px-1 rounded bg-pink-500/30 text-[9px] uppercase tracking-wide">User</span>
+                          )}
                         </span>
                         {u.teamLeaderId && (
                           <div className="text-[9px] text-amber-400/90 font-mono mt-0.5">
