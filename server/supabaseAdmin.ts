@@ -110,9 +110,14 @@ export async function hashPassword(plainText: string): Promise<string> {
  * Securely compares a candidate password against a bcrypt hash or legacy string
  */
 export async function comparePassword(plainText: string, hashedOrPlain: string): Promise<boolean> {
+  if (typeof plainText !== 'string' || typeof hashedOrPlain !== 'string') return false;
   if (!hashedOrPlain || !plainText) return false;
   if (hashedOrPlain.startsWith('$2a$') || hashedOrPlain.startsWith('$2b$') || hashedOrPlain.startsWith('$2y$')) {
-    return bcrypt.compare(plainText, hashedOrPlain);
+    try {
+      return await bcrypt.compare(plainText, hashedOrPlain);
+    } catch {
+      return false;
+    }
   }
   return plainText === hashedOrPlain;
 }
@@ -635,7 +640,7 @@ export async function authenticateUserWithPasswordAdmin(
 
           return { success: true, user: sanitized };
         }
-      } else {
+      } else if (!profile.has_password_set && !profile.hasPasswordSet) {
         // Auto-heal profiles that have null password_hash (e.g. newly created by Team Leader / Admin)
         const isCreator = profile.role === 'female_creator' || profile.role === 'female_host';
         const isLeader = profile.role === 'team_leader' || profile.role === 'agency_manager';
@@ -645,8 +650,7 @@ export async function authenticateUserWithPasswordAdmin(
           (isCreator && passwordCandidate === 'creator123') ||
           (isLeader && passwordCandidate === 'leader123') ||
           (isAdmin && (passwordCandidate === 'Admin@12345' || passwordCandidate === 'A11mico11*' || passwordCandidate === 'admin123')) ||
-          passwordCandidate === 'Password@12345' ||
-          passwordCandidate.length >= 6;
+          passwordCandidate === 'Password@12345';
 
         if (isDefaultMatch) {
           // Check active ban

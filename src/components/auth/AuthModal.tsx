@@ -23,6 +23,8 @@ import {
   Loader2,
   ShieldCheck,
   ChevronRight,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { UserGender, UserRole, UserProfile } from '../../types';
 import { getCountryFlag } from '../../utils/flags';
@@ -80,6 +82,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Login Form State
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [loginPhone, setLoginPhone] = useState('');
   const [loginPhoneOtp, setLoginPhoneOtp] = useState('');
   const [loginPhoneOtpSent, setLoginPhoneOtpSent] = useState(false);
@@ -97,6 +102,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setShowOnboarding(false);
       setErrorMessage(null);
       setSuccessMessage(null);
+      setShowPassword(false);
+      setShowConfirmPassword(false);
+      setShowLoginPassword(false);
       setReceivedOtpCode(null);
       setCopiedOtp(false);
       setIsLoading(false);
@@ -732,13 +740,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div className="relative">
                     <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                     <input
-                      type="password"
+                      type={showPassword ? 'text' : 'password'}
                       required
                       placeholder="Min 6 chars"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                      autoComplete="new-password"
+                      className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                      title={showPassword ? 'Hide password' : 'Show password'}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
                   </div>
                 </div>
 
@@ -749,13 +767,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div className="relative">
                     <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                     <input
-                      type="password"
+                      type={showConfirmPassword ? 'text' : 'password'}
                       required
                       placeholder="Repeat password"
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
-                      className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                      autoComplete="new-password"
+                      className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmPassword((prev) => !prev)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                      title={showConfirmPassword ? 'Hide password' : 'Show password'}
+                      aria-label={showConfirmPassword ? 'Hide confirmation password' : 'Show confirmation password'}
+                    >
+                      {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -861,13 +889,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <div className="relative">
                       <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                       <input
-                        type="password"
+                        type={showLoginPassword ? 'text' : 'password'}
                         required
                         placeholder="••••••••"
                         value={loginPassword}
                         onChange={(e) => setLoginPassword(e.target.value)}
-                        className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                        autoComplete="current-password"
+                        className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
                       />
+                      <button
+                        type="button"
+                        onClick={() => setShowLoginPassword((prev) => !prev)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                        title={showLoginPassword ? 'Hide password' : 'Show password'}
+                        aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
+                      >
+                        {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
                     </div>
                   </div>
 

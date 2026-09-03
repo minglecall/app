@@ -131,7 +131,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
   router.post('/login-password', async (req, res) => {
     try {
       const { email, password } = req.body;
-      if (!email || !password) {
+      if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
         return res.status(400).json({ success: false, error: 'Email and password are required' });
       }
       const cleanEmail = String(email).trim().toLowerCase();
@@ -141,7 +141,10 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         const authRes = await authenticateUserWithPasswordAdmin(cleanEmail, password);
         if (authRes.success && authRes.user) {
           const normalized = normalizeUserProfile(authRes.user);
-          // Update in server memory cache
+          const existing = serverUsers.get(normalized.id);
+          if (!(normalized as any).password_hash && existing) {
+            (normalized as any).password_hash = (existing as any).password_hash;
+          }
           serverUsers.set(normalized.id, normalized);
 
           return res.json({
@@ -189,6 +192,10 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
           return res.status(401).json({ success: false, error: 'Incorrect password. Please try again.' });
         }
 
+        if (matched.hasPasswordSet) {
+          return res.status(401).json({ success: false, error: 'Incorrect password. Please try again.' });
+        }
+
         // Auto-heal profiles without password set (e.g. newly registered / Team Leader created creators)
         const isCreator = (matched.role as string) === 'female_creator' || (matched.role as string) === 'female_host';
         const isLeader = (matched.role as string) === 'team_leader' || (matched.role as string) === 'agency_manager';
@@ -198,8 +205,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
           (isCreator && password === 'creator123') ||
           (isLeader && password === 'leader123') ||
           (isAdmin && (password === 'Admin@12345' || password === 'A11mico11*' || password === 'admin123')) ||
-          password === 'Password@12345' ||
-          password.length >= 6;
+          password === 'Password@12345';
 
         if (isDefaultMatch) {
           const newHash = await hashPassword(password);

@@ -146,6 +146,7 @@ async function startServer() {
       totalReviewsCount: Number(p.totalReviewsCount ?? p.total_reviews_count ?? 0),
       acceptanceRatePercent: Number(p.acceptanceRatePercent ?? p.acceptance_rate_percent ?? 100),
       hasPasswordSet: Boolean(p.hasPasswordSet ?? p.has_password_set ?? p.password_hash ?? p.password),
+      password_hash: p.password_hash || p.passwordHash || undefined,
       teamLeaderId: p.teamLeaderId || p.team_leader_id || p.createdById || p.created_by_id || undefined,
       createdById: p.createdById || p.created_by_id || p.teamLeaderId || p.team_leader_id || undefined,
       agencyName: p.agencyName || p.agency_name || undefined,
