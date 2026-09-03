@@ -30,6 +30,7 @@ import { MegaGiftOverlay } from './MegaGiftOverlay';
 import { getCountryFlag } from '../../utils/flags';
 import { SvgFlag } from '../common/SvgFlag';
 import { Room, RoomEvent, Track, createLocalTracks, LocalTrack, RemoteTrack, VideoPresets } from 'livekit-client';
+import { supabase } from '../../lib/supabase';
 
 interface VideoCallStudioProps {
   onOpenStore: () => void;
@@ -160,9 +161,17 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
 
       try {
         setConnectionStatusText('Fetching LiveKit Access Token...');
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (accessToken) {
+          headers.Authorization = `Bearer ${accessToken}`;
+        }
+
         const res = await fetch('/api/livekit/token', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             roomName: activeCall.id,
             identity: currentUser.id,

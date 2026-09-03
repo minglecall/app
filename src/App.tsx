@@ -30,6 +30,8 @@ import { UserProfile } from './types';
 import { CheckCircle2, AlertTriangle, Info, AlertCircle, X } from 'lucide-react';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 
+
+
 const MainApp: React.FC = () => {
   const {
     activeCall,

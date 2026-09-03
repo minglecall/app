@@ -637,31 +637,35 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
           return;
         }
       }
-      // Fallback
-      setSchemaSql(rawSchemaSql);
-      setMigrationSql(rawMigrationSql);
+      // Fallback: client no longer embeds the 59KB schema — require API/canonical file
+      const unavailableNotice =
+        '-- Canonical schema unavailable from API.\n-- Open /supabase_schema.sql at the project root, or retry GET /api/admin/schema.';
+      setSchemaSql(rawSchemaSql || unavailableNotice);
+      setMigrationSql(rawMigrationSql || unavailableNotice);
       setLastSchemaUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       setSchemaStats({
-        tablesCount: 17,
+        tablesCount: 21,
         version: '3.2',
       });
       if (showToastNotice) {
         showToast(
-          'Schema Refreshed 🟢',
-          'Populated complete updated PostgreSQL schema (17 tables, Countries, Languages, Zodiac, Interests, RLS policies, auth triggers). Ready to execute in Supabase!',
-          'success'
+          'Schema API Unavailable ⚠️',
+          'Could not load /supabase_schema.sql via /api/admin/schema. Open the root schema file directly.',
+          'error'
         );
       }
     } catch (e: any) {
-      setSchemaSql(rawSchemaSql);
-      setMigrationSql(rawMigrationSql);
+      const unavailableNotice =
+        '-- Canonical schema unavailable from API.\n-- Open /supabase_schema.sql at the project root, or retry GET /api/admin/schema.';
+      setSchemaSql(rawSchemaSql || unavailableNotice);
+      setMigrationSql(rawMigrationSql || unavailableNotice);
       setLastSchemaUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       setSchemaStats({
-        tablesCount: 17,
+        tablesCount: 21,
         version: '3.2',
       });
       if (showToastNotice) {
-        showToast('Schema Refreshed 🟢', 'Populated latest master schema ready for Supabase execution.', 'success');
+        showToast('Schema Load Error 🔴', e.message || 'Failed to load canonical schema from server.', 'error');
       }
     } finally {
       setIsUpdatingSchema(false);

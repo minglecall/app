@@ -59,6 +59,7 @@ import {
   subscribeToRealtimeProfiles,
   saveMessageToSupabase,
   subscribeToRealtimeChat,
+  fetchRecentMessagesForUser,
   fetchPayoutRequestsFromSupabase,
   upsertPayoutRequestToSupabase,
   fetchCallLogsFromSupabase,
@@ -98,9 +99,12 @@ import {
   pushAllTaxonomiesAndSettingsToSupabase,
   fetchUserDailyRewardsFromSupabase,
   upsertUserDailyRewardsInSupabase,
+  mapDbProfileToUserProfile,
 } from '../services/supabaseService';
 import { updateUserPassword, signOutSupabase } from '../services/supabaseAuthService';
 import { getUserEffectiveLocation } from '../utils/location';
+import { supabase } from '../lib/supabase';
+import type { Session, User as SupabaseAuthUser } from '@supabase/supabase-js';
 
 
 const DEFAULT_FALLBACK_USER: UserProfile = {
@@ -332,42 +336,8 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Load state from localStorage (or start clean with Supabase)
-  const [users, setUsers] = useState<UserProfile[]>(() => {
-    try {
-      const saved = localStorage.getItem('livecall_users');
-      if (saved) {
-        const parsed: UserProfile[] = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          const emailMap = new Map<string, UserProfile>();
-          const deduped: UserProfile[] = [];
-          for (const u of parsed) {
-            if (!u || !u.id) continue;
-            const cleanEmail = u.email ? String(u.email).toLowerCase().trim() : null;
-            if (cleanEmail) {
-              if (emailMap.has(cleanEmail)) {
-                const existing = emailMap.get(cleanEmail)!;
-                const isCurrentUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(u.id);
-                if (isCurrentUuid) {
-                  const idx = deduped.findIndex((x) => x.id === existing.id);
-                  if (idx !== -1) deduped[idx] = u;
-                  emailMap.set(cleanEmail, u);
-                }
-              } else {
-                emailMap.set(cleanEmail, u);
-                deduped.push(u);
-              }
-            } else {
-              deduped.push(u);
-            }
-          }
-          return deduped;
-        }
-      }
-    } catch (e) { }
-    return [];
-  });
-
+  // Load state — authoritative social data starts empty and is hydrated from Supabase/server
+  const [users, setUsers] = useState<UserProfile[]>(() => []);
 
   const [currentUserId, setCurrentUserId] = useState<string>(() => {
     const saved = localStorage.getItem('livecall_current_user_id');
@@ -424,30 +394,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return VIRTUAL_GIFTS;
   });
 
-  const [payoutRequests, setPayoutRequests] = useState<PayoutRequest[]>(() => {
-    const saved = localStorage.getItem('livecall_payouts');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [payoutRequests, setPayoutRequests] = useState<PayoutRequest[]>(() => []);
 
-  const [feedPosts, setFeedPosts] = useState<FeedPost[]>(() => {
-    const saved = localStorage.getItem('livecall_posts');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [feedPosts, setFeedPosts] = useState<FeedPost[]>(() => []);
 
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => {
-    const saved = localStorage.getItem('livecall_chat');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => []);
 
-  const [callLogs, setCallLogs] = useState<CallLogItem[]>(() => {
-    const saved = localStorage.getItem('livecall_call_logs');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [callLogs, setCallLogs] = useState<CallLogItem[]>(() => []);
 
-  const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(() => {
-    const saved = localStorage.getItem('livecall_friend_requests');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(() => []);
 
   const [creatorReviews, setCreatorReviews] = useState<CreatorReview[]>(() => {
     try {
@@ -541,10 +496,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [friends, setFriends] = useState<string[]>(() => {
-    const saved = localStorage.getItem('livecall_friends');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [friends, setFriends] = useState<string[]>(() => []);
 
   const [blockedUserIds, setBlockedUserIds] = useState<string[]>(() => {
     const saved = localStorage.getItem('livecall_blocked');
@@ -651,11 +603,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return () => clearInterval(timer);
   }, [adminActiveCalls.length]);
 
-  // Sync to local storage
-  useEffect(() => {
-    localStorage.setItem('livecall_users', JSON.stringify(users));
-  }, [users]);
-
+  // Persist non-authoritative UI preferences only (not user/social/business data)
   useEffect(() => {
     localStorage.setItem('livecall_current_user_id', currentUserId);
   }, [currentUserId]);
@@ -685,54 +633,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [coinPackages]);
 
   useEffect(() => {
-    localStorage.setItem('livecall_payouts', JSON.stringify(payoutRequests));
-  }, [payoutRequests]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_posts', JSON.stringify(feedPosts));
-  }, [feedPosts]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_chat', JSON.stringify(chatMessages));
-  }, [chatMessages]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_call_logs', JSON.stringify(callLogs));
-  }, [callLogs]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_friend_requests', JSON.stringify(friendRequests));
-  }, [friendRequests]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_friends', JSON.stringify(friends));
-  }, [friends]);
-
-  useEffect(() => {
     localStorage.setItem('livecall_read_message_ids', JSON.stringify(readMessageIds));
   }, [readMessageIds]);
 
-  // Real-time cross-tab synchronization listener (instant multi-tab sync without page reload)
+  // Real-time cross-tab synchronization listener (UI preferences / ephemeral match signals only)
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'livecall_friend_requests' && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
-          if (Array.isArray(parsed)) setFriendRequests(parsed);
-        } catch {}
-      }
-      if (e.key === 'livecall_friends' && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
-          if (Array.isArray(parsed)) setFriends(parsed);
-        } catch {}
-      }
-      if (e.key === 'livecall_chat' && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
-          if (Array.isArray(parsed)) setChatMessages(parsed);
-        } catch {}
-      }
       if (e.key === 'livecall_read_message_ids' && e.newValue) {
         try {
           const parsed = JSON.parse(e.newValue);
@@ -793,10 +699,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const currentUser =
-    users.find((u) => u.id === currentUserId) ||
-    users.find((u) => u.authId && u.authId === currentUserId) ||
-    users.find((u) => u.email && currentUserId && u.email.toLowerCase() === currentUserId.toLowerCase()) ||
-    users[0] ||
+    (currentUserId
+      ? users.find((u) => u.id === currentUserId) ||
+        users.find((u) => u.authId && u.authId === currentUserId) ||
+        users.find((u) => u.email && currentUserId && u.email.toLowerCase() === currentUserId.toLowerCase())
+      : undefined) ||
+    (isLoggedIn ? users[0] : undefined) ||
     DEFAULT_FALLBACK_USER;
 
   // Unread messages count for current user
@@ -829,6 +737,210 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => {
     currentUserIdRef.current = currentUserId;
   }, [currentUserId]);
+
+  // -------------------------------------------------------------------------
+  // Supabase Auth rehydration — session.user.id is the identity source of truth
+  // when a valid session exists. localStorage remains a fallback for offline /
+  // persona / custom-OTP flows that have no Supabase session yet.
+  // -------------------------------------------------------------------------
+  const authHydratingRef = useRef(false);
+  const supabaseAuthUserIdRef = useRef<string | null>(null);
+
+  const clearLocalAuthState = useCallback((prevId?: string) => {
+    const clearedId = prevId || currentUserIdRef.current;
+    isLoggedInRef.current = false;
+    currentUserIdRef.current = '';
+    supabaseAuthUserIdRef.current = null;
+    setIsLoggedIn(false);
+    setCurrentUserId('');
+    localStorage.setItem('livecall_logged_in', 'false');
+    localStorage.removeItem('livecall_current_user_id');
+
+    if (clearedId) {
+      setUsers((prev) =>
+        prev.map((u) => (u.id === clearedId || u.authId === clearedId ? { ...u, onlineStatus: 'offline' as const } : u))
+      );
+    }
+  }, []);
+
+  const applySupabaseSessionUser = useCallback(async (authUser: SupabaseAuthUser) => {
+    const authUserId = String(authUser.id || '').trim();
+    if (!authUserId) return;
+
+    authHydratingRef.current = true;
+    supabaseAuthUserIdRef.current = authUserId;
+
+    try {
+      const email = (authUser.email || '').trim().toLowerCase();
+      const meta = authUser.user_metadata || {};
+      let profile =
+        usersRef.current.find((u) => u.id === authUserId) ||
+        usersRef.current.find((u) => u.authId === authUserId) ||
+        (email
+          ? usersRef.current.find((u) => u.email && u.email.toLowerCase().trim() === email)
+          : undefined);
+
+      // Fetch authoritative profile from Supabase when not already in memory
+      if (!profile && isSupabaseConfigured()) {
+        try {
+          let dbProfile: any = null;
+          const { data: byAuth } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('auth_id', authUserId)
+            .maybeSingle();
+          if (byAuth) {
+            dbProfile = byAuth;
+          } else {
+            const { data: byId } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', authUserId)
+              .maybeSingle();
+            if (byId) {
+              dbProfile = byId;
+            } else if (email) {
+              const { data: byEmail } = await supabase
+                .from('profiles')
+                .select('*')
+                .ilike('email', email)
+                .maybeSingle();
+              dbProfile = byEmail;
+            }
+          }
+          if (dbProfile) {
+            profile = mapDbProfileToUserProfile(dbProfile);
+            if (!profile.authId) profile.authId = authUserId;
+          }
+        } catch (err) {
+          console.warn('[Auth Rehydrate] Profile fetch warning:', err);
+        }
+      }
+
+      // Minimal safe stub so UI never crashes while profile sync catches up
+      if (!profile) {
+        const metaRole = (meta.role as UserRole) || 'male_user';
+        const isFemale = metaRole === 'female_user' || metaRole === 'female_creator';
+        profile = {
+          ...DEFAULT_FALLBACK_USER,
+          id: authUserId,
+          authId: authUserId,
+          name: meta.full_name || meta.display_name || meta.name || (email ? email.split('@')[0] : 'Member'),
+          email: email || '',
+          gender: isFemale ? 'female' : metaRole === 'other_user' ? 'other' : 'male',
+          role: metaRole,
+          isOnboarded: Boolean(meta.is_onboarded),
+          onlineStatus: 'online',
+          coinBalance: isFemale ? 0 : 50,
+        };
+      }
+
+      // Prefer the persistent profile id when present; keep authId linked
+      const activeId = profile.id || authUserId;
+      profile = {
+        ...profile,
+        id: activeId,
+        authId: profile.authId || authUserId,
+        onlineStatus: 'online',
+      };
+
+      isLoggedInRef.current = true;
+      currentUserIdRef.current = activeId;
+      setCurrentUserId(activeId);
+      setIsLoggedIn(true);
+      localStorage.setItem('livecall_logged_in', 'true');
+      localStorage.setItem('livecall_current_user_id', activeId);
+
+      setUsers((prev) => {
+        const cleanEmail = profile!.email ? profile!.email.toLowerCase().trim() : null;
+        const remaining = prev.filter((u) => {
+          if (u.id === activeId || u.id === authUserId) return false;
+          if (u.authId && (u.authId === authUserId || u.authId === activeId)) return false;
+          if (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail) return false;
+          return true;
+        });
+        const next = [profile!, ...remaining];
+        usersRef.current = next;
+        try {
+        } catch {}
+        return next;
+      });
+    } finally {
+      authHydratingRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let subscription: { unsubscribe: () => void } | null = null;
+
+    const bootstrapAuth = async () => {
+      if (!isSupabaseConfigured()) {
+        // No Supabase — keep localStorage identity for offline / persona mode
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (cancelled) return;
+
+        if (error) {
+          console.warn('[Auth Rehydrate] getSession error:', error.message);
+        }
+
+        const session = data?.session as Session | null;
+        if (session?.user?.id) {
+          await applySupabaseSessionUser(session.user);
+        } else {
+          // No live session: soft-rehydrate legacy/custom OTP flows that persist
+          // a profile id without a Supabase Auth JWT. Do not invent identity.
+          const savedLoggedIn = localStorage.getItem('livecall_logged_in');
+          const savedUserId = localStorage.getItem('livecall_current_user_id');
+          if (savedLoggedIn === 'true' && savedUserId) {
+            isLoggedInRef.current = true;
+            currentUserIdRef.current = savedUserId;
+            setCurrentUserId(savedUserId);
+            setIsLoggedIn(true);
+          } else if (savedLoggedIn === 'true' && !savedUserId) {
+            clearLocalAuthState();
+          }
+        }
+      } catch (err) {
+        console.warn('[Auth Rehydrate] bootstrap exception:', err);
+      }
+    };
+
+    bootstrapAuth();
+
+    if (isSupabaseConfigured()) {
+      const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (cancelled) return;
+
+        if (event === 'SIGNED_OUT') {
+          clearLocalAuthState();
+          return;
+        }
+
+        if (
+          (event === 'SIGNED_IN' ||
+            event === 'TOKEN_REFRESHED' ||
+            event === 'USER_UPDATED' ||
+            event === 'INITIAL_SESSION') &&
+          session?.user?.id
+        ) {
+          // Avoid fighting an in-progress hydrate from getSession()
+          if (authHydratingRef.current && event === 'INITIAL_SESSION') return;
+          await applySupabaseSessionUser(session.user);
+        }
+      });
+      subscription = data.subscription;
+    }
+
+    return () => {
+      cancelled = true;
+      subscription?.unsubscribe();
+    };
+  }, [applySupabaseSessionUser, clearLocalAuthState]);
 
   useEffect(() => {
     adminActiveCallsRef.current = adminActiveCalls;
@@ -985,7 +1097,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
           setUsers(finalProfiles);
           usersRef.current = finalProfiles;
-          localStorage.setItem('livecall_users', JSON.stringify(finalProfiles));
 
           // Sync with server memory so WebSocket and WebRTC signaling have all live profiles
           fetch('/api/users/sync-all', {
@@ -1126,7 +1237,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // Save users to state & localStorage
       setUsers(currentUsersList);
       usersRef.current = currentUsersList;
-      localStorage.setItem('livecall_users', JSON.stringify(currentUsersList));
 
       // 4. Transactions & Store
       if (options.payoutRequests) {
@@ -1439,6 +1549,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   useEffect(() => {
+    if (!currentUserId || !isSupabaseConfigured()) return;
+    let cancelled = false;
+    fetchRecentMessagesForUser(currentUserId)
+      .then((msgs) => {
+        if (!cancelled && msgs && msgs.length > 0) {
+          setChatMessages(msgs);
+        }
+      })
+      .catch((e) => console.warn('Supabase messages hydrate note:', e));
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId]);
+
+  useEffect(() => {
     fetchUsersFromServer();
     syncUsersFromSupabase();
 
@@ -1447,7 +1572,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         .then((data) => {
           if (data && data.length > 0) {
             setPayoutRequests(data);
-            localStorage.setItem('livecall_payouts', JSON.stringify(data));
           }
         })
         .catch((e) => console.warn('Supabase initial payout fetch note:', e));
@@ -1456,7 +1580,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         .then((data) => {
           if (data && data.length > 0) {
             setCallLogs(data);
-            localStorage.setItem('livecall_call_logs', JSON.stringify(data));
           }
         })
         .catch((e) => console.warn('Supabase initial call logs fetch note:', e));
@@ -1465,10 +1588,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         .then((data) => {
           if (data && data.length > 0) {
             setFriendRequests(data);
-            localStorage.setItem('livecall_friend_requests', JSON.stringify(data));
+            const uid = currentUserIdRef.current;
+            if (uid) {
+              const friendIds = data
+                .filter((r: any) => r.status === 'accepted' && (r.senderId === uid || r.receiverId === uid))
+                .map((r: any) => (r.senderId === uid ? r.receiverId : r.senderId));
+              setFriends(Array.from(new Set(friendIds)));
+            }
           }
         })
         .catch((e) => console.warn('Supabase initial friend requests fetch note:', e));
+
+      const msgUid = currentUserIdRef.current;
+      if (msgUid) {
+        fetchRecentMessagesForUser(msgUid)
+          .then((msgs) => {
+            if (msgs && msgs.length > 0) {
+              setChatMessages(msgs);
+            }
+          })
+          .catch((e) => console.warn('Supabase initial messages fetch note:', e));
+      }
 
       fetchSystemConfigsFromSupabase()
         .then((data) => {
@@ -1565,7 +1705,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         .then((posts) => {
           if (posts && posts.length > 0) {
             setFeedPosts(posts);
-            localStorage.setItem('livecall_posts', JSON.stringify(posts));
           }
         })
         .catch(() => { });
@@ -1799,7 +1938,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const dbRequests = await fetchFriendRequestsFromSupabase();
         if (dbRequests && Array.isArray(dbRequests) && !isCancelled) {
           setFriendRequests(dbRequests);
-          localStorage.setItem('livecall_friend_requests', JSON.stringify(dbRequests));
+          const uid = currentUserIdRef.current;
+          if (uid) {
+            const friendIds = dbRequests
+              .filter((r: any) => r.status === 'accepted' && (r.senderId === uid || r.receiverId === uid))
+              .map((r: any) => (r.senderId === uid ? r.receiverId : r.senderId));
+            setFriends(Array.from(new Set(friendIds)));
+          }
         }
       } catch (e) {
         // Continue silently
@@ -2099,7 +2244,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               const otherId = senderId === currentUserIdRef.current ? receiverId : senderId;
               setFriends((prev) => {
                 const next = Array.from(new Set([...prev, senderId, receiverId, otherId]));
-                localStorage.setItem('livecall_friends', JSON.stringify(next));
                 return next;
               });
             }
@@ -2128,10 +2272,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               const otherId = userA === currentUserIdRef.current ? userB : userA;
               setFriends((prev) => {
                 const next = prev.filter((id) => id !== otherId && id !== userA && id !== userB);
-                if (currentUserIdRef.current) {
-                  localStorage.setItem('livecall_friends_' + currentUserIdRef.current, JSON.stringify(next));
-                }
-                localStorage.setItem('livecall_friends', JSON.stringify(next));
                 return next;
               });
               setFriendRequests((prev) => {
@@ -2142,7 +2282,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                       (r.senderId === userB && r.receiverId === userA)
                     )
                 );
-                localStorage.setItem('livecall_friend_requests', JSON.stringify(next));
                 return next;
               });
             }
@@ -2166,40 +2305,47 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Connect WebSocket
     connect();
 
-    // Trigger initial presence sync immediately
+    // Initial presence + Supabase status push (authoritative DB sync; not a tight poll loop)
     syncPresenceDirect();
+    syncSupabaseStatusCycle();
+    syncUserDirectory();
 
-    // 1. WebSocket Heartbeat every 3 seconds (3-sec sync interval requested)
+    // 1. WebSocket heartbeat — primary liveness signal to the signaling server
     heartbeatTimer = setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'heartbeat', userId: currentUserId }));
       }
-    }, 3000);
+    }, 5000);
 
-    // 2. HTTP Presence Poll & Heartbeat fallback every 3 seconds
+    // 2. HTTP presence fallback only when WS is down (avoids fragile 3s poll spam)
     presenceSyncTimer = setInterval(() => {
-      syncPresenceDirect();
-    }, 3000);
+      const wsOpen = wsRef.current && wsRef.current.readyState === WebSocket.OPEN;
+      if (!wsOpen) {
+        syncPresenceDirect();
+      }
+    }, 15000);
 
-    // 3. User directory refresh every 6 seconds
+    // 3. User directory refresh from server (authoritative listings)
     userDirectoryTimer = setInterval(() => {
       syncUserDirectory();
-    }, 6000);
+    }, 30000);
 
-    // 4. Supabase 3-Second Database Status Synchronizer (Syncs database every 3 seconds)
-    syncSupabaseStatusCycle();
+    // 4. Push own status to Supabase periodically; friend requests hydrate from DB
     supabaseStatusTimer = setInterval(() => {
       syncSupabaseStatusCycle();
-    }, 3000);
+    }, 20000);
 
-    // Cross-tab Synchronization using BroadcastChannel & localStorage events
+    // Cross-tab Synchronization using BroadcastChannel (presence only; no social data dumps)
     let broadcastChannel: BroadcastChannel | null = null;
     try {
       if (typeof BroadcastChannel !== 'undefined') {
         broadcastChannel = new BroadcastChannel('livecall_presence_sync_channel');
         broadcastChannel.onmessage = (event) => {
           if (event.data?.type === 'presence_updated' || event.data?.type === 'user_switched') {
-            syncPresenceDirect();
+            // Prefer WS; HTTP only as reconnect aid
+            if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+              syncPresenceDirect();
+            }
             syncSupabaseStatusCycle();
           }
         };
@@ -2209,11 +2355,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'livecall_presence_trigger' || e.key === 'livecall_current_user_id') {
-        syncPresenceDirect();
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          syncPresenceDirect();
+        }
         syncSupabaseStatusCycle();
       }
     };
     window.addEventListener('storage', handleStorageChange);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'heartbeat', userId: currentUserIdRef.current }));
+        } else {
+          syncPresenceDirect();
+        }
+        syncSupabaseStatusCycle();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     // Browser close / tab close / navigation away handler (beacon offline status to server & Supabase)
     const handleUnload = () => {
@@ -2257,6 +2417,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (supabaseStatusTimer) clearInterval(supabaseStatusTimer);
       if (broadcastChannel) broadcastChannel.close();
       window.removeEventListener('storage', handleStorageChange);
+      document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('beforeunload', handleUnload);
       window.removeEventListener('pagehide', handleUnload);
       if (ws) ws.close();
@@ -2366,7 +2527,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ...remaining.map((u) => (oldId && u.id === oldId && oldId !== userId ? { ...u, onlineStatus: 'offline' as const } : u)),
       ];
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -2603,7 +2763,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setIsLoggedIn(true);
     localStorage.setItem('livecall_logged_in', 'true');
     localStorage.setItem('livecall_current_user_id', newId);
-    localStorage.setItem('livecall_users', JSON.stringify([newUser, ...usersRef.current]));
 
     // Sync new registered user immediately to server
     fetch('/api/users', {
@@ -2666,7 +2825,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return u;
       });
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -3918,7 +4076,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setUsers((prev) => {
       const next = prev.map((u) => (u.id === userId ? merged : u));
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -3958,7 +4115,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setUsers((prev) => {
       const next = prev.filter((u) => u.id !== userId);
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -3991,7 +4147,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return u;
       });
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -4059,7 +4214,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setUsers((prev) => {
       const next = prev.map((u) => (u.id === userId ? updatedUserObj : u));
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -4126,7 +4280,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setUsers((prev) => {
       const next = [newLeader, ...prev];
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -4198,7 +4351,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setUsers((prev) => {
       const next = [newCreator, ...prev.filter((u) => u.id !== newCreator.id && u.email !== newCreator.email)];
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -4259,7 +4411,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return u;
       });
       usersRef.current = next;
-      localStorage.setItem('livecall_users', JSON.stringify(next));
       return next;
     });
 
@@ -4298,7 +4449,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           return u;
         });
         usersRef.current = next;
-        localStorage.setItem('livecall_users', JSON.stringify(next));
         return next;
       });
 
@@ -4349,7 +4499,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           return u;
         });
         usersRef.current = next;
-        localStorage.setItem('livecall_users', JSON.stringify(next));
         return next;
       });
 
@@ -4375,7 +4524,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         targetName = target?.name || 'Host';
         const next = prev.filter((u) => u.id !== creatorId);
         usersRef.current = next;
-        localStorage.setItem('livecall_users', JSON.stringify(next));
         return next;
       });
 
@@ -4546,7 +4694,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
     const updated = [newPost, ...feedPosts];
     setFeedPosts(updated);
-    localStorage.setItem('livecall_posts', JSON.stringify(updated));
     if (isSupabaseConfigured()) {
       upsertFeedPostToSupabase(newPost).catch(() => { });
     }
@@ -4694,10 +4841,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const otherUserId = targetReq.senderId === currentUser.id ? targetReq.receiverId : targetReq.senderId;
     setFriends((prev) => {
       const next = Array.from(new Set([...prev, targetReq.senderId, targetReq.receiverId, otherUserId]));
-      if (currentUserId) {
-        localStorage.setItem('livecall_friends_' + currentUserId, JSON.stringify(next));
-      }
-      localStorage.setItem('livecall_friends', JSON.stringify(next));
       return next;
     });
 
@@ -4756,10 +4899,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const removeFriend = (userId: string) => {
     const updatedFriends = friends.filter((id) => id !== userId);
     setFriends(updatedFriends);
-    if (currentUserId) {
-      localStorage.setItem('livecall_friends_' + currentUserId, JSON.stringify(updatedFriends));
-    }
-    localStorage.setItem('livecall_friends', JSON.stringify(updatedFriends));
 
     // Completely remove all friend requests between these two users
     setFriendRequests((prev) => {
@@ -4772,7 +4911,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             (currentUser && r.senderId === userId && r.receiverId === currentUser.id)
           )
       );
-      localStorage.setItem('livecall_friend_requests', JSON.stringify(next));
       return next;
     });
 

@@ -1,3 +1,5 @@
+import { supabase } from '../lib/supabase';
+
 export interface DirectUploadOptions {
   file: File;
   userId?: string;
@@ -11,6 +13,21 @@ export interface DirectUploadResult {
   fileSize: number;
   contentType: string;
   durationMs: number;
+}
+
+/** Build JSON request headers with the current Supabase access token when available. */
+async function getAuthJsonHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+  } catch (err) {
+    console.warn('[R2 Storage] Unable to read Supabase session for Authorization header:', err);
+  }
+  return headers;
 }
 
 // Normalize any media URL to ensure raw authenticated S3 endpoints are routed via proxy
@@ -50,7 +67,7 @@ async function uploadMediaViaServerFallback(
 
   const res = await fetch('/api/storage/upload', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await getAuthJsonHeaders(),
     body: JSON.stringify({
       filename: file.name,
       contentType: file.type || 'image/jpeg',
@@ -86,10 +103,10 @@ export async function uploadMediaDirectlyToR2(
   const startTime = performance.now();
 
   try {
-    // 1. Request presigned URL from server API
+    // 1. Request presigned URL from server API (authenticated)
     const presignRes = await fetch('/api/storage/presigned-url', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await getAuthJsonHeaders(),
       body: JSON.stringify({
         filename: file.name,
         contentType: file.type || 'application/octet-stream',

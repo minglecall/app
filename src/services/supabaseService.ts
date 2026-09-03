@@ -1085,6 +1085,33 @@ export async function fetchConversationMessages(
   }
 }
 
+/** Recent messages for a user across all conversations (authoritative hydrate; not localStorage). */
+export async function fetchRecentMessagesForUser(
+  userId: string,
+  limit: number = 200
+): Promise<ChatMessage[] | null> {
+  if (!isSupabaseConfigured() || !userId) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+
+    if (error) {
+      console.warn('Supabase fetchRecentMessagesForUser error:', error.message);
+      return null;
+    }
+
+    return (data || []).map(mapDbMessageToChatMessage);
+  } catch (err) {
+    console.warn('Supabase fetchRecentMessagesForUser exception:', err);
+    return null;
+  }
+}
+
 export async function saveMessageToSupabase(message: ChatMessage): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
 

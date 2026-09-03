@@ -179,7 +179,7 @@ export async function sendOtpEmail(params: {
   // Save in server store
   saveOtp(cleanTo, otpCode, { name });
 
-  const appUrl = process.env.APP_URL || 'https://media.livecall-app.com';
+  const appUrl = (process.env.APP_URL || '').trim() || `http://localhost:${process.env.PORT || 3000}`;
   const directLink = confirmationUrl || `${appUrl}/?auth_verify=1&email=${encodeURIComponent(cleanTo)}&code=${otpCode}`;
 
   const htmlContent = `

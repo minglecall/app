@@ -1,6 +1,8 @@
 -- ============================================================================
 -- LIVECALL DATING & MONETIZATION ECOSYSTEM - SUPABASE POSTGRESQL SCHEMA
 -- Version: 3.2 (Production Master Schema - 100% Idempotent)
+-- CANONICAL SOURCE OF TRUTH — do not maintain parallel schema copies.
+-- Served by GET /api/admin/schema via server/schemaLoader.ts
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -148,6 +150,7 @@ CREATE TABLE IF NOT EXISTS public.messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON public.messages(sender_id, receiver_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_unread ON public.messages(receiver_id, is_read) WHERE is_read = false;
 
 -- ============================================================================
 -- 4. CALL LOGS TABLE (1-on-1 WebRTC & LiveKit billed sessions)
@@ -203,6 +206,7 @@ ALTER TABLE public.call_logs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEF
 CREATE INDEX IF NOT EXISTS idx_call_logs_caller ON public.call_logs(caller_id);
 CREATE INDEX IF NOT EXISTS idx_call_logs_host ON public.call_logs(host_id);
 CREATE INDEX IF NOT EXISTS idx_call_logs_team_leader ON public.call_logs(team_leader_id);
+CREATE INDEX IF NOT EXISTS idx_call_logs_participants ON public.call_logs(caller_id, receiver_id, created_at DESC);
 
 -- ============================================================================
 -- 5. FRIEND REQUESTS TABLE (Followers, friendships & mutual discounts)
@@ -344,6 +348,26 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     feature_maintenance_mode BOOLEAN DEFAULT false,
     daily_streak_rewards_json TEXT DEFAULT '[10,15,20,25,35,50,100]',
     daily_missions_config_json TEXT DEFAULT '{"chat_friends":{"target":3,"reward":25},"quick_matches":{"target":10,"reward":30},"video_call_min":{"target":60,"reward":35},"moment_interactions":{"target":3,"reward":15},"send_gift":{"target":1,"reward":20},"master_chest":{"target":4,"reward":50}}',
+    creator_target_cycle TEXT DEFAULT 'weekly',
+    creator_target_bronze_hours NUMERIC DEFAULT 20,
+    creator_target_bronze_coins BIGINT DEFAULT 5000,
+    creator_target_bronze_bonus_usd NUMERIC DEFAULT 15,
+    creator_target_silver_hours NUMERIC DEFAULT 40,
+    creator_target_silver_coins BIGINT DEFAULT 20000,
+    creator_target_silver_bonus_usd NUMERIC DEFAULT 50,
+    creator_target_gold_hours NUMERIC DEFAULT 60,
+    creator_target_gold_coins BIGINT DEFAULT 60000,
+    creator_target_gold_bonus_usd NUMERIC DEFAULT 150,
+    peak_hours_start TEXT DEFAULT '18:00',
+    peak_hours_end TEXT DEFAULT '00:00',
+    peak_hours_enabled BOOLEAN DEFAULT true,
+    call_ring_timeout_seconds INT DEFAULT 30,
+    daily_first_call_bonus_coins INT DEFAULT 100,
+    daily_first_call_bonus_usd NUMERIC DEFAULT 1.00,
+    daily_first_call_min_duration_sec INT DEFAULT 30,
+    streak_target_days INT DEFAULT 7,
+    streak_boost_duration_days INT DEFAULT 3,
+    min_daily_active_hours_for_streak NUMERIC DEFAULT 2.0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -353,6 +377,26 @@ ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS allowed_interests TEX
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS flag_sizes_json TEXT DEFAULT '';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_streak_rewards_json TEXT DEFAULT '[10,15,20,25,35,50,100]';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_missions_config_json TEXT DEFAULT '{"chat_friends":{"target":3,"reward":25},"quick_matches":{"target":10,"reward":30},"video_call_min":{"target":60,"reward":35},"moment_interactions":{"target":3,"reward":15},"send_gift":{"target":1,"reward":20},"master_chest":{"target":4,"reward":50}}';
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_cycle TEXT DEFAULT 'weekly';
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_bronze_hours NUMERIC DEFAULT 20;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_bronze_coins BIGINT DEFAULT 5000;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_bronze_bonus_usd NUMERIC DEFAULT 15;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_silver_hours NUMERIC DEFAULT 40;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_silver_coins BIGINT DEFAULT 20000;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_silver_bonus_usd NUMERIC DEFAULT 50;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_gold_hours NUMERIC DEFAULT 60;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_gold_coins BIGINT DEFAULT 60000;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_gold_bonus_usd NUMERIC DEFAULT 150;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS peak_hours_start TEXT DEFAULT '18:00';
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS peak_hours_end TEXT DEFAULT '00:00';
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS peak_hours_enabled BOOLEAN DEFAULT true;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS call_ring_timeout_seconds INT DEFAULT 30;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_first_call_bonus_coins INT DEFAULT 100;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_first_call_bonus_usd NUMERIC DEFAULT 1.00;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_first_call_min_duration_sec INT DEFAULT 30;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS streak_target_days INT DEFAULT 7;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS streak_boost_duration_days INT DEFAULT 3;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS min_daily_active_hours_for_streak NUMERIC DEFAULT 2.0;
 
 -- ============================================================================
 -- 9. MODERATION REPORTS TABLE (User incident telemetry & live QA evidence)
@@ -655,6 +699,58 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_auth_user();
+
+-- ============================================================================
+-- 16.5 ATOMIC CALL COIN BURNING STORED PROCEDURE
+-- ============================================================================
+CREATE OR REPLACE FUNCTION public.burn_call_coins_atomic(
+    p_caller_id TEXT,
+    p_receiver_id TEXT,
+    p_tl_id TEXT,
+    p_coins_burned INT,
+    p_host_coins_earned INT,
+    p_tl_coins_earned INT
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_caller_balance BIGINT;
+    v_host_earnings BIGINT := 0;
+    v_tl_earnings BIGINT := 0;
+BEGIN
+    -- Check and debit caller
+    UPDATE public.profiles
+    SET coin_balance = GREATEST(0, coin_balance - p_coins_burned),
+        updated_at = now()
+    WHERE id = p_caller_id
+    RETURNING coin_balance INTO v_caller_balance;
+
+    -- Credit host if eligible and coins earned > 0
+    IF p_host_coins_earned > 0 AND p_receiver_id IS NOT NULL THEN
+        UPDATE public.profiles
+        SET earnings_coins = earnings_coins + p_host_coins_earned,
+            total_call_minutes = total_call_minutes + 1,
+            updated_at = now()
+        WHERE id = p_receiver_id
+        RETURNING earnings_coins INTO v_host_earnings;
+    END IF;
+
+    -- Credit Team Leader if applicable
+    IF p_tl_coins_earned > 0 AND p_tl_id IS NOT NULL THEN
+        UPDATE public.profiles
+        SET earnings_coins = earnings_coins + p_tl_coins_earned,
+            updated_at = now()
+        WHERE id = p_tl_id
+        RETURNING earnings_coins INTO v_tl_earnings;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'callerBalance', v_caller_balance,
+        'hostEarnings', v_host_earnings,
+        'tlEarnings', v_tl_earnings
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- ============================================================================
 -- 16. REALTIME PUBLICATION SETUP (Idempotent - checks pg_publication_tables)
