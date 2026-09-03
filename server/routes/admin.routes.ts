@@ -12,6 +12,7 @@ import {
   granularResetSupabaseAdmin,
 } from '../supabaseAdmin';
 import { isR2Configured, updateR2RuntimeConfig } from '../r2Storage';
+import { requireAdmin } from '../middleware/auth';
 
 export function createAdminRouter(ctx: ServerRuntime): Router {
   const router = Router();
@@ -45,7 +46,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Admin Reset Data
-  router.post('/reset-mock-data', (req, res) => {
+  router.post('/reset-mock-data', requireAdmin, (req, res) => {
     try {
       const { mockIds } = req.body;
       const idsToRemove: string[] = Array.isArray(mockIds) ? mockIds : [];
@@ -78,7 +79,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   });
 
   // Master Granular / Full Reset Endpoint (bypasses RLS via Supabase Admin service-role)
-  router.post('/granular-reset', async (req, res) => {
+  router.post('/granular-reset', requireAdmin, async (req, res) => {
     try {
       const options = req.body || {};
 
@@ -131,6 +132,17 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
           friendRequests: Boolean(options.friendRequests),
           payoutRequests: Boolean(options.payoutRequests),
           moderationReports: Boolean(options.moderationReports),
+          creatorAnalytics: Boolean(options.creatorAnalytics),
+          dailyRewardsAndQuests: Boolean(options.dailyRewardsAndQuests),
+          taxonomiesAndFlags: Boolean(options.taxonomiesAndFlags),
+          purgeR2MediaStorage: Boolean(options.purgeR2MediaStorage),
+          purgeAllR2Uploads: Boolean(options.purgeAllR2Uploads),
+          homeBanners: Boolean(options.homeBanners),
+          homeQuickLinks: Boolean(options.homeQuickLinks),
+          cmsPolicies: Boolean(options.cmsPolicies),
+          systemSettings: Boolean(options.systemSettings),
+          coinPackages: Boolean(options.coinPackages),
+          virtualGiftsCatalog: Boolean(options.virtualGiftsCatalog),
           feedPosts: Boolean(options.feedPosts),
           favorites: Boolean(options.favorites),
           blockedUsers: Boolean(options.blockedUsers),

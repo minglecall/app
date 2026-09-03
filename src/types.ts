@@ -725,6 +725,8 @@ export interface ResetDataOptions {
 
   // 2. User Profiles & Media
   profilesMedia?: boolean;
+  // When true, server will delete ALL objects under `uploads/` (not just selected media prefixes)
+  r2PurgeAllUploads?: boolean;
 
   // 3. Coins & Wallet Balances
   userCoins?: boolean;
@@ -766,6 +768,9 @@ export interface ResetDataOptions {
   // Sync targets
   syncWithSupabase?: boolean;
   syncWithServer?: boolean;
+
+  // 13. Client storage & auth purge (localStorage, sessionStorage, cookies + Supabase sign-out)
+  clientStoragePurge?: boolean;
 }
 
 export interface ResetResult {

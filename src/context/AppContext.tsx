@@ -441,6 +441,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [activeCall, setActiveCall] = useState<CallSession | null>(null);
   const [toast, setToast] = useState<ToastNotification | null>(null);
   const [fastTestMode, setFastTestMode] = useState<boolean>(false);
+  // Reset barrier: prevents realtime/pollers from repopulating cleared state during a reset.
+  const [isResetting, setIsResetting] = useState<boolean>(false);
+  const isResettingRef = useRef<boolean>(false);
 
   // Dark and Light Theme State
   const [theme, setThemeState] = useState<'dark' | 'light'>(() => {
@@ -1147,9 +1150,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Granular Reset: Selective or Full Wipe of Application & Storage State
   const resetMockDataGranular = async (options: ResetDataOptions): Promise<ResetResult> => {
+    if (isResettingRef.current) {
+      return {
+        success: false,
+        categoriesCleared: [],
+        summary: 'Reset is already in progress.',
+      };
+    }
+
+    isResettingRef.current = true;
+    setIsResetting(true);
+
     try {
       const categoriesCleared: string[] = [];
       let currentUsersList = [...users];
+
+      // Hard stop realtime repopulation: unsubscribe from Supabase channels and close WS reconnect loop.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (supabase as any).removeAllChannels?.();
+      } catch {}
+      try {
+        wsRef.current?.close();
+      } catch {}
 
       // 1. Users & Accounts
       const mockFemaleIds = currentUsersList.filter((u) => u.gender === 'female' || u.role === 'female_creator').map((u) => u.id);
@@ -1172,6 +1195,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         categoriesCleared.push('Users');
       }
 
+      if (options.teamLeaderAgencies) {
+        const teamLeaderIds = currentUsersList
+          .filter((u) => u.role === 'team_leader' || u.role === 'agency_manager' || Boolean(u.teamLeaderId))
+          .map((u) => u.id);
+        idsToRemove.push(...teamLeaderIds);
+        if (teamLeaderIds.length > 0) {
+          categoriesCleared.push('Team Leader & Agency Data');
+        }
+      }
+
       if (idsToRemove.length > 0) {
         const removeSet = new Set(idsToRemove);
         currentUsersList = currentUsersList.filter((u) => !removeSet.has(u.id));
@@ -1192,7 +1225,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         currentUsersList = currentUsersList.map((u) => {
           return {
             ...u,
+            avatarUrl: DEFAULT_FALLBACK_USER.avatarUrl,
+            gallery: [],
             verificationVideoUrl: undefined,
+            introVideoUrl: undefined,
             isUsingMockLocation: false,
             mockLocationCity: undefined,
             mockLocationCountry: undefined,
@@ -1250,6 +1286,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         categoriesCleared.push('Coin Store Packages');
       }
 
+      if (options.virtualGiftsCatalog) {
+        setVirtualGifts(VIRTUAL_GIFTS);
+        localStorage.setItem('livecall_virtual_gifts', JSON.stringify(VIRTUAL_GIFTS));
+        categoriesCleared.push('Virtual Gifts Catalog');
+      }
+
       // 5. Chats & Social
       if (options.chatMessages) {
         setChatMessages([]);
@@ -1258,10 +1300,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         localStorage.removeItem('livecall_read_message_ids');
         categoriesCleared.push('Chat Messages');
       }
-      if (options.friendRequests) {
+      if (options.friendRequests || options.friendsList) {
         setFriendRequests([]);
         localStorage.removeItem('livecall_friend_requests');
-        categoriesCleared.push('Friend Requests');
+        if (options.friendRequests) {
+          categoriesCleared.push('Friend Requests');
+        }
       }
       if (options.friendsList) {
         setFriends([]);
@@ -1280,10 +1324,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       // 6. Matches & Activity Calls
-      if (options.callLogs) {
+      if (options.callLogs || options.quickMatchQueues) {
         setCallLogs([]);
         localStorage.removeItem('livecall_call_logs');
         categoriesCleared.push('Call History Logs');
+      }
+      if (options.quickMatchQueues) {
+        setQuickMatches([]);
+        localStorage.removeItem('livecall_quick_matches_sync');
+        localStorage.removeItem('livecall_quick_match_callers_sync');
+        localStorage.removeItem('livecall_quick_match_caller_connected_sync');
+        try {
+          const uid = currentUserIdRef.current;
+          if (uid) {
+            localStorage.removeItem('livecall_quick_matches_v4_' + uid);
+          }
+        } catch {}
+        categoriesCleared.push('QuickMatch Queues');
       }
       if (options.liveHostsPool) {
         setLiveHostIds([]);
@@ -1309,7 +1366,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         categoriesCleared.push('Creator Goals');
       }
 
+      if (options.creatorReviews) {
+        setCreatorReviews([]);
+        localStorage.removeItem('livecall_creator_reviews');
+        categoriesCleared.push('Creator Reviews & Feedback');
+      }
+
+      if (options.creatorAnalytics) {
+        setCreatorMetricsMap({});
+        categoriesCleared.push('Creator Analytics & Metrics');
+      }
+
+      if (options.dailyRewardsAndQuests) {
+        setDailyBonusClaimed(false);
+        setDailyRewardRecord(null);
+        categoriesCleared.push('Daily Rewards & Quests');
+      }
+
       // 8. CMS & Settings
+      if (options.taxonomiesAndFlags) {
+        setSystemSettings(INITIAL_SYSTEM_SETTINGS);
+        localStorage.setItem('livecall_settings', JSON.stringify(INITIAL_SYSTEM_SETTINGS));
+        if (!options.systemSettings) {
+          categoriesCleared.push('Taxonomies, Tags & Moderation Flags');
+        }
+      }
       if (options.homeBanners) {
         setHomeBanners(INITIAL_HOME_BANNERS);
         localStorage.setItem('livecall_home_banners', JSON.stringify(INITIAL_HOME_BANNERS));
@@ -1334,9 +1415,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // 9. Sync with Server
       if (options.syncWithServer !== false) {
         try {
+          // Required now that destructive admin reset routes are requireAdmin-protected.
+          // Supabase auth token is used as Bearer authorization.
+          const sessionRes = await supabase.auth.getSession();
+          const accessToken = sessionRes.data.session?.access_token;
+          const authHeaders = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+
           await fetch('/api/admin/granular-reset', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...authHeaders },
             body: JSON.stringify({
               clearMockUsers: Boolean(options.mockFemaleCreators || options.mockMaleCallers),
               clearAllUsers: Boolean(options.customUsers && (options.mockFemaleCreators || options.mockMaleCallers)),
@@ -1345,14 +1432,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               clearPresence: true,
               mockIds: idsToRemove,
               chatMessages: Boolean(options.chatMessages),
-              callLogs: Boolean(options.callLogs),
+              callLogs: Boolean(options.callLogs || options.quickMatchQueues),
               friendRequests: Boolean(options.friendRequests || options.friendsList),
               payoutRequests: Boolean(options.payoutRequests),
-              moderationReports: Boolean(options.surveillanceLogs),
+              moderationReports: Boolean(options.surveillanceLogs || options.taxonomiesAndFlags),
               feedPosts: Boolean(options.feedPosts),
               favorites: Boolean(options.favoritesList),
               blockedUsers: Boolean(options.blockedList),
+              homeBanners: Boolean(options.homeBanners),
+              homeQuickLinks: Boolean(options.quickLinks),
+              cmsPolicies: Boolean(options.policyDocuments),
+              systemSettings: Boolean(options.systemSettings),
+              coinPackages: Boolean(options.coinPackages),
+              virtualGiftsCatalog: Boolean(options.virtualGiftsCatalog),
               creatorGoals: Boolean(options.creatorGoals),
+              creatorAnalytics: Boolean(options.creatorAnalytics),
+              dailyRewardsAndQuests: Boolean(options.dailyRewardsAndQuests),
+              taxonomiesAndFlags: Boolean(options.taxonomiesAndFlags),
+              purgeR2MediaStorage: Boolean(options.profilesMedia || options.r2PurgeAllUploads),
+              purgeAllR2Uploads: Boolean(options.r2PurgeAllUploads),
               resetBalances: {
                 callerCoins: Boolean(options.userCoins),
                 creatorEarnings: Boolean(options.creatorEarnings),
@@ -1370,8 +1468,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       }
 
-      // 10. Sync with Supabase (if checked and configured)
-      if (options.syncWithSupabase && isSupabaseConfigured()) {
+      // 10. Sync with Supabase (disabled): destructive purges must be server-side only.
+      if (false && options.syncWithSupabase && isSupabaseConfigured()) {
         try {
           const promises: Promise<any>[] = [];
 
@@ -1434,12 +1532,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       showToast('Data Reset Applied 🧹', summaryText, 'success');
 
+      if (options.clientStoragePurge) {
+        try {
+          await signOutSupabase();
+        } catch {}
+        try {
+          localStorage.clear();
+        } catch {}
+        try {
+          sessionStorage.clear();
+        } catch {}
+        try {
+          // Best-effort cookie cleanup (can't guarantee host-level cookies in all browsers)
+          document.cookie.split(';').forEach((c) => {
+            const [name] = c.trim().split('=');
+            if (!name) return;
+            document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/`;
+          });
+        } catch {}
+      }
+
+      // Hard reload prevents realtime listeners and in-memory caches from repopulating during/after reset.
+      try {
+        isResettingRef.current = false;
+        setIsResetting(false);
+        window.location.href = '/';
+      } catch {}
+
       return {
         success: true,
         categoriesCleared,
         summary: summaryText,
       };
     } catch (err: any) {
+      isResettingRef.current = false;
+      setIsResetting(false);
       showToast('Reset Error', err.message || 'Failed to complete data reset.', 'error');
       return {
         success: false,
@@ -1880,7 +2007,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Direct HTTP heartbeat & presence sync (guarantees sync even if WS reconnects or across separate tabs/devices)
     const syncPresenceDirect = async () => {
-      if (isCancelled) return;
+      if (isCancelled || isResettingRef.current) return;
       try {
         const activeUid = currentUserIdRef.current;
         const currentProfile = activeUid ? usersRef.current.find((u) => u.id === activeUid) : null;
@@ -1925,7 +2052,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Dedicated Supabase Social & Friend Requests Synchronizer (preserves server authoritative presence)
     const syncSupabaseStatusCycle = async () => {
-      if (isCancelled) return;
+      if (isCancelled || isResettingRef.current) return;
       try {
         // 1. Push current user's active status to Supabase for persistence
         if (isLoggedInRef.current && currentUserIdRef.current) {
@@ -1953,7 +2080,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // User directory sync to pick up new accounts created in other tabs or devices (preserves live presence)
     const syncUserDirectory = async () => {
-      if (isCancelled) return;
+      if (isCancelled || isResettingRef.current) return;
       try {
         const res = await fetch('/api/users');
         if (res.ok && !isCancelled) {
@@ -2017,7 +2144,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
 
       ws.onmessage = (event) => {
-        if (isCancelled) return;
+        if (isCancelled || isResettingRef.current) return;
         try {
           const data = JSON.parse(event.data);
 
@@ -2292,7 +2419,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
 
       ws.onclose = () => {
-        if (!isCancelled) {
+        if (!isCancelled && !isResettingRef.current) {
           setTimeout(connect, 3000);
         }
       };
@@ -2312,6 +2439,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // 1. WebSocket heartbeat — primary liveness signal to the signaling server
     heartbeatTimer = setInterval(() => {
+      if (isResettingRef.current) return;
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'heartbeat', userId: currentUserId }));
       }
@@ -2319,6 +2447,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // 2. HTTP presence fallback only when WS is down (avoids fragile 3s poll spam)
     presenceSyncTimer = setInterval(() => {
+      if (isResettingRef.current) return;
       const wsOpen = wsRef.current && wsRef.current.readyState === WebSocket.OPEN;
       if (!wsOpen) {
         syncPresenceDirect();
@@ -2327,11 +2456,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // 3. User directory refresh from server (authoritative listings)
     userDirectoryTimer = setInterval(() => {
+      if (isResettingRef.current) return;
       syncUserDirectory();
     }, 30000);
 
     // 4. Push own status to Supabase periodically; friend requests hydrate from DB
     supabaseStatusTimer = setInterval(() => {
+      if (isResettingRef.current) return;
       syncSupabaseStatusCycle();
     }, 20000);
 

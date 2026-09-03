@@ -67,6 +67,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
     teamLeaderAgencies: false,
     adminAccount: false,
     profilesMedia: true,
+    r2PurgeAllUploads: false,
     userCoins: true,
     creatorEarnings: true,
     vipTiers: true,
@@ -94,6 +95,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
     taxonomiesAndFlags: false,
     syncWithSupabase: supabaseActive,
     syncWithServer: true,
+    clientStoragePurge: false,
   });
 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -124,6 +126,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       teamLeaderAgencies: true,
       adminAccount: true,
       profilesMedia: true,
+      r2PurgeAllUploads: true,
       userCoins: true,
       creatorEarnings: true,
       vipTiers: true,
@@ -151,6 +154,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       taxonomiesAndFlags: true,
       syncWithSupabase: supabaseActive,
       syncWithServer: true,
+      clientStoragePurge: true,
     });
   };
 
@@ -162,6 +166,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       teamLeaderAgencies: false,
       adminAccount: false,
       profilesMedia: false,
+      r2PurgeAllUploads: false,
       userCoins: false,
       creatorEarnings: false,
       vipTiers: false,
@@ -189,6 +194,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       taxonomiesAndFlags: false,
       syncWithSupabase: false,
       syncWithServer: true,
+      clientStoragePurge: false,
     });
   };
 
@@ -353,6 +359,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
         teamLeaderAgencies: true,
         adminAccount: true,
         profilesMedia: true,
+        r2PurgeAllUploads: true,
         userCoins: true,
         creatorEarnings: true,
         vipTiers: true,
@@ -378,6 +385,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
         quickLinks: true,
         systemSettings: true,
         taxonomiesAndFlags: true,
+        clientStoragePurge: true,
         syncWithSupabase: supabaseActive,
         syncWithServer: true,
       };
@@ -687,6 +695,31 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                     </div>
                     <p className="text-[11px] text-slate-400">
                       Clears uploaded profile galleries, verification video records, interests, and simulated coordinates.
+                    </p>
+                  </div>
+                </label>
+
+                <label
+                  className="flex items-start space-x-2.5 cursor-pointer select-none group opacity-95"
+                >
+                  <input
+                    type="checkbox"
+                    checked={options.r2PurgeAllUploads || false}
+                    onChange={() => toggleOption('r2PurgeAllUploads')}
+                    disabled={!options.profilesMedia}
+                    className="mt-0.5 rounded border-slate-700 bg-slate-900 text-pink-500 focus:ring-pink-500/40 disabled:opacity-50"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-slate-200 group-hover:text-white">
+                        Purge ALL remote media storage (R2 uploads)
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-pink-950/60 text-[10px] text-slate-300 font-mono border border-pink-500/20">
+                        Hard Wipe
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      Deletes every object under <span className="font-mono">uploads/</span> (not limited to prefixes).
                     </p>
                   </div>
                 </label>
@@ -1341,6 +1374,40 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                   </div>
                 </label>
               </div>
+            </div>
+          </div>
+
+          {/* Category 10: Client Storage Purge */}
+          <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
+            <div className="flex items-center space-x-2 text-purple-400 font-semibold text-sm">
+              <span className="px-1.5 py-0.5 rounded bg-purple-950/80 border border-purple-500/40 text-purple-300 font-mono text-[9px] font-bold">
+                RS-10
+              </span>
+              <span>Client Storage Purge (local/session/cookies)</span>
+            </div>
+
+            <div className="space-y-2.5 text-xs">
+              <label className="flex items-start space-x-2.5 cursor-pointer select-none group">
+                <input
+                  type="checkbox"
+                  checked={options.clientStoragePurge || false}
+                  onChange={() => toggleOption('clientStoragePurge')}
+                  className="mt-0.5 rounded border-slate-700 bg-slate-900 text-purple-400 focus:ring-purple-400/40"
+                />
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-slate-200 group-hover:text-white">
+                      Purge client storage + sign out
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-purple-950 text-[10px] text-purple-300 font-mono border border-purple-800/40">
+                      Tokens Cleared
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Clears <span className="font-mono">localStorage</span>, <span className="font-mono">sessionStorage</span>, and attempts cookie cleanup; then signs out Supabase.
+                  </p>
+                </div>
+              </label>
             </div>
           </div>
 

@@ -590,68 +590,387 @@ ALTER TABLE public.blocked_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.creator_goals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_daily_rewards ENABLE ROW LEVEL SECURITY;
 
+-- Replace permissive "Public full access" policies with command-specific policies.
+-- Goal: prevent destructive DELETE operations from being executed by non-admin clients.
+-- SELECT remains public for discovery. INSERT/UPDATE remain authenticated-only to reduce anonymous abuse.
+-- DELETE is restricted:
+--   - admin-only for most tables
+--   - owner-or-admin for favorites & blocked_users
+
+-- Shared admin predicate used in multiple DELETE policies
+-- (admin@livecall.app is also checked for environments where profiles.role may drift)
+--
+-- NOTE: RLS policies cannot define variables; we inline the predicate.
+
 DROP POLICY IF EXISTS "Public full access to profiles" ON public.profiles;
-CREATE POLICY "Public full access to profiles" ON public.profiles FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to matches" ON public.matches;
-CREATE POLICY "Public full access to matches" ON public.matches FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to messages" ON public.messages;
-CREATE POLICY "Public full access to messages" ON public.messages FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to call_logs" ON public.call_logs;
-CREATE POLICY "Public full access to call_logs" ON public.call_logs FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to friend_requests" ON public.friend_requests;
-CREATE POLICY "Public full access to friend_requests" ON public.friend_requests FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to payout_requests" ON public.payout_requests;
-CREATE POLICY "Public full access to payout_requests" ON public.payout_requests FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to country_configs" ON public.country_configs;
-CREATE POLICY "Public full access to country_configs" ON public.country_configs FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to language_configs" ON public.language_configs;
-CREATE POLICY "Public full access to language_configs" ON public.language_configs FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to zodiac_configs" ON public.zodiac_configs;
-CREATE POLICY "Public full access to zodiac_configs" ON public.zodiac_configs FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to interest_configs" ON public.interest_configs;
-CREATE POLICY "Public full access to interest_configs" ON public.interest_configs FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to system_configs" ON public.system_configs;
-CREATE POLICY "Public full access to system_configs" ON public.system_configs FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to moderation_reports" ON public.moderation_reports;
-CREATE POLICY "Public full access to moderation_reports" ON public.moderation_reports FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to cms_policies" ON public.cms_policies;
-CREATE POLICY "Public full access to cms_policies" ON public.cms_policies FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to home_banners" ON public.home_banners;
-CREATE POLICY "Public full access to home_banners" ON public.home_banners FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to home_quick_links" ON public.home_quick_links;
-CREATE POLICY "Public full access to home_quick_links" ON public.home_quick_links FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to feed_posts" ON public.feed_posts;
-CREATE POLICY "Public full access to feed_posts" ON public.feed_posts FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to coin_packages" ON public.coin_packages;
-CREATE POLICY "Public full access to coin_packages" ON public.coin_packages FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to favorites" ON public.favorites;
-CREATE POLICY "Public full access to favorites" ON public.favorites FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to blocked_users" ON public.blocked_users;
-CREATE POLICY "Public full access to blocked_users" ON public.blocked_users FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to creator_goals" ON public.creator_goals;
-CREATE POLICY "Public full access to creator_goals" ON public.creator_goals FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Public full access to user_daily_rewards" ON public.user_daily_rewards;
-CREATE POLICY "Public full access to user_daily_rewards" ON public.user_daily_rewards FOR ALL USING (true) WITH CHECK (true);
+
+-- PROFILES
+CREATE POLICY "public select profiles" ON public.profiles FOR SELECT USING (true);
+CREATE POLICY "authenticated insert profiles" ON public.profiles FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update profiles" ON public.profiles FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete profiles" ON public.profiles
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- MATCHES
+CREATE POLICY "public select matches" ON public.matches FOR SELECT USING (true);
+CREATE POLICY "authenticated insert matches" ON public.matches FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update matches" ON public.matches FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete matches" ON public.matches
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- MESSAGES
+CREATE POLICY "public select messages" ON public.messages FOR SELECT USING (true);
+CREATE POLICY "authenticated insert messages" ON public.messages FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update messages" ON public.messages FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete messages" ON public.messages
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- CALL LOGS
+CREATE POLICY "public select call_logs" ON public.call_logs FOR SELECT USING (true);
+CREATE POLICY "authenticated insert call_logs" ON public.call_logs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update call_logs" ON public.call_logs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete call_logs" ON public.call_logs
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- FRIEND REQUESTS
+CREATE POLICY "public select friend_requests" ON public.friend_requests FOR SELECT USING (true);
+CREATE POLICY "authenticated insert friend_requests" ON public.friend_requests FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update friend_requests" ON public.friend_requests FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete friend_requests" ON public.friend_requests
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- PAYOUT REQUESTS
+CREATE POLICY "public select payout_requests" ON public.payout_requests FOR SELECT USING (true);
+CREATE POLICY "authenticated insert payout_requests" ON public.payout_requests FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update payout_requests" ON public.payout_requests FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete payout_requests" ON public.payout_requests
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- CONFIG / TAXONOMY TABLES
+CREATE POLICY "public select country_configs" ON public.country_configs FOR SELECT USING (true);
+CREATE POLICY "authenticated insert country_configs" ON public.country_configs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update country_configs" ON public.country_configs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete country_configs" ON public.country_configs
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select language_configs" ON public.language_configs FOR SELECT USING (true);
+CREATE POLICY "authenticated insert language_configs" ON public.language_configs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update language_configs" ON public.language_configs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete language_configs" ON public.language_configs
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select zodiac_configs" ON public.zodiac_configs FOR SELECT USING (true);
+CREATE POLICY "authenticated insert zodiac_configs" ON public.zodiac_configs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update zodiac_configs" ON public.zodiac_configs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete zodiac_configs" ON public.zodiac_configs
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select interest_configs" ON public.interest_configs FOR SELECT USING (true);
+CREATE POLICY "authenticated insert interest_configs" ON public.interest_configs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update interest_configs" ON public.interest_configs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete interest_configs" ON public.interest_configs
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select system_configs" ON public.system_configs FOR SELECT USING (true);
+CREATE POLICY "authenticated insert system_configs" ON public.system_configs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update system_configs" ON public.system_configs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete system_configs" ON public.system_configs
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select moderation_reports" ON public.moderation_reports FOR SELECT USING (true);
+CREATE POLICY "authenticated insert moderation_reports" ON public.moderation_reports FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update moderation_reports" ON public.moderation_reports FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete moderation_reports" ON public.moderation_reports
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select cms_policies" ON public.cms_policies FOR SELECT USING (true);
+CREATE POLICY "authenticated insert cms_policies" ON public.cms_policies FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update cms_policies" ON public.cms_policies FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete cms_policies" ON public.cms_policies
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select home_banners" ON public.home_banners FOR SELECT USING (true);
+CREATE POLICY "authenticated insert home_banners" ON public.home_banners FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update home_banners" ON public.home_banners FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete home_banners" ON public.home_banners
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select home_quick_links" ON public.home_quick_links FOR SELECT USING (true);
+CREATE POLICY "authenticated insert home_quick_links" ON public.home_quick_links FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update home_quick_links" ON public.home_quick_links FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete home_quick_links" ON public.home_quick_links
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select feed_posts" ON public.feed_posts FOR SELECT USING (true);
+CREATE POLICY "authenticated insert feed_posts" ON public.feed_posts FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update feed_posts" ON public.feed_posts FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete feed_posts" ON public.feed_posts
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select coin_packages" ON public.coin_packages FOR SELECT USING (true);
+CREATE POLICY "authenticated insert coin_packages" ON public.coin_packages FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update coin_packages" ON public.coin_packages FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete coin_packages" ON public.coin_packages
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- USER RELATIONIAL PRIVACY TABLES
+CREATE POLICY "public select favorites" ON public.favorites FOR SELECT USING (true);
+CREATE POLICY "authenticated insert favorites" ON public.favorites FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update favorites" ON public.favorites FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "owner/admin delete favorites" ON public.favorites
+  FOR DELETE USING (
+    user_id = auth.uid()::text
+    OR EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+CREATE POLICY "public select blocked_users" ON public.blocked_users FOR SELECT USING (true);
+CREATE POLICY "authenticated insert blocked_users" ON public.blocked_users FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update blocked_users" ON public.blocked_users FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "owner/admin delete blocked_users" ON public.blocked_users
+  FOR DELETE USING (
+    user_id = auth.uid()::text
+    OR EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- CREATOR GOALS
+CREATE POLICY "public select creator_goals" ON public.creator_goals FOR SELECT USING (true);
+CREATE POLICY "authenticated insert creator_goals" ON public.creator_goals FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update creator_goals" ON public.creator_goals FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete creator_goals" ON public.creator_goals
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
+-- DAILY REWARDS
+CREATE POLICY "public select user_daily_rewards" ON public.user_daily_rewards FOR SELECT USING (true);
+CREATE POLICY "authenticated insert user_daily_rewards" ON public.user_daily_rewards FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update user_daily_rewards" ON public.user_daily_rewards FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete user_daily_rewards" ON public.user_daily_rewards
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
 
 -- ============================================================================
 -- 16. AUTOMATED AUTH TRIGGER (Sync auth.users with public.profiles)

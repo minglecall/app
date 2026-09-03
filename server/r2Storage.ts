@@ -5,6 +5,7 @@ import {
   HeadObjectCommand,
   HeadBucketCommand,
   ListObjectsV2Command,
+  DeleteObjectsCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -327,4 +328,136 @@ export async function getR2ObjectStream(key: string, credentialsOverride?: R2Cre
     console.warn(`[R2 Storage] getObject error for key ${key}:`, err.message);
     return null;
   }
+}
+
+export function clearLocalMediaCache() {
+  localMediaCache.clear();
+}
+
+type R2DeleteResult = { deletedCount: number; deletedKeys: string[] };
+
+function shouldTruncateKeys(deletedKeys: string[], maxKeys: number) {
+  return deletedKeys.length > maxKeys;
+}
+
+/**
+ * Delete a specific set of R2 object keys in batches (S3 DeleteObjectsCommand supports up to 1000).
+ */
+export async function deleteObjectsByKeys(
+  keys: string[],
+  opts?: { bucketName?: string; credentialsOverride?: R2CredentialsConfig; batchSize?: number; maxReturnedKeys?: number }
+): Promise<R2DeleteResult> {
+  const cfg = opts?.credentialsOverride || getR2RuntimeConfig();
+  if (!isR2Configured(cfg)) return { deletedCount: 0, deletedKeys: [] };
+
+  const bucketName = opts?.bucketName || cfg.bucketName || 'livecall-media-storage';
+  const batchSize = opts?.batchSize || 1000;
+  const maxReturnedKeys = opts?.maxReturnedKeys || 2000;
+
+  const client = getR2Client(cfg);
+  const deletedKeys: string[] = [];
+  let deletedCount = 0;
+
+  for (let i = 0; i < keys.length; i += batchSize) {
+    const batch = keys.slice(i, i + batchSize);
+    if (batch.length === 0) continue;
+
+    const command = new DeleteObjectsCommand({
+      Bucket: bucketName,
+      Delete: {
+        Objects: batch.map((k) => ({ Key: k })),
+        Quiet: true,
+      },
+    });
+
+    const resp: any = await client.send(command);
+    const errs = resp?.Errors || [];
+    if (errs?.length) {
+      console.warn('[R2 Storage] deleteObjectsByKeys batch errors:', errs.slice(0, 5));
+    }
+
+    deletedCount += batch.length - (errs?.length ? errs.length : 0);
+    if (deletedKeys.length <= maxReturnedKeys) {
+      deletedKeys.push(...batch);
+      if (shouldTruncateKeys(deletedKeys, maxReturnedKeys)) {
+        deletedKeys.splice(maxReturnedKeys);
+      }
+    }
+  }
+
+  return { deletedCount, deletedKeys };
+}
+
+/**
+ * Delete all objects whose keys start with `prefix`, paginating via ListObjectsV2Command.
+ */
+export async function deleteObjectsByPrefix(
+  prefix: string,
+  opts?: { bucketName?: string; credentialsOverride?: R2CredentialsConfig; batchSize?: number; maxReturnedKeys?: number }
+): Promise<R2DeleteResult> {
+  const cfg = opts?.credentialsOverride || getR2RuntimeConfig();
+  if (!isR2Configured(cfg)) return { deletedCount: 0, deletedKeys: [] };
+
+  const bucketName = opts?.bucketName || cfg.bucketName || 'livecall-media-storage';
+  const maxReturnedKeys = opts?.maxReturnedKeys || 2000;
+
+  const client = getR2Client(cfg);
+  const deletedKeys: string[] = [];
+  let deletedCount = 0;
+
+  let continuationToken: string | undefined = undefined;
+  do {
+    const listResp: any = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      })
+    );
+
+    const keys: string[] = (listResp?.Contents || []).map((c: any) => c.Key).filter(Boolean);
+    continuationToken = listResp?.IsTruncated ? listResp?.NextContinuationToken : undefined;
+
+    if (keys.length > 0) {
+      const delRes = await deleteObjectsByKeys(keys, {
+        bucketName,
+        credentialsOverride: cfg,
+        batchSize: 1000,
+        maxReturnedKeys,
+      });
+      deletedCount += delRes.deletedCount;
+
+      if (deletedKeys.length < maxReturnedKeys) {
+        deletedKeys.push(...delRes.deletedKeys);
+        if (deletedKeys.length > maxReturnedKeys) deletedKeys.splice(maxReturnedKeys);
+      }
+    }
+  } while (continuationToken);
+
+  return { deletedCount, deletedKeys };
+}
+
+/**
+ * Purge media by common key prefixes.
+ * - If `purgeAllUploads` is true: deletes `uploads/` prefix.
+ * - Otherwise: deletes each prefix in `prefixes`.
+ */
+export async function purgeR2MediaUploads(
+  params: { purgeAllUploads?: boolean; prefixes?: string[]; maxReturnedKeys?: number } = {}
+): Promise<{ deletedCount: number; deletedKeys: string[] }> {
+  const prefixes = params.purgeAllUploads ? ['uploads/'] : (params.prefixes || []);
+  if (prefixes.length === 0) return { deletedCount: 0, deletedKeys: [] };
+
+  let deletedCount = 0;
+  const deletedKeys: string[] = [];
+
+  for (const prefix of prefixes) {
+    const res = await deleteObjectsByPrefix(prefix, { maxReturnedKeys: params.maxReturnedKeys || 2000 });
+    deletedCount += res.deletedCount;
+    deletedKeys.push(...res.deletedKeys);
+  }
+
+  // Deduplicate keys if multiple prefixes overlap.
+  return { deletedCount, deletedKeys: Array.from(new Set(deletedKeys)) };
 }

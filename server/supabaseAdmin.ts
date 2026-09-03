@@ -1,6 +1,8 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
+import { purgeR2MediaUploads, clearLocalMediaCache } from './r2Storage';
+import { VIRTUAL_GIFTS } from '../src/constants/appDefaults';
 
 dotenv.config();
 
@@ -789,6 +791,8 @@ export async function granularResetSupabaseAdmin(options: {
   clearAllUsers?: boolean;
   clearMockUsers?: boolean;
   clearAdmin?: boolean;
+  purgeR2MediaStorage?: boolean;
+  purgeAllR2Uploads?: boolean;
   chatMessages?: boolean;
   callLogs?: boolean;
   friendRequests?: boolean;
@@ -797,12 +801,16 @@ export async function granularResetSupabaseAdmin(options: {
   feedPosts?: boolean;
   favorites?: boolean;
   blockedUsers?: boolean;
+  creatorAnalytics?: boolean;
+  dailyRewardsAndQuests?: boolean;
+  taxonomiesAndFlags?: boolean;
   creatorGoals?: boolean;
   homeBanners?: boolean;
   homeQuickLinks?: boolean;
   cmsPolicies?: boolean;
   systemSettings?: boolean;
   coinPackages?: boolean;
+  virtualGiftsCatalog?: boolean;
   resetBalances?: {
     callerCoins?: boolean;
     creatorEarnings?: boolean;
@@ -817,6 +825,48 @@ export async function granularResetSupabaseAdmin(options: {
   const clearedTables: string[] = [];
 
   try {
+    // Optional: purge Cloudflare R2 uploads before DB deletion
+    if (options.purgeR2MediaStorage) {
+      clearLocalMediaCache();
+      const purgeRes = await purgeR2MediaUploads({
+        purgeAllUploads: Boolean(options.purgeAllR2Uploads),
+        prefixes: Boolean(options.purgeAllR2Uploads)
+          ? undefined
+          : ['uploads/avatar/', 'uploads/gallery/', 'uploads/chat_media/', 'uploads/moment/', 'uploads/verification/'],
+      });
+      clearedTables.push(`r2_media_uploads (${purgeRes.deletedCount} objects)`);
+    }
+
+    // Virtual Gifts Catalog purge:
+    // - reset system_configs.virtual_gifts_json to defaults
+    // - remove "gift" messages from the chats (gift transaction logs)
+    if (options.virtualGiftsCatalog) {
+      try {
+        const { error: giftMsgErr } = await (client as any)
+          .from('messages')
+          .delete()
+          .eq('type', 'gift');
+        if (!giftMsgErr) clearedTables.push('gift_messages');
+        else console.warn('[Supabase Admin Reset] gift message purge warning:', giftMsgErr.message);
+      } catch (err: any) {
+        console.warn('[Supabase Admin Reset] gift message purge exception:', err?.message || err);
+      }
+
+      try {
+        const { error: sysErr } = await (client as any)
+          .from('system_configs')
+          .update({
+            enable_virtual_gifts: true,
+            virtual_gifts_json: JSON.stringify(VIRTUAL_GIFTS),
+          })
+          .eq('id', 'default');
+        if (!sysErr) clearedTables.push('system_configs.virtual_gifts_json');
+        else console.warn('[Supabase Admin Reset] system virtual gifts update warning:', sysErr.message);
+      } catch (err: any) {
+        console.warn('[Supabase Admin Reset] system virtual gifts update exception:', err?.message || err);
+      }
+    }
+
     // 1. Delete Messages Table
     if (options.chatMessages) {
       const { error } = await client.from('messages').delete().neq('id', '___non_existent___');
@@ -866,6 +916,37 @@ export async function granularResetSupabaseAdmin(options: {
       else console.warn('[Supabase Admin Reset] feed_posts purge warning:', error.message);
     }
 
+    // 7a. Delete CMS / System Admin Tables
+    if (options.homeBanners) {
+      const { error } = await client.from('home_banners').delete().neq('id', '___non_existent___');
+      if (!error) clearedTables.push('home_banners');
+      else console.warn('[Supabase Admin Reset] home_banners purge warning:', error.message);
+    }
+
+    if (options.homeQuickLinks) {
+      const { error } = await client.from('home_quick_links').delete().neq('id', '___non_existent___');
+      if (!error) clearedTables.push('home_quick_links');
+      else console.warn('[Supabase Admin Reset] home_quick_links purge warning:', error.message);
+    }
+
+    if (options.cmsPolicies) {
+      const { error } = await client.from('cms_policies').delete().neq('id', '___non_existent___');
+      if (!error) clearedTables.push('cms_policies');
+      else console.warn('[Supabase Admin Reset] cms_policies purge warning:', error.message);
+    }
+
+    if (options.systemSettings) {
+      const { error } = await client.from('system_configs').delete().neq('id', '___non_existent___');
+      if (!error) clearedTables.push('system_configs');
+      else console.warn('[Supabase Admin Reset] system_configs purge warning:', error.message);
+    }
+
+    if (options.coinPackages) {
+      const { error } = await client.from('coin_packages').delete().neq('id', '___non_existent___');
+      if (!error) clearedTables.push('coin_packages');
+      else console.warn('[Supabase Admin Reset] coin_packages purge warning:', error.message);
+    }
+
     // 8. Delete Favorites Table
     if (options.favorites) {
       const { error } = await client.from('favorites').delete().neq('user_id', '___non_existent___');
@@ -887,8 +968,44 @@ export async function granularResetSupabaseAdmin(options: {
       else console.warn('[Supabase Admin Reset] creator_goals purge warning:', error.message);
     }
 
+    // 10a. Delete Creator Analytics / Metrics Table
+    if (options.creatorAnalytics) {
+      try {
+        const { error } = await client.from('creator_metrics').delete().neq('creator_id', '___non_existent___');
+        if (!error) clearedTables.push('creator_metrics');
+        else console.warn('[Supabase Admin Reset] creator_metrics purge warning:', error.message);
+      } catch (err: any) {
+        console.warn('[Supabase Admin Reset] creator_metrics purge exception:', err?.message || err);
+      }
+    }
+
+    // 10b. Delete Taxonomies, Tags & Moderation Flags
+    if (options.taxonomiesAndFlags) {
+      try {
+        const blocks: Array<{ table: string; filter: string; value: string }> = [
+          { table: 'country_configs', filter: 'code', value: '___non_existent___' },
+          { table: 'language_configs', filter: 'code', value: '___non_existent___' },
+          { table: 'zodiac_configs', filter: 'key', value: '___non_existent___' },
+          { table: 'interest_configs', filter: 'id', value: '___non_existent___' },
+          { table: 'moderation_reports', filter: 'id', value: '___non_existent___' },
+        ];
+
+        const anyClient = client as any;
+        for (const b of blocks) {
+          const { error } = await anyClient
+            .from(b.table as any)
+            .delete()
+            .neq(b.filter as any, b.value);
+          if (!error) clearedTables.push(b.table);
+          else console.warn(`[Supabase Admin Reset] ${b.table} purge warning:`, error.message);
+        }
+      } catch (err: any) {
+        console.warn('[Supabase Admin Reset] taxonomiesAndFlags purge exception:', err?.message || err);
+      }
+    }
+
     // 10b. Delete User Daily Rewards Table
-    if (options.clearAllUsers || options.creatorGoals || (options as any).userDailyRewards) {
+    if (options.clearAllUsers || options.creatorGoals || options.dailyRewardsAndQuests) {
       const { error } = await client.from('user_daily_rewards').delete().neq('user_id', '___non_existent___');
       if (!error) clearedTables.push('user_daily_rewards');
       else console.warn('[Supabase Admin Reset] user_daily_rewards purge warning:', error.message);
