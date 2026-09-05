@@ -55,6 +55,7 @@ import {
   Upload,
   Rocket,
   Percent,
+  ChevronRight,
 } from 'lucide-react';
 import { CoinPackage, UserProfile, AdminActiveCall, getUserRoleLabel, getFemaleRoleMark, VirtualGift } from '../../types';
 import { getUserEffectiveLocation } from '../../utils/location';
@@ -73,6 +74,43 @@ import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { PlatformMasterAnalytics } from './PlatformMasterAnalytics';
+
+/** Female hosts managed by a Team Leader — ID/authId first, agencyName only as fallback. */
+function getManagedCreatorsForLeader(leader: UserProfile, allUsers: UserProfile[]): UserProfile[] {
+  return allUsers.filter((u) => {
+    if (u.id === leader.id || (leader.authId && u.authId === leader.authId)) return false;
+    if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
+
+    const isFemale = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
+    if (!isFemale) return false;
+
+    if (
+      u.teamLeaderId === leader.id ||
+      u.createdById === leader.id ||
+      (leader.authId && (u.teamLeaderId === leader.authId || u.createdById === leader.authId))
+    ) {
+      return true;
+    }
+
+    // Prefer ID match: skip agency fallback when host already points at a different TL id
+    if (u.teamLeaderId && u.teamLeaderId !== leader.id && u.teamLeaderId !== leader.authId) {
+      return false;
+    }
+    if (u.createdById && u.createdById !== leader.id && u.createdById !== leader.authId) {
+      return false;
+    }
+
+    if (
+      leader.agencyName &&
+      u.agencyName &&
+      u.agencyName.trim().toLowerCase() === leader.agencyName.trim().toLowerCase()
+    ) {
+      return true;
+    }
+
+    return false;
+  });
+}
 
 export const AdminDashboard: React.FC = () => {
   const {
@@ -368,6 +406,10 @@ export const AdminDashboard: React.FC = () => {
   const [editingSku, setEditingSku] = useState<Partial<CoinPackage> | null>(null);
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState<string>('all');
+  /** Users list: 'all' | 'independent' | team_leader.id */
+  const [userTeamLeaderFilter, setUserTeamLeaderFilter] = useState<string>('all');
+  /** Team Leaders tab: open managed-creators modal for this leader */
+  const [managedCreatorsLeader, setManagedCreatorsLeader] = useState<UserProfile | null>(null);
 
   // Manual Coin Addition Modal State
   const [isCoinModalOpen, setIsCoinModalOpen] = useState(false);
@@ -548,6 +590,25 @@ export const AdminDashboard: React.FC = () => {
     setEditingSku(null);
   };
 
+  const teamLeadersList = useMemo(
+    () => users.filter((u) => u.role === 'team_leader' || u.role === 'agency_manager'),
+    [users]
+  );
+
+  const teamLeaderIdSet = useMemo(() => {
+    const ids = new Set<string>();
+    teamLeadersList.forEach((tl) => {
+      ids.add(tl.id);
+      if (tl.authId) ids.add(tl.authId);
+    });
+    return ids;
+  }, [teamLeadersList]);
+
+  const managedCreatorsForModal = useMemo(() => {
+    if (!managedCreatorsLeader) return [];
+    return getManagedCreatorsForLeader(managedCreatorsLeader, users);
+  }, [managedCreatorsLeader, users]);
+
   const filteredUsers = users.filter((u) => {
     const roleLabel = getUserRoleLabel(u);
     const femaleMark = getFemaleRoleMark(u);
@@ -560,13 +621,25 @@ export const AdminDashboard: React.FC = () => {
       (u.id || '').toLowerCase().includes(userSearchQuery.toLowerCase());
 
     if (!matchesSearch) return false;
-    if (userRoleFilter === 'all') return true;
-    if (userRoleFilter === 'male_user') return roleLabel === 'Male User';
-    if (userRoleFilter === 'female_user') return femaleMark === 'user';
-    if (userRoleFilter === 'female_creator') return femaleMark === 'creator';
-    if (userRoleFilter === 'team_leader') return roleLabel === 'Team Leader';
-    if (userRoleFilter === 'other_user') return roleLabel === 'Other User';
-    if (userRoleFilter === 'admin') return roleLabel === 'Admin';
+
+    if (userRoleFilter === 'male_user' && roleLabel !== 'Male User') return false;
+    if (userRoleFilter === 'female_user' && femaleMark !== 'user') return false;
+    if (userRoleFilter === 'female_creator' && femaleMark !== 'creator') return false;
+    if (userRoleFilter === 'team_leader' && roleLabel !== 'Team Leader') return false;
+    if (userRoleFilter === 'other_user' && roleLabel !== 'Other User') return false;
+    if (userRoleFilter === 'admin' && roleLabel !== 'Admin') return false;
+
+    if (userTeamLeaderFilter === 'independent') {
+      const underTl =
+        (u.teamLeaderId && teamLeaderIdSet.has(u.teamLeaderId)) ||
+        (u.createdById && teamLeaderIdSet.has(u.createdById));
+      if (underTl) return false;
+    } else if (userTeamLeaderFilter !== 'all') {
+      const leader = teamLeadersList.find((tl) => tl.id === userTeamLeaderFilter);
+      if (!leader) return false;
+      if (!getManagedCreatorsForLeader(leader, [u]).length) return false;
+    }
+
     return true;
   });
 
@@ -2875,11 +2948,8 @@ export const AdminDashboard: React.FC = () => {
               {users
                 .filter((u) => u.role === 'team_leader')
                 .map((leader) => {
-                  const managedCount = users.filter(
-                    (u) =>
-                      (u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host') &&
-                      (u.teamLeaderId === leader.id || u.createdById === leader.id || u.agencyName === leader.agencyName)
-                  ).length;
+                  const managedHosts = getManagedCreatorsForLeader(leader, users);
+                  const managedCount = managedHosts.length;
 
                   return (
                     <div
@@ -2918,10 +2988,18 @@ export const AdminDashboard: React.FC = () => {
                             <span>Agency:</span>
                             <span className="font-semibold text-slate-200">{leader.agencyName || 'Agency Guild'}</span>
                           </div>
-                          <div className="flex justify-between text-slate-400">
+                          <button
+                            type="button"
+                            onClick={() => setManagedCreatorsLeader(leader)}
+                            className="w-full flex justify-between items-center text-slate-400 hover:text-emerald-300 transition-colors cursor-pointer group rounded-lg -mx-1 px-1 py-0.5 hover:bg-emerald-500/5"
+                            title="View managed female creators"
+                          >
                             <span>Managed Creators:</span>
-                            <span className="font-bold text-emerald-400 font-mono">{managedCount} Hosts</span>
-                          </div>
+                            <span className="font-bold text-emerald-400 font-mono inline-flex items-center gap-1 group-hover:underline">
+                              {managedCount} Hosts
+                              <ChevronRight className="w-3.5 h-3.5 opacity-70" />
+                            </span>
+                          </button>
                           <div className="flex justify-between text-slate-400">
                             <span>Nationality:</span>
                             <span className="text-slate-200">{leader.nationality || 'United States'}</span>
@@ -2948,6 +3026,120 @@ export const AdminDashboard: React.FC = () => {
                     </div>
                   );
                 })}
+            </div>
+          )}
+
+          {/* Managed Creators Modal */}
+          {managedCreatorsLeader && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+              <div className="bg-[#12151F] border border-amber-500/40 rounded-3xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl">
+                <div className="flex items-center justify-between border-b border-slate-800 p-5 shrink-0">
+                  <div className="flex items-center space-x-3 min-w-0">
+                    <img
+                      src={managedCreatorsLeader.avatarUrl}
+                      alt={managedCreatorsLeader.name}
+                      className="w-10 h-10 rounded-xl object-cover ring-1 ring-amber-400 shrink-0"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).src = getFallbackAvatar(
+                          managedCreatorsLeader.name,
+                          managedCreatorsLeader.gender,
+                          managedCreatorsLeader.role
+                        );
+                      }}
+                    />
+                    <div className="min-w-0">
+                      <h4 className="font-bold text-white text-base truncate">
+                        Managed Creators — {managedCreatorsLeader.name}
+                      </h4>
+                      <p className="text-xs text-slate-400 truncate">
+                        {managedCreatorsLeader.agencyName || 'Agency Guild'} · {managedCreatorsForModal.length} host
+                        {managedCreatorsForModal.length === 1 ? '' : 's'}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setManagedCreatorsLeader(null)}
+                    className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-all cursor-pointer shrink-0"
+                  >
+                    <XCircle className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="overflow-y-auto custom-scrollbar p-4 space-y-2 flex-1">
+                  {managedCreatorsForModal.length === 0 ? (
+                    <div className="p-10 text-center text-slate-500 text-xs font-mono">
+                      No female creators linked to this Team Leader yet.
+                    </div>
+                  ) : (
+                    managedCreatorsForModal.map((host) => (
+                      <div
+                        key={host.id}
+                        className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-700 transition-colors"
+                      >
+                        <div className="flex items-center space-x-3 min-w-0">
+                          <img
+                            src={host.avatarUrl}
+                            alt={host.name}
+                            className="w-9 h-9 rounded-full object-cover border border-slate-700 shrink-0"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).src = getFallbackAvatar(host.name, host.gender, host.role);
+                            }}
+                          />
+                          <div className="min-w-0">
+                            <div className="font-bold text-white text-sm truncate">{host.name}</div>
+                            <div className="text-[10px] text-slate-400 font-mono truncate">
+                              {host.email || host.id}
+                            </div>
+                            <div className="text-[10px] text-amber-400/90 font-mono mt-0.5">
+                              {host.teamLeaderId === managedCreatorsLeader.id ||
+                              host.createdById === managedCreatorsLeader.id ||
+                              (managedCreatorsLeader.authId &&
+                                (host.teamLeaderId === managedCreatorsLeader.authId ||
+                                  host.createdById === managedCreatorsLeader.authId))
+                                ? 'Linked by ID'
+                                : 'Linked by agency name'}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                              host.onlineStatus === 'online'
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                : 'bg-slate-800 text-slate-400 border-slate-700'
+                            }`}
+                          >
+                            {(host.onlineStatus || 'offline').replace('_', ' ')}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setManagedCreatorsLeader(null);
+                              setSelectedUserForEdit(host);
+                              setIsEditModalOpen(true);
+                              setActiveSubTab('users');
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="p-4 border-t border-slate-800 flex justify-end shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setManagedCreatorsLeader(null)}
+                    className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -3523,6 +3715,21 @@ export const AdminDashboard: React.FC = () => {
                   className="w-full pl-9 pr-3 py-1.5 bg-[#0F1115] border border-slate-800 rounded text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono"
                 />
               </div>
+
+              <select
+                value={userTeamLeaderFilter}
+                onChange={(e) => setUserTeamLeaderFilter(e.target.value)}
+                className="w-full sm:w-52 px-2.5 py-1.5 bg-[#0F1115] border border-slate-800 rounded text-xs text-slate-300 focus:outline-none focus:border-amber-500 font-mono cursor-pointer"
+                title="Filter by Team Leader / agency"
+              >
+                <option value="all">All Team Leaders</option>
+                <option value="independent">Independent (no TL)</option>
+                {teamLeadersList.map((tl) => (
+                  <option key={tl.id} value={tl.id}>
+                    {tl.agencyName || tl.name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
