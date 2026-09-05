@@ -495,7 +495,8 @@ export async function deleteProfileAdmin(userId: string): Promise<{ success: boo
 export async function updateUserPasswordAdmin(
   userId: string,
   newPassword: string,
-  email?: string
+  email?: string,
+  meta?: { role?: string; gender?: string; name?: string }
 ): Promise<{ success: boolean; error?: string }> {
   const client = getSupabaseAdmin();
   if (!client) {
@@ -530,12 +531,20 @@ export async function updateUserPasswordAdmin(
     // 2. Also sync to Supabase Auth so native Supabase tokens and client sessions work
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     let authUpdated = false;
+    const userMetadata: Record<string, any> = { id: userId };
+    if (meta?.role) userMetadata.role = meta.role;
+    if (meta?.gender) userMetadata.gender = meta.gender;
+    if (meta?.name) {
+      userMetadata.name = meta.name;
+      userMetadata.full_name = meta.name;
+    }
 
     if (userId && uuidRegex.test(userId)) {
       try {
         const { data, error } = await client.auth.admin.updateUserById(userId, {
           password: newPassword,
           email_confirm: true,
+          user_metadata: userMetadata,
         });
         if (!error && data?.user) {
           authUpdated = true;
@@ -559,6 +568,7 @@ export async function updateUserPasswordAdmin(
             const { error: updErr } = await client.auth.admin.updateUserById(matched.id, {
               password: newPassword,
               email_confirm: true,
+              user_metadata: userMetadata,
             });
             if (!updErr) {
               authUpdated = true;
@@ -570,9 +580,7 @@ export async function updateUserPasswordAdmin(
               email: cleanEmail,
               password: newPassword,
               email_confirm: true,
-              user_metadata: {
-                id: userId,
-              },
+              user_metadata: userMetadata,
             });
             if (!createErr && createdAuth?.user) {
               authUpdated = true;
@@ -664,7 +672,8 @@ export async function authenticateUserWithPasswordAdmin(
 }
 
 /**
- * Server-side user status updater bypassing RLS using service role client
+ * Server-side user status updater bypassing RLS using service role client.
+ * Matches both profiles.id and profiles.auth_id (TL-created hosts often differ).
  */
 export async function updateUserStatusAdmin(
   userId: string,
@@ -675,15 +684,33 @@ export async function updateUserStatusAdmin(
     return { success: false, error: 'Supabase not configured' };
   }
 
+  if (!userId || !status) {
+    return { success: false, error: 'userId and status required' };
+  }
+
   try {
-    const { error } = await client
+    const payload = {
+      online_status: status,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error: byIdError } = await client
       .from('profiles')
-      .update({ online_status: status })
+      .update(payload as any)
       .eq('id', userId);
 
-    if (error) {
-      console.warn('[Supabase Admin] updateUserStatusAdmin error:', error.message);
-      return { success: false, error: error.message };
+    // Also match auth_id — login identity may differ from profiles.id
+    const { error: byAuthError } = await client
+      .from('profiles')
+      .update(payload as any)
+      .eq('auth_id', userId);
+
+    if (byIdError && byAuthError) {
+      console.warn(
+        '[Supabase Admin] updateUserStatusAdmin error:',
+        byIdError.message || byAuthError.message
+      );
+      return { success: false, error: byIdError.message || byAuthError.message };
     }
 
     return { success: true };

@@ -54,6 +54,7 @@ import {
   Globe,
   Upload,
   Rocket,
+  Percent,
 } from 'lucide-react';
 import { CoinPackage, UserProfile, AdminActiveCall, getUserRoleLabel, getFemaleRoleMark, VirtualGift } from '../../types';
 import { getUserEffectiveLocation } from '../../utils/location';
@@ -107,6 +108,7 @@ export const AdminDashboard: React.FC = () => {
     syncUsersFromSupabase,
     createTeamLeader,
     callLogs,
+    updateCreatorCoinEarnOverride,
   } = useApp();
 
   const [isPurgingMock, setIsPurgingMock] = useState(false);
@@ -377,6 +379,11 @@ export const AdminDashboard: React.FC = () => {
 
   // User Analytics Modal State
   const [selectedUserForAnalytics, setSelectedUserForAnalytics] = useState<UserProfile | null>(null);
+
+  // Override Earning Modal State (female_creator only)
+  const [overrideEarningUser, setOverrideEarningUser] = useState<UserProfile | null>(null);
+  const [overrideEarningRate, setOverrideEarningRate] = useState<number>(48);
+  const [overrideUseSystemRate, setOverrideUseSystemRate] = useState(true);
 
   // Action Dropdown state (row ID with open menu)
   const [openActionDropdownId, setOpenActionDropdownId] = useState<string | null>(null);
@@ -2833,7 +2840,7 @@ export const AdminDashboard: React.FC = () => {
                 <span>Team Leaders & Agency Guilds</span>
               </h3>
               <p className="text-xs text-slate-400 mt-1">
-                Only root administrators can create Team Leaders. Team leaders can register female hosts and manage coin earn overrides.
+                Only root administrators can create Team Leaders. Team leaders can register female hosts. Individual earning overrides are set by Admin from the User List.
               </p>
             </div>
 
@@ -2853,7 +2860,7 @@ export const AdminDashboard: React.FC = () => {
               <Crown className="w-12 h-12 text-slate-600 mx-auto mb-3" />
               <h4 className="text-base font-bold text-slate-300">No Team Leaders Registered Yet</h4>
               <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                Create your first Team Leader agency account to delegate female creator recruitment and coin rate customization.
+                Create your first Team Leader agency account to delegate female creator recruitment.
               </p>
               <button
                 onClick={() => setIsAddLeaderOpen(true)}
@@ -3775,6 +3782,41 @@ export const AdminDashboard: React.FC = () => {
                                         <div className="text-[10px] text-slate-400">Add, subtract or set balance</div>
                                       </div>
                                     </button>
+
+                                    {(u.role === 'female_creator' || u.role === 'female_host') && (
+                                      <button
+                                        onClick={() => {
+                                          const systemRate =
+                                            systemSettings.femaleEarningRatePerMin ||
+                                            Math.round(
+                                              (systemSettings.coinBurnRatePerMin ?? 120) *
+                                                ((systemSettings.femaleHostSharePercent ?? 40) / 100)
+                                            ) ||
+                                            48;
+                                          const hasOverride =
+                                            u.coinEarnOverrideRate != null && Number(u.coinEarnOverrideRate) > 0;
+                                          setOverrideEarningUser(u);
+                                          setOverrideUseSystemRate(!hasOverride);
+                                          setOverrideEarningRate(
+                                            hasOverride ? Number(u.coinEarnOverrideRate) : systemRate
+                                          );
+                                          setOpenActionDropdownId(null);
+                                        }}
+                                        className="w-full px-3 py-2 text-left text-slate-200 hover:bg-pink-500/20 hover:text-pink-300 rounded-lg font-semibold flex items-center space-x-2.5 transition-colors group cursor-pointer"
+                                      >
+                                        <div className="w-6 h-6 rounded bg-pink-500/20 text-pink-400 flex items-center justify-center">
+                                          <Percent className="w-3.5 h-3.5" />
+                                        </div>
+                                        <div className="flex-1">
+                                          <div className="font-bold text-xs">Override Earning</div>
+                                          <div className="text-[10px] text-slate-400">
+                                            {u.coinEarnOverrideRate != null && Number(u.coinEarnOverrideRate) > 0
+                                              ? `Custom ${u.coinEarnOverrideRate} 🪙/min`
+                                              : 'Using system rate'}
+                                          </div>
+                                        </div>
+                                      </button>
+                                    )}
                                   </div>
 
                                   {/* Section 2: Verification & Impersonation */}
@@ -3931,6 +3973,140 @@ export const AdminDashboard: React.FC = () => {
         }}
         user={selectedUserForEdit}
       />
+
+      {/* Override Female Creator Earning Modal */}
+      {overrideEarningUser && (() => {
+        const systemRate =
+          systemSettings.femaleEarningRatePerMin ||
+          Math.round(
+            (systemSettings.coinBurnRatePerMin ?? 120) *
+              ((systemSettings.femaleHostSharePercent ?? 40) / 100)
+          ) ||
+          48;
+        const hostShare = systemSettings.femaleHostSharePercent ?? 40;
+
+        return (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-[#12151F] border border-pink-500/40 w-full max-w-md rounded-2xl shadow-2xl p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div className="flex items-center space-x-3">
+                  <img
+                    src={overrideEarningUser.avatarUrl}
+                    alt={overrideEarningUser.name}
+                    className="w-10 h-10 rounded-xl object-cover ring-1 ring-pink-400"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).src = getFallbackAvatar(
+                        overrideEarningUser.name,
+                        'female',
+                        'female_creator'
+                      );
+                    }}
+                  />
+                  <div>
+                    <h3 className="font-bold text-white text-sm">Override Earning</h3>
+                    <p className="text-[11px] text-slate-400">{overrideEarningUser.name}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setOverrideEarningUser(null)}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-3 text-xs">
+                <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 leading-relaxed">
+                  By default, female creators earn the system rate (
+                  <span className="font-mono font-bold text-emerald-300">{systemRate} 🪙/min</span>
+                  {' '}· {hostShare}% of coin burn). Set an individual override only when needed.
+                </div>
+
+                <label className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-900/80 border border-slate-700 cursor-pointer">
+                  <input
+                    type="radio"
+                    checked={overrideUseSystemRate}
+                    onChange={() => {
+                      setOverrideUseSystemRate(true);
+                      setOverrideEarningRate(systemRate);
+                    }}
+                    className="accent-emerald-400"
+                  />
+                  <div>
+                    <div className="font-bold text-white text-xs">Use system earning rate</div>
+                    <div className="text-[10px] text-slate-400">{systemRate} 🪙/min ({hostShare}% share)</div>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-2 p-2.5 rounded-xl bg-slate-900/80 border border-pink-500/30 cursor-pointer">
+                  <input
+                    type="radio"
+                    checked={!overrideUseSystemRate}
+                    onChange={() => setOverrideUseSystemRate(false)}
+                    className="accent-pink-400 mt-0.5"
+                  />
+                  <div className="flex-1 space-y-2">
+                    <div>
+                      <div className="font-bold text-white text-xs">Custom override (🪙 / min)</div>
+                      <div className="text-[10px] text-slate-400">Applies only to this female creator</div>
+                    </div>
+                    {!overrideUseSystemRate && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Override rate</span>
+                          <span className="font-mono font-bold text-pink-300">
+                            {overrideEarningRate} 🪙 / min
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="1"
+                          max={Math.max(systemRate * 2, 100)}
+                          step="1"
+                          value={overrideEarningRate}
+                          onChange={(e) => setOverrideEarningRate(Number(e.target.value))}
+                          className="w-full accent-pink-400 cursor-pointer"
+                        />
+                        <input
+                          type="number"
+                          min="1"
+                          max={Math.max(systemRate * 2, 100)}
+                          value={overrideEarningRate}
+                          onChange={(e) =>
+                            setOverrideEarningRate(Math.max(1, Number(e.target.value) || 1))
+                          }
+                          className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-slate-100 font-mono"
+                        />
+                      </div>
+                    )}
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-800">
+                <button
+                  onClick={() => setOverrideEarningUser(null)}
+                  className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs font-semibold hover:bg-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    updateCreatorCoinEarnOverride(
+                      overrideEarningUser.id,
+                      overrideUseSystemRate ? null : overrideEarningRate
+                    );
+                    setOverrideEarningUser(null);
+                  }}
+                  className="px-4 py-1.5 bg-pink-500 hover:bg-pink-400 text-white rounded-lg text-xs font-bold transition-all shadow-md cursor-pointer"
+                >
+                  {overrideUseSystemRate ? 'Clear Override' : 'Save Override'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* User Analytics & Earnings/Spending Ledger Modal */}
       <UserAnalyticsModal

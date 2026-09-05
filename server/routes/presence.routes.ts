@@ -31,11 +31,6 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
 
       if (status === 'offline') {
         userLastSeen.delete(userId);
-        for (const c of connectedSockets) {
-          if (c.userId === userId) {
-            c.userId = '';
-          }
-        }
       } else {
         userLastSeen.set(userId, Date.now());
       }
@@ -47,7 +42,8 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
       broadcastUsers();
 
       if (isSupabaseAdminConfigured()) {
-        updateUserStatusAdmin(userId, status).catch(() => {});
+        // Await so logout clients can wait for DB write before clearing the session
+        await updateUserStatusAdmin(userId, status);
       }
 
       return res.json({ success: true, presence: getFormattedPresence() });
@@ -66,15 +62,11 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
         if (status === 'offline') {
           userLastSeen.delete(userId);
           presenceMap.set(userId, 'offline');
-          for (const c of connectedSockets) {
-            if (c.userId === userId) {
-              c.userId = '';
-            }
-          }
           const u = serverUsers.get(userId);
           if (u) u.onlineStatus = 'offline';
           if (isSupabaseAdminConfigured()) {
-            updateUserStatusAdmin(userId, 'offline').catch(() => {});
+            // Fire-and-await would block heartbeat; offline must still hit DB
+            void updateUserStatusAdmin(userId, 'offline');
           }
         } else if (status) {
           userLastSeen.set(userId, Date.now());

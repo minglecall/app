@@ -170,7 +170,7 @@ export interface UserProfile {
   // Team Leader & Agency Hierarchy
   teamLeaderId?: string; // ID of the Team Leader who manages/created this user
   createdById?: string; // ID of the user (Admin or Team Leader) who created this profile
-  coinEarnOverrideRate?: number; // Custom per-minute coin earning override set by Team Leader/Admin (e.g., 7, 8, 9 🪙/min)
+  coinEarnOverrideRate?: number | null; // Admin-only per-minute coin earning override; null/undefined = use system host share %
   teamLeaderNote?: string; // Team Leader internal notes
   agencyName?: string; // Agency / Guild / Team Name (for Team Leaders)
   commissionPercent?: number; // Team Leader commission % (e.g. 10%)

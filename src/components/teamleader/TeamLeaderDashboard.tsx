@@ -31,7 +31,6 @@ import {
   AlertTriangle,
   Sparkles,
   Eye,
-  Sliders,
   Award,
   Globe,
   Lock,
@@ -73,7 +72,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     callLogs,
     systemSettings,
     createCreatorByTeamLeader,
-    updateCreatorCoinEarnOverride,
     banCreatorByTeamLeader,
     unbanCreatorByTeamLeader,
     deleteCreatorByTeamLeader,
@@ -99,7 +97,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   // Modals
   const [isAddCreatorOpen, setIsAddCreatorOpen] = useState(false);
   const [isCreatorAvatarModalOpen, setIsCreatorAvatarModalOpen] = useState(false);
-  const [editingOverrideCreator, setEditingOverrideCreator] = useState<UserProfile | null>(null);
   const [viewingPayout, setViewingPayout] = useState<PayoutRequest | null>(null);
   const [editingCreator, setEditingCreator] = useState<UserProfile | null>(null);
 
@@ -116,12 +113,10 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   const [creatorAvatarError, setCreatorAvatarError] = useState<string | null>(null);
   const creatorFileInputRef = useRef<HTMLInputElement>(null);
 
-  const maxAdminFemaleRate =
+  const systemFemaleEarnRate =
     systemSettings.femaleEarningRatePerMin ||
     Math.round((systemSettings.coinBurnRatePerMin ?? 120) * ((systemSettings.femaleHostSharePercent ?? 40) / 100)) ||
     48;
-
-  const [overrideInputValue, setOverrideInputValue] = useState<number>(maxAdminFemaleRate);
 
   const handleUploadCreatorAvatar = async (file: File) => {
     if (!file) return;
@@ -177,7 +172,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     spokenLanguages: 'English',
     bio: 'Excited to chat and connect on 1-on-1 live video!',
     hourlyCoinRate: 10,
-    coinEarnOverrideRate: maxAdminFemaleRate,
     tags: 'VIP Creator, HD Video, Conversationalist',
     avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
   });
@@ -323,17 +317,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const maxAllowedRate = maxAdminFemaleRate;
-    const requestedRate = Number(newCreatorForm.coinEarnOverrideRate) || maxAllowedRate;
-    if (requestedRate > maxAllowedRate) {
-      showToast(
-        'Validation Error',
-        `Host coin earn override rate (${requestedRate} 🪙/min) cannot exceed the admin-defined maximum of ${maxAllowedRate} 🪙/min.`,
-        'error'
-      );
-      return;
-    }
-
     createCreatorByTeamLeader({
       name: newCreatorForm.name,
       email: newCreatorForm.email || `creator_${Date.now().toString().slice(-4)}@livecall.app`,
@@ -344,7 +327,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       spokenLanguages: languages.length > 0 ? languages : ['English'],
       bio: newCreatorForm.bio,
       hourlyCoinRate: Number(newCreatorForm.hourlyCoinRate) || 10,
-      coinEarnOverrideRate: Math.min(requestedRate, maxAllowedRate),
       tags: tags.length > 0 ? tags : ['Agency Host'],
       avatarUrl: newCreatorForm.avatarUrl,
       gallery: [newCreatorForm.avatarUrl],
@@ -361,27 +343,9 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       spokenLanguages: 'English',
       bio: 'Excited to chat and connect on 1-on-1 live video!',
       hourlyCoinRate: 10,
-      coinEarnOverrideRate: maxAllowedRate,
       tags: 'VIP Creator, HD Video, Conversationalist',
       avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
     });
-  };
-
-  // Handle Save Override Rate
-  const handleSaveOverrideRate = () => {
-    if (!editingOverrideCreator) return;
-    const maxAllowed = maxAdminFemaleRate;
-    const rate = Math.max(1, Math.min(maxAllowed, Number(overrideInputValue)));
-    if (Number(overrideInputValue) > maxAllowed) {
-      showToast(
-        'Rate Limit Exceeded',
-        `Host coin earn override cannot exceed the admin-defined rate of ${maxAllowed} 🪙/min.`,
-        'error'
-      );
-      return;
-    }
-    updateCreatorCoinEarnOverride(editingOverrideCreator.id, rate);
-    setEditingOverrideCreator(null);
   };
 
   // Handle Save Edited Creator Details
@@ -394,7 +358,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       gallery: editingCreator.gallery && editingCreator.gallery.length > 0 ? editingCreator.gallery : [editingCreator.avatarUrl],
       bio: editingCreator.bio,
       hourlyCoinRate: editingCreator.hourlyCoinRate,
-      coinEarnOverrideRate: editingCreator.coinEarnOverrideRate,
       nationality: editingCreator.nationality,
       countryCode: editingCreator.countryCode,
       isVerified: editingCreator.isVerified,
@@ -762,8 +725,12 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filteredCreators.map((creator) => {
-                  const overrideRate = creator.coinEarnOverrideRate ?? systemSettings.femaleEarningRatePerMin;
-                  const hasCustomOverride = creator.coinEarnOverrideRate !== undefined && creator.coinEarnOverrideRate !== null;
+                  const effectiveRate =
+                    creator.coinEarnOverrideRate != null && Number(creator.coinEarnOverrideRate) > 0
+                      ? Number(creator.coinEarnOverrideRate)
+                      : systemFemaleEarnRate;
+                  const hasAdminOverride =
+                    creator.coinEarnOverrideRate != null && Number(creator.coinEarnOverrideRate) > 0;
 
                   return (
                     <div
@@ -859,40 +826,28 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                           </p>
                         )}
 
-                        {/* Coin Earn Override Spotlight */}
-                        <div className="mt-3 p-2.5 rounded-xl bg-gradient-to-r from-amber-950/40 to-yellow-950/20 border border-amber-500/30 flex items-center justify-between">
+                        {/* Coin Earn Rate (read-only — admin sets overrides) */}
+                        <div className="mt-3 p-2.5 rounded-xl bg-slate-900/80 border border-slate-700/60 flex items-center justify-between">
                           <div className="flex items-center space-x-2">
                             <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-300">
                               <Zap className="w-4 h-4" />
                             </div>
                             <div>
-                              <div className="text-[10px] text-amber-400/90 uppercase font-mono font-bold tracking-wider">
+                              <div className="text-[10px] text-slate-400 uppercase font-mono font-bold tracking-wider">
                                 Coin Earn Rate
                               </div>
                               <div className="text-xs font-bold text-amber-200 flex items-center gap-1">
-                                <span>{overrideRate} 🪙 / min</span>
-                                {hasCustomOverride ? (
-                                  <span className="text-[9px] px-1.5 py-0.2 bg-amber-400 text-slate-950 rounded font-mono font-bold">
-                                    OVERRIDE
+                                <span>{effectiveRate} 🪙 / min</span>
+                                {hasAdminOverride ? (
+                                  <span className="text-[9px] px-1.5 py-0.2 bg-indigo-500 text-white rounded font-mono font-bold">
+                                    ADMIN OVERRIDE
                                   </span>
                                 ) : (
-                                  <span className="text-[9px] text-slate-400 font-mono">(system default)</span>
+                                  <span className="text-[9px] text-slate-400 font-mono">(system rate)</span>
                                 )}
                               </div>
                             </div>
                           </div>
-
-                          <button
-                            id={`tl-edit-override-${creator.id}`}
-                            onClick={() => {
-                              setEditingOverrideCreator(creator);
-                              setOverrideInputValue(creator.coinEarnOverrideRate ?? 8);
-                            }}
-                            className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1"
-                          >
-                            <Sliders className="w-3 h-3" />
-                            <span>Adjust</span>
-                          </button>
                         </div>
 
                         {/* Lifetime Stats */}
@@ -1356,7 +1311,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 <div className="flex items-start space-x-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                   <span>
-                    <strong>Coin Earn Override:</strong> Set custom per-minute earning rates (override platform standard) to incentivize top creators.
+                    <strong>System Earn Rate:</strong> Hosts earn at the platform-defined coin rate. Individual earning overrides are managed by administrators only.
                   </span>
                 </div>
                 <div className="flex items-start space-x-2">
@@ -1392,7 +1347,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 <div>
                   <h3 className="font-bold text-white text-base">Register New Female Creator</h3>
                   <p className="text-xs text-slate-400">
-                    Add a female host to your agency & configure her custom coin earn rate
+                    Add a female host to your agency. She will earn at the system-defined coin rate.
                   </p>
                 </div>
               </div>
@@ -1544,66 +1499,13 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 </div>
               </div>
 
-              {/* 3. COIN EARN OVERRIDE SPOTLIGHT (CANNOT EXCEED ADMIN DEFINED RATE) */}
-              <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-950/60 via-slate-900 to-yellow-950/30 border-2 border-amber-500/40 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <Zap className="w-4 h-4 text-amber-400" />
-                    <label className="text-amber-300 font-bold text-xs">
-                      ⚡ Coin Earn Override Rate (Per Minute)
-                    </label>
-                  </div>
-                  <span className="font-mono text-xs font-bold text-amber-200 bg-amber-500/20 px-2.5 py-0.5 rounded-lg border border-amber-500/40 shadow-sm">
-                    {newCreatorForm.coinEarnOverrideRate} 🪙 / min
-                  </span>
-                </div>
-
-                <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-[11px] text-amber-200/90 flex items-start gap-2">
-                  <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  <div>
-                    <strong>Admin System Limit:</strong> Maximum allowable earning rate is{' '}
-                    <span className="font-bold text-amber-300">{maxAdminFemaleRate} 🪙/min</span>. Default is set to max rate ({maxAdminFemaleRate} 🪙/min).
-                  </div>
-                </div>
-
-                <div className="flex items-center space-x-3 pt-1">
-                  <input
-                    type="range"
-                    min="1"
-                    max={maxAdminFemaleRate}
-                    step="1"
-                    value={Math.min(newCreatorForm.coinEarnOverrideRate, maxAdminFemaleRate)}
-                    onChange={(e) => {
-                      const val = Math.min(Number(e.target.value), maxAdminFemaleRate);
-                      setNewCreatorForm({ ...newCreatorForm, coinEarnOverrideRate: val });
-                    }}
-                    className="flex-1 accent-amber-400 cursor-pointer"
-                  />
-                  <div className="flex gap-1.5 flex-wrap">
-                    {[10, 20, 30, 40, maxAdminFemaleRate]
-                      .filter((r) => r <= maxAdminFemaleRate)
-                      .concat(
-                        ![10, 20, 30, 40, maxAdminFemaleRate].includes(maxAdminFemaleRate)
-                          ? [maxAdminFemaleRate]
-                          : []
-                      )
-                      .filter((v, i, a) => a.indexOf(v) === i)
-                      .sort((a, b) => a - b)
-                      .map((preset) => (
-                        <button
-                          type="button"
-                          key={preset}
-                          onClick={() => setNewCreatorForm({ ...newCreatorForm, coinEarnOverrideRate: preset })}
-                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-                            newCreatorForm.coinEarnOverrideRate === preset
-                              ? 'bg-amber-400 text-slate-950 shadow ring-1 ring-amber-300'
-                              : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                          }`}
-                        >
-                          {preset}🪙
-                        </button>
-                      ))}
-                  </div>
+              {/* System earn rate notice (overrides are admin-only) */}
+              <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-700/60 flex items-start gap-2.5">
+                <Zap className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="text-[11px] text-slate-300 leading-relaxed">
+                  <strong className="text-white">Coin earning:</strong> This host will use the platform system rate of{' '}
+                  <span className="font-mono font-bold text-amber-300">{systemFemaleEarnRate} 🪙/min</span>
+                  {' '}({systemSettings.femaleHostSharePercent ?? 40}% of burn). Individual overrides can only be set by an administrator.
                 </div>
               </div>
 
@@ -1781,112 +1683,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
         </div>
       )}
 
-      {/* ======================= MODAL: ADJUST COIN EARN OVERRIDE ======================= */}
-      {editingOverrideCreator && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-[#12151F] border border-amber-500/40 w-full max-w-md rounded-2xl shadow-2xl p-5 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center space-x-3">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  TL-M2
-                </span>
-                <img
-                  src={editingOverrideCreator.avatarUrl}
-                  alt={editingOverrideCreator.name}
-                  className="w-10 h-10 rounded-xl object-cover ring-1 ring-amber-400"
-                />
-                <div>
-                  <h3 className="font-bold text-white text-sm">
-                    Adjust Coin Override Rate
-                  </h3>
-                  <p className="text-[11px] text-slate-400">{editingOverrideCreator.name}</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setEditingOverrideCreator(null)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <p className="text-slate-300 leading-relaxed">
-                Specify how many coins <strong className="text-white">{editingOverrideCreator.name}</strong> will earn for every 1 minute of active 1-on-1 video calling.
-              </p>
-
-              <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Current Rate:</span>
-                  <span className="font-mono font-bold text-amber-300">
-                    {overrideInputValue} 🪙 / min
-                  </span>
-                </div>
-                <div className="text-[10px] text-amber-400/90 font-mono">
-                  Admin Max Defined Cap: {maxAdminFemaleRate} 🪙 / min
-                </div>
-                <input
-                  type="range"
-                  min="1"
-                  max={maxAdminFemaleRate}
-                  step="0.5"
-                  value={Math.min(overrideInputValue, maxAdminFemaleRate)}
-                  onChange={(e) => setOverrideInputValue(Math.min(Number(e.target.value), maxAdminFemaleRate))}
-                  className="w-full accent-amber-400 cursor-pointer"
-                />
-                <div className="flex items-center justify-between gap-1 pt-1 flex-wrap">
-                  {[10, 20, 30, 40, maxAdminFemaleRate]
-                    .filter((r) => r <= maxAdminFemaleRate)
-                    .concat(
-                      ![10, 20, 30, 40, maxAdminFemaleRate].includes(maxAdminFemaleRate)
-                        ? [maxAdminFemaleRate]
-                        : []
-                    )
-                    .filter((v, i, a) => a.indexOf(v) === i)
-                    .sort((a, b) => a - b)
-                    .map((rate) => (
-                      <button
-                        key={rate}
-                        type="button"
-                        onClick={() => setOverrideInputValue(rate)}
-                        className={`flex-1 min-w-[36px] py-1 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-                          overrideInputValue === rate
-                            ? 'bg-amber-400 text-slate-950 font-bold shadow ring-1 ring-amber-300'
-                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                        }`}
-                      >
-                        {rate}🪙
-                      </button>
-                    ))}
-                </div>
-              </div>
-
-              <div className="p-2.5 bg-amber-950/30 border border-amber-500/20 rounded-lg text-[11px] text-amber-200/90 flex items-start gap-2">
-                <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <span>
-                  This override takes effect immediately across all active & future video calls hosted by this creator.
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-800">
-              <button
-                onClick={() => setEditingOverrideCreator(null)}
-                className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs font-semibold hover:bg-slate-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveOverrideRate}
-                className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg text-xs font-bold transition-all shadow-md"
-              >
-                Save Override
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ======================= MODAL: VIEW PAYOUT DETAILS (READ ONLY) ======================= */}
       {viewingPayout && (
         <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -2040,29 +1836,17 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">Hourly Burn Rate (🪙/min)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="50"
-                    value={editingCreator.hourlyCoinRate || 10}
-                    onChange={(e) => setEditingCreator({ ...editingCreator, hourlyCoinRate: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">Coin Earn Override Rate</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="50"
-                    value={editingCreator.coinEarnOverrideRate || 8}
-                    onChange={(e) => setEditingCreator({ ...editingCreator, coinEarnOverrideRate: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100"
-                  />
-                </div>
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Hourly Burn Rate (🪙/min)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={editingCreator.hourlyCoinRate || 10}
+                  onChange={(e) => setEditingCreator({ ...editingCreator, hourlyCoinRate: Number(e.target.value) })}
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">Coin earning override is managed by administrators only.</p>
               </div>
 
               <div className="flex items-center space-x-2 pt-2">

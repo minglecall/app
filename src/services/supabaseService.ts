@@ -485,14 +485,19 @@ export async function updateUserStatusInSupabase(
   let clientSuccess = false;
 
   // 1. Direct client-side Supabase update if configured
-  if (isSupabaseConfigured()) {
+  if (isSupabaseConfigured() && userId) {
     try {
-      const { error } = await (supabase
+      const { error: byIdError } = await (supabase
         .from('profiles') as any)
         .update({ online_status: status })
         .eq('id', userId);
 
-      if (!error) {
+      const { error: byAuthError } = await (supabase
+        .from('profiles') as any)
+        .update({ online_status: status })
+        .eq('auth_id', userId);
+
+      if (!byIdError || !byAuthError) {
         clientSuccess = true;
       }
     } catch (err) {

@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     team_leader_id TEXT,
     created_by_id TEXT,
     agency_name TEXT,
-    coin_earn_override_rate INT DEFAULT 8,
+    coin_earn_override_rate INT DEFAULT NULL, -- NULL = use system female host share %; set only by Admin override
     commission_percent NUMERIC DEFAULT 15,
     team_leader_note TEXT,
     password_hash TEXT,
@@ -97,7 +97,9 @@ ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS banned_by_role TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS team_leader_id TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS created_by_id TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS agency_name TEXT;
-ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS coin_earn_override_rate INT DEFAULT 8;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS coin_earn_override_rate INT DEFAULT NULL;
+ALTER TABLE public.profiles ALTER COLUMN coin_earn_override_rate DROP DEFAULT;
+ALTER TABLE public.profiles ALTER COLUMN coin_earn_override_rate SET DEFAULT NULL;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS commission_percent NUMERIC DEFAULT 15;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS team_leader_note TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS password_hash TEXT;

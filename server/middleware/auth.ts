@@ -33,6 +33,8 @@ const PRIVILEGED_PROFILE_KEYS = new Set([
   'coin_balance',
   'earningsCoins',
   'earnings_coins',
+  'coinEarnOverrideRate',
+  'coin_earn_override_rate',
   'role',
   'password',
   'password_hash',
@@ -65,6 +67,17 @@ export function extractBearerToken(req: Request): string | null {
   if (!match) return null;
   const token = match[1].trim();
   return token.length > 0 ? token : null;
+}
+
+/** Prefer Authorization header; fall back to body.accessToken for sendBeacon unload paths. */
+export function extractAccessToken(req: Request): string | null {
+  const bearer = extractBearerToken(req);
+  if (bearer) return bearer;
+  const bodyToken = (req.body as any)?.accessToken;
+  if (typeof bodyToken === 'string' && bodyToken.trim().length > 0) {
+    return bodyToken.trim();
+  }
+  return null;
 }
 
 export function sendUnauthorized(res: Response, message: string) {
@@ -148,7 +161,7 @@ async function authenticateRequest(req: Request, res: Response): Promise<AuthUse
   const existing = (req as any).user as AuthUser | undefined;
   if (existing?.id) return existing;
 
-  const token = extractBearerToken(req);
+  const token = extractAccessToken(req);
   if (!token) {
     sendUnauthorized(res, 'Missing or invalid Authorization Bearer token.');
     return null;

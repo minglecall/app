@@ -322,7 +322,7 @@ interface AppContextType {
   // Team Leader Operations
   createTeamLeader: (leaderData: Partial<UserProfile>) => UserProfile;
   createCreatorByTeamLeader: (creatorData: Partial<UserProfile>, leaderId?: string) => UserProfile;
-  updateCreatorCoinEarnOverride: (creatorId: string, overrideRate: number) => void;
+  updateCreatorCoinEarnOverride: (creatorId: string, overrideRate: number | null) => void;
   banCreatorByTeamLeader: (creatorId: string, days: number, reason: string) => Promise<boolean>;
   unbanCreatorByTeamLeader: (creatorId: string) => Promise<boolean>;
   deleteCreatorByTeamLeader: (creatorId: string) => Promise<boolean>;
@@ -711,7 +711,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         users.find((u) => u.authId && u.authId === currentUserId) ||
         users.find((u) => u.email && currentUserId && u.email.toLowerCase() === currentUserId.toLowerCase())
       : undefined) ||
-    (isLoggedIn ? users[0] : undefined) ||
     DEFAULT_FALLBACK_USER;
 
   // Unread messages count for current user
@@ -730,6 +729,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const prevUserIdRef = useRef<string | null>(null);
   const isLoggedInRef = useRef<boolean>(isLoggedIn);
   const currentUserIdRef = useRef<string>(currentUserId);
+  /** Cached access token for sync unload beacons (sendBeacon cannot set Authorization headers). */
+  const accessTokenRef = useRef<string | null>(null);
   const adminActiveCallsRef = useRef<AdminActiveCall[]>(adminActiveCalls);
   const activeCallRef = useRef<CallSession | null>(activeCall);
   const billedMinutesRef = useRef<Set<number>>(new Set());
@@ -756,6 +757,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     currentUserIdRef.current = currentUserId;
   }, [currentUserId]);
 
+  // Keep a sync-readable access token for beacons and auth-gated polling
+  useEffect(() => {
+    let cancelled = false;
+    const refreshToken = async () => {
+      const token = await getAccessToken();
+      if (!cancelled) accessTokenRef.current = token;
+    };
+    void refreshToken();
+    const timer = setInterval(refreshToken, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isLoggedIn, currentUserId]);
+
   // -------------------------------------------------------------------------
   // Supabase Auth rehydration — session.user.id is the identity source of truth
   // when a valid session exists. localStorage remains a fallback for offline /
@@ -769,6 +785,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     isLoggedInRef.current = false;
     currentUserIdRef.current = '';
     supabaseAuthUserIdRef.current = null;
+    accessTokenRef.current = null;
     setIsLoggedIn(false);
     setCurrentUserId('');
     localStorage.setItem('livecall_logged_in', 'false');
@@ -2003,6 +2020,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const refreshAdminActiveCalls = async () => {
+    if (!isLoggedInRef.current) return;
+    const me = usersRef.current.find((u) => u.id === currentUserIdRef.current);
+    if (me?.role !== 'admin') return;
+    const token = accessTokenRef.current || (await getAccessToken());
+    if (!token) return;
+    accessTokenRef.current = token;
+
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'admin:get_active_calls' }));
     }
@@ -2024,14 +2048,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  // Periodic polling for active calls to guarantee 100% sync across incognito/mobile sessions
+  // Periodic polling for active calls — admin sessions only (avoids 401 spam for guests/users)
   useEffect(() => {
-    refreshAdminActiveCalls();
-    const timer = setInterval(() => {
-      refreshAdminActiveCalls();
-    }, 2500);
+    if (!isLoggedIn || !currentUserId) return;
+
+    const tick = () => {
+      const me = usersRef.current.find((u) => u.id === currentUserIdRef.current);
+      if (me?.role !== 'admin') return;
+      void refreshAdminActiveCalls();
+    };
+
+    tick();
+    const timer = setInterval(tick, 2500);
     return () => clearInterval(timer);
-  }, []);
+  }, [isLoggedIn, currentUserId]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -2044,6 +2074,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Direct HTTP heartbeat & presence sync (guarantees sync even if WS reconnects or across separate tabs/devices)
     const syncPresenceDirect = async () => {
       if (isCancelled || isResettingRef.current) return;
+      if (!isLoggedInRef.current || !currentUserIdRef.current) return;
+      const token = accessTokenRef.current || (await getAccessToken());
+      if (!token) return;
+      accessTokenRef.current = token;
       try {
         const activeUid = currentUserIdRef.current;
         const currentProfile = activeUid ? usersRef.current.find((u) => u.id === activeUid) : null;
@@ -2089,6 +2123,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Dedicated Supabase Social & Friend Requests Synchronizer (preserves server authoritative presence)
     const syncSupabaseStatusCycle = async () => {
       if (isCancelled || isResettingRef.current) return;
+      if (!isLoggedInRef.current || !currentUserIdRef.current) return;
+      const token = accessTokenRef.current || (await getAccessToken());
+      if (!token) return;
+      accessTokenRef.current = token;
       try {
         // 1. Push current user's active status to Supabase for persistence
         if (isLoggedInRef.current && currentUserIdRef.current) {
@@ -2117,6 +2155,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // User directory sync to pick up new accounts created in other tabs or devices (preserves live presence)
     const syncUserDirectory = async () => {
       if (isCancelled || isResettingRef.current) return;
+      if (!isLoggedInRef.current || !currentUserIdRef.current) return;
+      const token = accessTokenRef.current || (await getAccessToken());
+      if (!token) return;
+      accessTokenRef.current = token;
       try {
         const res = await authFetch('/api/users');
         if (res.ok && !isCancelled) {
@@ -2152,6 +2194,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     function connect() {
       if (isCancelled) return;
+      // Do not open a socket until we have a real session — unauthenticated open/close spam is noisy in DevTools
+      if (!isLoggedInRef.current || !currentUserIdRef.current) return;
+      const cachedToken = accessTokenRef.current;
+      if (!cachedToken) {
+        void getAccessToken().then((token) => {
+          if (isCancelled || !token) return;
+          accessTokenRef.current = token;
+          connect();
+        });
+        return;
+      }
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -2161,7 +2215,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       ws.onopen = () => {
         if (isCancelled) return;
         void (async () => {
-          const accessToken = await getAccessToken();
+          const accessToken = accessTokenRef.current || (await getAccessToken());
+          if (!accessToken) {
+            ws?.close();
+            return;
+          }
+          accessTokenRef.current = accessToken;
           ws?.send(
             JSON.stringify({
               type: 'auth',
@@ -2169,7 +2228,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             })
           );
           prevUserIdRef.current = currentUserId;
-          ws?.send(JSON.stringify({ type: 'admin:get_active_calls' }));
+          const me = usersRef.current.find((u) => u.id === currentUserIdRef.current);
+          if (me?.role === 'admin') {
+            ws?.send(JSON.stringify({ type: 'admin:get_active_calls' }));
+          }
         })();
 
         // Send instant heartbeat
@@ -2256,22 +2318,35 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   if (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail) return false;
                   return true;
                 });
-                const currentId = currentUserIdRef.current;
+                // Only match the same person — never fall back to the logged-in user
+                // (that briefly turned Team Leader into the newly created female_creator).
                 const prior =
                   prev.find((u) => u.id === incoming.id) ||
-                  prev.find((u) => currentId && u.id === currentId) ||
-                  prev.find((u) => cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail);
-                const keepLoggedInId =
+                  (authId
+                    ? prev.find((u) => u.id === authId || u.authId === authId)
+                    : undefined) ||
+                  (cleanEmail
+                    ? prev.find((u) => u.email && u.email.toLowerCase().trim() === cleanEmail)
+                    : undefined);
+                const currentId = currentUserIdRef.current;
+                const refersToLoggedInUser = Boolean(
                   currentId &&
-                  prior &&
-                  (prior.id === currentId ||
-                    incoming.id === currentId ||
-                    incoming.authId === currentId ||
-                    (cleanEmail && prior.email && prior.email.toLowerCase().trim() === cleanEmail));
+                    (incoming.id === currentId ||
+                      incoming.authId === currentId ||
+                      (authId && authId === currentId) ||
+                      (prior && prior.id === currentId) ||
+                      (cleanEmail &&
+                        prev.some(
+                          (u) =>
+                            u.id === currentId &&
+                            u.email &&
+                            u.email.toLowerCase().trim() === cleanEmail
+                        )))
+                );
                 const mergedUser = {
                   ...(prior || {}),
                   ...incoming,
-                  id: keepLoggedInId ? currentId : incoming.id,
+                  id: refersToLoggedInUser ? currentId! : incoming.id || prior?.id,
                   coinBalance:
                     incoming.coinBalance !== undefined
                       ? incoming.coinBalance
@@ -2281,11 +2356,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                       ? incoming.earningsCoins
                       : prior?.earningsCoins,
                   onlineStatus:
-                    keepLoggedInId
+                    refersToLoggedInUser
                       ? prior?.onlineStatus || incoming.onlineStatus
                       : incoming.onlineStatus ?? prior?.onlineStatus,
                 };
-                return [mergedUser, ...remaining];
+                return [...remaining, mergedUser];
               });
             }
           } else if (data.type === 'call:incoming') {
@@ -2536,23 +2611,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
 
       ws.onclose = () => {
-        if (!isCancelled && !isResettingRef.current) {
+        if (!isCancelled && !isResettingRef.current && isLoggedInRef.current) {
           setTimeout(connect, 3000);
         }
       };
 
-      ws.onerror = (err) => {
-        console.warn('WebSocket connection warning:', err);
+      ws.onerror = () => {
+        // Browser fires error before close for failed handshakes; reconnect handled in onclose
       };
     }
 
-    // Connect WebSocket
+    // Connect WebSocket only when authenticated (effect re-runs on currentUserId / login)
     connect();
 
     // Initial presence + Supabase status push (authoritative DB sync; not a tight poll loop)
-    syncPresenceDirect();
-    syncSupabaseStatusCycle();
-    syncUserDirectory();
+    if (isLoggedInRef.current) {
+      syncPresenceDirect();
+      syncSupabaseStatusCycle();
+      syncUserDirectory();
+    }
 
     // 1. WebSocket heartbeat — primary liveness signal to the signaling server
     heartbeatTimer = setInterval(() => {
@@ -2626,17 +2703,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Browser close / tab close / navigation away handler (beacon offline status to server & Supabase)
     const handleUnload = () => {
       const activeUid = currentUserIdRef.current;
-      if (activeUid) {
-        const payload = JSON.stringify({ userId: activeUid, status: 'offline' });
+      const accessToken = accessTokenRef.current;
+      if (activeUid && accessToken) {
+        const payload = JSON.stringify({ status: 'offline', accessToken });
         try {
           if (navigator.sendBeacon) {
-            navigator.sendBeacon('/api/supabase/update-status', payload);
-            navigator.sendBeacon('/api/presence', payload);
+            const blob = new Blob([payload], { type: 'application/json' });
+            navigator.sendBeacon('/api/supabase/update-status', blob);
+            navigator.sendBeacon('/api/presence', blob);
           } else {
             authFetch('/api/supabase/update-status', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: payload,
+              body: JSON.stringify({ status: 'offline' }),
               keepalive: true,
             }).catch(() => { });
           }
@@ -2671,7 +2750,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (ws) ws.close();
       unsubscribeSupabaseChat();
     };
-  }, [currentUserId]);
+  }, [currentUserId, isLoggedIn]);
 
   const toastTimerRef = useRef<any>(null);
 
@@ -2712,6 +2791,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setIsLoggedIn(true);
     localStorage.setItem('livecall_logged_in', 'true');
     localStorage.setItem('livecall_current_user_id', activeId);
+    void getAccessToken().then((token) => {
+      accessTokenRef.current = token;
+    });
 
     const activeProfile: UserProfile = { ...profile, id: activeId, onlineStatus: 'online' };
     setUsers((prev) => {
@@ -2751,32 +2833,42 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
   const logoutUser = () => {
     const prevId = currentUserId;
+    const prevAuthId = currentUser?.authId || supabaseAuthUserIdRef.current || '';
+    const cachedToken = accessTokenRef.current;
+
     if (activeCall) {
       endCall();
     }
+
+    // Mark local session offline immediately (stops heartbeats from pushing "online")
     isLoggedInRef.current = false;
     currentUserIdRef.current = '';
 
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.id === prevId || (prevAuthId && (u.id === prevAuthId || u.authId === prevAuthId))
+          ? { ...u, onlineStatus: 'offline' as const }
+          : u
+      )
+    );
+    setIsLoggedIn(false);
+    localStorage.setItem('livecall_logged_in', 'false');
+    localStorage.removeItem('livecall_current_user_id');
+
+    // Notify peers / other tabs
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'presence:update',
-          userId: prevId,
-          status: 'offline',
-        })
-      );
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'presence:update',
+            userId: prevId,
+            status: 'offline',
+          })
+        );
+      } catch {
+        /* ignore */
+      }
     }
-    updateUserStatusInSupabase(prevId, 'offline').catch(() => { });
-    authFetch('/api/supabase/update-status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: prevId, status: 'offline' }),
-    }).catch(() => { });
-    authFetch('/api/presence', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: prevId, status: 'offline' }),
-    }).catch(() => { });
 
     try {
       localStorage.setItem('livecall_presence_trigger', `${prevId}_offline_${Date.now()}`);
@@ -2785,15 +2877,74 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         bc.postMessage({ type: 'presence_updated', userId: prevId, status: 'offline' });
         bc.close();
       }
-    } catch (e) { }
+    } catch {
+      /* ignore */
+    }
 
-    setUsers((prev) =>
-      prev.map((u) => (u.id === prevId ? { ...u, onlineStatus: 'offline' } : u))
-    );
-    setIsLoggedIn(false);
-    localStorage.setItem('livecall_logged_in', 'false');
-    localStorage.removeItem('livecall_current_user_id');
-    signOutSupabase().catch(() => { });
+    // Persist offline to DB BEFORE clearing Supabase auth (token race was leaving hosts "online")
+    void (async () => {
+      const token = cachedToken || (await getAccessToken());
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const offlineBody = JSON.stringify({
+        userId: prevId,
+        status: 'offline',
+        accessToken: token || undefined,
+      });
+
+      const persistOffline = async (url: string) => {
+        try {
+          if (token && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+            const blob = new Blob([offlineBody], { type: 'application/json' });
+            navigator.sendBeacon(url, blob);
+          }
+          await fetch(url, {
+            method: 'POST',
+            headers,
+            body: offlineBody,
+            keepalive: true,
+          });
+        } catch {
+          /* ignore — best effort */
+        }
+      };
+
+      // Direct client write while session may still be valid
+      if (prevId) {
+        try {
+          await updateUserStatusInSupabase(prevId, 'offline');
+        } catch {
+          /* ignore */
+        }
+      }
+      if (prevAuthId && prevAuthId !== prevId) {
+        try {
+          await updateUserStatusInSupabase(prevAuthId, 'offline');
+        } catch {
+          /* ignore */
+        }
+      }
+
+      await Promise.all([
+        persistOffline('/api/supabase/update-status'),
+        persistOffline('/api/presence'),
+      ]);
+
+      // Close socket after offline was requested so server close handler also writes offline
+      try {
+        if (wsRef.current) {
+          wsRef.current.close();
+          wsRef.current = null;
+        }
+      } catch {
+        /* ignore */
+      }
+
+      accessTokenRef.current = null;
+      await signOutSupabase().catch(() => { });
+    })();
+
     showToast('Logged Out 👋', 'You have been safely logged out of your session.', 'info');
   };
 
@@ -4520,7 +4671,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const activeLeaderId = leaderId || currentUser.id;
     const leader = users.find((u) => u.id === activeLeaderId);
     const newId = (creatorData.id && isValidUuid(creatorData.id)) ? creatorData.id : generateValidUuid();
-    const overrideRate = creatorData.coinEarnOverrideRate ?? 8;
     const creatorAvatar = creatorData.avatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400';
 
     const newCreator: UserProfile = {
@@ -4546,7 +4696,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isOnboarded: true,
       coinBalance: 0,
       hourlyCoinRate: creatorData.hourlyCoinRate || 10,
-      coinEarnOverrideRate: overrideRate,
+      // Earning uses system host share % unless an Admin sets an individual override
+      coinEarnOverrideRate: null,
       teamLeaderId: activeLeaderId,
       createdById: activeLeaderId,
       agencyName: leader?.agencyName || currentUser.agencyName || 'Agency Guild',
@@ -4561,7 +4712,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     setUsers((prev) => {
-      const next = [newCreator, ...prev.filter((u) => u.id !== newCreator.id && u.email !== newCreator.email)];
+      // Keep Team Leader (and other existing users) ahead of the new host so
+      // currentUser resolution never briefly resolves to the new creator.
+      const next = [...prev.filter((u) => u.id !== newCreator.id && u.email !== newCreator.email), newCreator];
       usersRef.current = next;
       return next;
     });
@@ -4571,47 +4724,53 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       password: (creatorData as any).password || 'creator123',
     };
 
-    // Send to server via dedicated Team Leader creator creation endpoint and standard users API
+    // Persist only via Team Leader API — do NOT call upsertProfileToSupabase here.
+    // That helper posts /api/supabase/upsert-profile + /api/users, which for non-admins
+    // force role=caller's role (team_leader) and then overwrite the new host by email.
     authFetch('/api/teamleader/creators', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(creatorPayload),
     }).catch((e) => console.warn('Team Leader creator sync notice:', e));
 
-    authFetch('/api/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(creatorPayload),
-    }).catch((e) => console.warn('Creator server sync warning:', e));
-
-    if (isSupabaseConfigured()) {
-      upsertProfileToSupabase(newCreator).catch((e) =>
-        console.warn('Creator Supabase sync warning:', e)
-      );
-    }
-
     showToast(
       'Creator Host Created! ✨',
-      `Registered female host ${newCreator.name} with custom earn rate of ${overrideRate} 🪙/min.`,
+      `Registered female host ${newCreator.name}. Coin earning uses the system-defined rate until an admin sets an override.`,
       'success'
     );
     return newCreator;
   };
 
-  const updateCreatorCoinEarnOverride = (creatorId: string, overrideRate: number) => {
-    let targetName = '';
+  const updateCreatorCoinEarnOverride = (creatorId: string, overrideRate: number | null) => {
+    if (currentUser.role !== 'admin') {
+      showToast('Permission Denied', 'Only administrators can override female creator earning rates.', 'error');
+      return;
+    }
+
+    const target = usersRef.current.find((u) => u.id === creatorId) || users.find((u) => u.id === creatorId);
+    if (!target || (target.role !== 'female_creator' && target.role !== 'female_host')) {
+      showToast('Invalid Target', 'Earning override is only available for female creators.', 'error');
+      return;
+    }
+
+    const normalizedRate =
+      overrideRate === null || overrideRate === undefined || Number(overrideRate) <= 0
+        ? null
+        : Math.max(1, Math.round(Number(overrideRate)));
+
+    let targetName = target.name;
     setUsers((prev) => {
       const next = prev.map((u) => {
         if (u.id === creatorId) {
           targetName = u.name;
-          const updated = { ...u, coinEarnOverrideRate: overrideRate };
+          const updated = { ...u, coinEarnOverrideRate: normalizedRate };
           if (isSupabaseConfigured()) {
             upsertProfileToSupabase(updated).catch(() => { });
           }
-          authFetch('/api/teamleader/override-rate', {
+          authFetch('/api/admin/override-earning-rate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ creatorId, rate: overrideRate }),
+            body: JSON.stringify({ creatorId, rate: normalizedRate }),
           }).catch(() => { });
           authFetch('/api/users', {
             method: 'POST',
@@ -4626,11 +4785,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return next;
     });
 
-    showToast(
-      'Coin Earn Override Set ⚡',
-      `${targetName || 'Creator'} will now earn ${overrideRate} 🪙/min on live video calls (Team Leader rate override).`,
-      'success'
-    );
+    if (normalizedRate === null) {
+      showToast(
+        'Override Cleared',
+        `${targetName || 'Creator'} now uses the system-defined coin earning rate.`,
+        'success'
+      );
+    } else {
+      showToast(
+        'Earning Override Set ⚡',
+        `${targetName || 'Creator'} will now earn ${normalizedRate} 🪙/min on live video calls (admin override).`,
+        'success'
+      );
+    }
   };
 
   const banCreatorByTeamLeader = async (creatorId: string, days: number, reason: string): Promise<boolean> => {

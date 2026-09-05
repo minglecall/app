@@ -545,11 +545,8 @@ async function startServer() {
             if (userId && (status === 'online' || status === 'busy' || status === 'offline')) {
               if (status === 'offline') {
                 userLastSeen.delete(userId);
-                for (const c of connectedSockets) {
-                  if (c.userId === userId) {
-                    c.userId = '';
-                  }
-                }
+                // Keep socket.userId so ws.close can still persist offline to Supabase.
+                // Explicit presenceMap 'offline' already wins in getAuthoritativeStatus.
               } else {
                 userLastSeen.set(userId, Date.now());
               }
@@ -1070,8 +1067,10 @@ async function startServer() {
     ws.on('close', () => {
       // Drop this socket and any already-dead peers for the same connection object
       const idx = connectedSockets.findIndex((c) => c.ws === ws);
+      // Prefer socket map id; fall back to WS auth identity if presence:update cleared it
+      const disconnectedUserId =
+        (idx !== -1 ? connectedSockets[idx].userId : '') || authenticatedUserId || '';
       if (idx !== -1) {
-        const disconnectedUserId = connectedSockets[idx].userId;
         connectedSockets.splice(idx, 1);
 
         // Prune sockets that are no longer OPEN (defensive against half-closed leaks)
@@ -1119,7 +1118,14 @@ async function startServer() {
             updateUserStatusAdmin(disconnectedUserId, 'offline').catch(() => {});
           }
         }
+      } else if (disconnectedUserId && isSupabaseAdminConfigured()) {
+        // Socket already removed but we still know who left — force DB offline
+        presenceMap.set(disconnectedUserId, 'offline');
+        userLastSeen.delete(disconnectedUserId);
+        updateUserStatusAdmin(disconnectedUserId, 'offline').catch(() => {});
+        broadcastPresence();
       }
+      authenticatedUserId = null;
     });
   });
 
@@ -1512,11 +1518,13 @@ async function startServer() {
       }
 
       serverUsers.set(normalized.id, normalized);
+      // Collapse duplicate email rows — do NOT merge caller's role onto another profile id
       if (normalized.email) {
         const cleanEmail = normalized.email.toLowerCase().trim();
-        for (const [sId, sUser] of serverUsers.entries()) {
+        for (const [sId, sUser] of Array.from(serverUsers.entries())) {
+          if (sId === normalized.id) continue;
           if (sUser.email && sUser.email.toLowerCase().trim() === cleanEmail) {
-            serverUsers.set(sId, { ...sUser, ...normalized, id: sId });
+            serverUsers.delete(sId);
           }
         }
       }
@@ -1605,6 +1613,7 @@ async function startServer() {
       }
       const passwordHash = await hashPassword(creatorPassword);
 
+      // Force female_creator AFTER stripPrivileged (which removes role from body)
       const normalizedCreator = normalizeUserProfile({
         ...stripPrivilegedProfileFields(payload),
         id: validId,
@@ -1618,7 +1627,13 @@ async function startServer() {
         teamLeaderId: leaderId,
         createdById: leaderId,
         agencyName: leader?.agencyName || payload.agencyName,
+        coinEarnOverrideRate: null,
       });
+      // Belt-and-suspenders: never persist TL/admin role onto a managed host
+      normalizedCreator.role = 'female_creator';
+      normalizedCreator.gender = 'female';
+      normalizedCreator.teamLeaderId = leaderId;
+      normalizedCreator.createdById = leaderId;
 
       (normalizedCreator as any).password_hash = passwordHash;
       serverUsers.set(normalizedCreator.id, normalizedCreator);
@@ -1626,12 +1641,22 @@ async function startServer() {
       if (isSupabaseAdminConfigured()) {
         await upsertProfileAdmin({
           ...normalizedCreator,
+          role: 'female_creator',
           password_hash: passwordHash,
           has_password_set: true,
         });
 
         if (normalizedCreator.email) {
-          updateUserPasswordAdmin(normalizedCreator.id, creatorPassword, normalizedCreator.email).catch(() => {});
+          updateUserPasswordAdmin(
+            normalizedCreator.id,
+            creatorPassword,
+            normalizedCreator.email,
+            {
+              role: 'female_creator',
+              gender: 'female',
+              name: normalizedCreator.name,
+            }
+          ).catch(() => {});
         }
       }
 
@@ -1653,45 +1678,59 @@ async function startServer() {
     }
   });
 
-  // POST Update Creator Coin Earn Override Rate
-  app.post('/api/teamleader/override-rate', requireTeamLeader, async (req, res) => {
+  // POST Admin Override Female Creator Coin Earn Rate (null = use system host share %)
+  app.post('/api/admin/override-earning-rate', requireAdmin, async (req, res) => {
     try {
       const { creatorId, rate } = req.body;
-      if (!creatorId || rate === undefined) {
-        return res.status(400).json({ success: false, error: 'creatorId and rate are required' });
+      if (!creatorId) {
+        return res.status(400).json({ success: false, error: 'creatorId is required' });
       }
 
-      const numericRate = Number(rate);
       const existing = serverUsers.get(creatorId);
-      const leader = (req as any).profile;
-      if (existing && !callerOwnsCreator(leader, existing)) {
-        return res.status(403).json({ success: false, error: 'Not authorized for this creator.' });
+      if (!existing) {
+        return res.status(404).json({ success: false, error: 'Creator not found' });
       }
-      if (existing) {
-        const updated: UserProfile = {
-          ...existing,
-          coinEarnOverrideRate: numericRate,
-        };
-        serverUsers.set(creatorId, updated);
 
-        if (isSupabaseAdminConfigured()) {
-          await upsertProfileAdmin(updated);
-        }
-
-        broadcastAll({
-          type: 'users:updated',
-          user: updated,
-          users: getFormattedUsers(),
+      const role = String(existing.role || '');
+      if (role !== 'female_creator' && role !== 'female_host') {
+        return res.status(400).json({
+          success: false,
+          error: 'Earning override is only allowed for female creators.',
         });
-
-        return res.json({ success: true, user: updated });
       }
 
-      return res.status(404).json({ success: false, error: 'Creator not found' });
+      const clearOverride = rate === null || rate === undefined || rate === '' || Number(rate) <= 0;
+      const numericRate = clearOverride ? null : Math.max(1, Math.round(Number(rate)));
+
+      const updated: UserProfile = {
+        ...existing,
+        coinEarnOverrideRate: numericRate,
+      };
+      serverUsers.set(creatorId, updated);
+
+      if (isSupabaseAdminConfigured()) {
+        await upsertProfileAdmin(updated);
+      }
+
+      broadcastAll({
+        type: 'users:updated',
+        user: updated,
+        users: getFormattedUsers(),
+      });
+
+      return res.json({ success: true, user: updated });
     } catch (err: any) {
-      console.error('Error in POST /api/teamleader/override-rate:', err);
+      console.error('Error in POST /api/admin/override-earning-rate:', err);
       return res.status(500).json({ success: false, error: err.message });
     }
+  });
+
+  // Legacy Team Leader override endpoint — permanently disabled (admin-only now)
+  app.post('/api/teamleader/override-rate', requireAuth, (_req, res) => {
+    return res.status(403).json({
+      success: false,
+      error: 'Team Leaders cannot override earning rates. Only administrators may set individual overrides.',
+    });
   });
 
   // POST Ban Female Host by Team Leader for N Days
@@ -1891,11 +1930,6 @@ async function startServer() {
 
       if (status === 'offline') {
         userLastSeen.delete(userId);
-        for (const c of connectedSockets) {
-          if (c.userId === userId) {
-            c.userId = '';
-          }
-        }
       } else {
         userLastSeen.set(userId, Date.now());
       }
