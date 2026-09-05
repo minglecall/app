@@ -127,28 +127,24 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
     };
   }, [hostReviews]);
 
-  // Real Dynamic Compliance & Attendance Metrics
+  // Real Dynamic Compliance & Attendance Metrics (call hours only — no invented standby/%)
   const complianceMetrics = useMemo(() => {
     const hostLogs = callLogs.filter((l) => l.receiverId === activeUser.id);
     const totalCallSeconds = hostLogs.reduce((acc, l) => acc + (l.durationSeconds || 0), 0);
     const totalCallHours = Number((totalCallSeconds / 3600).toFixed(1));
 
-    // Calculate standby hours dynamically based on activity
-    const standbyHours = Number(Math.max(1.2, totalCallHours * 0.45).toFixed(1));
-    const totalHoursOnline = Number((totalCallHours + standbyHours).toFixed(1));
+    const storedAcceptance =
+      typeof activeUser.acceptanceRatePercent === 'number' &&
+      Number.isFinite(activeUser.acceptanceRatePercent)
+        ? activeUser.acceptanceRatePercent
+        : null;
 
-    // Acceptance rate from completed call volume
-    const acceptanceRate = hostLogs.length > 0 ? 98.4 : 100.0;
-
-    // Policy strikes from banned status
     const strikes = activeUser.isBanned ? 1 : 0;
     const healthScore = Math.max(0, 100 - strikes * 30);
 
     return {
-      totalHoursOnline,
-      standbyHours,
       totalCallHours,
-      acceptanceRate,
+      acceptanceRate: storedAcceptance,
       strikes,
       healthScore,
     };
@@ -505,12 +501,22 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             <Star className="w-4 h-4 text-yellow-400 fill-yellow-400/20" />
           </div>
           <div className="text-xl sm:text-2xl font-black text-white font-mono flex items-center space-x-1.5">
-            <span>{hostMetrics.hostQualityScore.toFixed(2)}</span>
-            <span className="text-xs text-yellow-400 font-normal">★ / 5.0</span>
+            <span>
+              {hostMetrics.hostQualityScore != null
+                ? hostMetrics.hostQualityScore.toFixed(2)
+                : 'N/A'}
+            </span>
+            {hostMetrics.hostQualityScore != null && (
+              <span className="text-xs text-yellow-400 font-normal">★ / 5.0</span>
+            )}
           </div>
           <div className="text-[10px] text-emerald-400 font-mono flex items-center space-x-1">
             <CheckCircle2 className="w-3 h-3" />
-            <span>{hostMetrics.acceptanceRatePercent}% Call Acceptance Rate</span>
+            <span>
+              {hostMetrics.acceptanceRatePercent != null
+                ? `${hostMetrics.acceptanceRatePercent}% Call Acceptance Rate`
+                : 'Acceptance rate N/A'}
+            </span>
           </div>
         </div>
       </div>
@@ -539,7 +545,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   <span>Revenue & Earning Streams Breakdown</span>
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Track earnings performance across Video Calls, Audio Calls, Gift Tips, and Roulette matching.
+                  Track call earnings from live call logs (coins × payout ratio). Categories only appear when recorded in data.
                 </p>
               </div>
 
@@ -561,7 +567,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
               </div>
             </div>
 
-            {/* Recharts Area/Bar Graph */}
+            {/* Recharts Area/Bar Graph — single real Call earnings series */}
             <div className="h-72 w-full pt-2">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
@@ -569,14 +575,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                     <linearGradient id="colorVideo" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#10B981" stopOpacity={0.4} />
                       <stop offset="95%" stopColor="#10B981" stopOpacity={0.0} />
-                    </linearGradient>
-                    <linearGradient id="colorGifts" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#F59E0B" stopOpacity={0.4} />
-                      <stop offset="95%" stopColor="#F59E0B" stopOpacity={0.0} />
-                    </linearGradient>
-                    <linearGradient id="colorAudio" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#6366F1" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#6366F1" stopOpacity={0.0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
@@ -595,35 +593,17 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   <Legend
                     wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }}
                     formatter={(val) => (
-                      <span className="text-slate-300 font-mono text-xs capitalize">{val.replace('USD', '')}</span>
+                      <span className="text-slate-300 font-mono text-xs capitalize">{val}</span>
                     )}
                   />
                   <Area
                     type="monotone"
-                    dataKey="videoCallsUSD"
-                    name="1-on-1 Video Calls ($)"
+                    dataKey="totalUSD"
+                    name="Call earnings ($)"
                     stroke="#10B981"
                     strokeWidth={2}
                     fillOpacity={1}
                     fill="url(#colorVideo)"
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="giftsUSD"
-                    name="Virtual Gift Tips ($)"
-                    stroke="#F59E0B"
-                    strokeWidth={2}
-                    fillOpacity={1}
-                    fill="url(#colorGifts)"
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="audioCallsUSD"
-                    name="Audio Calls ($)"
-                    stroke="#6366F1"
-                    strokeWidth={2}
-                    fillOpacity={1}
-                    fill="url(#colorAudio)"
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -770,17 +750,31 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
               </div>
 
               <div className="space-y-3 font-mono text-xs">
-                {/* 1-on-1 Video Calls */}
+                {/* 1-on-1 Video / Call Minutes */}
                 <div className="p-3.5 bg-slate-950 rounded-2xl border border-slate-800 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-white flex items-center space-x-2">
                       <Video className="w-3.5 h-3.5 text-pink-400" />
-                      <span>Private 1-on-1 Video Calls</span>
+                      <span>
+                        {hostMetrics.hasCallTypeBreakdown
+                          ? 'Private 1-on-1 Video Calls'
+                          : 'Call Minutes'}
+                      </span>
                     </span>
-                    <span className="text-pink-400 font-black">{hostMetrics.videoMinutes} mins ({hostMetrics.videoPercent}%)</span>
+                    <span className="text-pink-400 font-black">
+                      {hostMetrics.videoMinutes} mins
+                      {hostMetrics.hasCallTypeBreakdown
+                        ? ` (${hostMetrics.videoPercent}%)`
+                        : ''}
+                    </span>
                   </div>
                   <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                    <div className="bg-pink-500 h-full rounded-full" style={{ width: `${hostMetrics.videoPercent}%` }} />
+                    <div
+                      className="bg-pink-500 h-full rounded-full"
+                      style={{
+                        width: `${hostMetrics.hasCallTypeBreakdown ? hostMetrics.videoPercent : 100}%`,
+                      }}
+                    />
                   </div>
                   <div className="text-[10px] text-slate-400 flex justify-between">
                     <span>{hostMetrics.videoSessions} sessions</span>
@@ -788,41 +782,54 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   </div>
                 </div>
 
-                {/* Audio Calls */}
-                <div className="p-3.5 bg-slate-950 rounded-2xl border border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-white flex items-center space-x-2">
-                      <PhoneCall className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Private Audio Calls</span>
-                    </span>
-                    <span className="text-indigo-400 font-black">{hostMetrics.audioMinutes} mins ({hostMetrics.audioPercent}%)</span>
-                  </div>
-                  <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                    <div className="bg-indigo-500 h-full rounded-full" style={{ width: `${hostMetrics.audioPercent}%` }} />
-                  </div>
-                  <div className="text-[10px] text-slate-400 flex justify-between">
-                    <span>{hostMetrics.audioSessions} sessions</span>
-                    <span>Average: {hostMetrics.audioAvgMins} mins/call</span>
-                  </div>
-                </div>
+                {/* Audio / Roulette only when call_logs actually record those flags */}
+                {hostMetrics.hasCallTypeBreakdown && (
+                  <>
+                    <div className="p-3.5 bg-slate-950 rounded-2xl border border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white flex items-center space-x-2">
+                          <PhoneCall className="w-3.5 h-3.5 text-indigo-400" />
+                          <span>Private Audio Calls</span>
+                        </span>
+                        <span className="text-indigo-400 font-black">
+                          {hostMetrics.audioMinutes} mins ({hostMetrics.audioPercent}%)
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                        <div
+                          className="bg-indigo-500 h-full rounded-full"
+                          style={{ width: `${hostMetrics.audioPercent}%` }}
+                        />
+                      </div>
+                      <div className="text-[10px] text-slate-400 flex justify-between">
+                        <span>{hostMetrics.audioSessions} sessions</span>
+                        <span>Average: {hostMetrics.audioAvgMins} mins/call</span>
+                      </div>
+                    </div>
 
-                {/* Random Match Roulette */}
-                <div className="p-3.5 bg-slate-950 rounded-2xl border border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-white flex items-center space-x-2">
-                      <Zap className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Live Roulette Matching</span>
-                    </span>
-                    <span className="text-amber-400 font-black">{hostMetrics.rouletteMinutes} mins ({hostMetrics.roulettePercent}%)</span>
-                  </div>
-                  <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                    <div className="bg-amber-500 h-full rounded-full" style={{ width: `${hostMetrics.roulettePercent}%` }} />
-                  </div>
-                  <div className="text-[10px] text-slate-400 flex justify-between">
-                    <span>{hostMetrics.rouletteSessions} sessions</span>
-                    <span>Average: {hostMetrics.rouletteAvgMins} mins/call</span>
-                  </div>
-                </div>
+                    <div className="p-3.5 bg-slate-950 rounded-2xl border border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white flex items-center space-x-2">
+                          <Zap className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Live Roulette Matching</span>
+                        </span>
+                        <span className="text-amber-400 font-black">
+                          {hostMetrics.rouletteMinutes} mins ({hostMetrics.roulettePercent}%)
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                        <div
+                          className="bg-amber-500 h-full rounded-full"
+                          style={{ width: `${hostMetrics.roulettePercent}%` }}
+                        />
+                      </div>
+                      <div className="text-[10px] text-slate-400 flex justify-between">
+                        <span>{hostMetrics.rouletteSessions} sessions</span>
+                        <span>Average: {hostMetrics.rouletteAvgMins} mins/call</span>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
@@ -994,21 +1001,31 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
-                  <div className="text-[10px] text-slate-400 uppercase">Hours Online (MTD)</div>
-                  <div className="text-lg font-black text-white">{complianceMetrics.totalHoursOnline} hrs</div>
-                  <div className="text-[10px] text-emerald-400">Standby: {complianceMetrics.standbyHours} hrs</div>
+                  <div className="text-[10px] text-slate-400 uppercase">Call Hours (from logs)</div>
+                  <div className="text-lg font-black text-white">{complianceMetrics.totalCallHours} hrs</div>
+                  <div className="text-[10px] text-slate-400">Completed session time only</div>
                 </div>
 
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
                   <div className="text-[10px] text-slate-400 uppercase">Incoming Call Acceptance</div>
-                  <div className="text-lg font-black text-emerald-400">{complianceMetrics.acceptanceRate}%</div>
-                  <div className="text-[10px] text-slate-400">Top Tier Fast Pickup</div>
+                  <div className="text-lg font-black text-emerald-400">
+                    {complianceMetrics.acceptanceRate != null
+                      ? `${complianceMetrics.acceptanceRate}%`
+                      : 'N/A'}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    {complianceMetrics.acceptanceRate != null
+                      ? 'From profile record'
+                      : 'Not recorded yet'}
+                  </div>
                 </div>
 
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
                   <div className="text-[10px] text-slate-400 uppercase">Policy Violations / Strikes</div>
                   <div className="text-lg font-black text-emerald-400">{complianceMetrics.strikes} Strikes</div>
-                  <div className="text-[10px] text-emerald-300">Clean Record Badge</div>
+                  <div className="text-[10px] text-emerald-300">
+                    {complianceMetrics.strikes === 0 ? 'Clean Record' : 'Under review'}
+                  </div>
                 </div>
               </div>
 

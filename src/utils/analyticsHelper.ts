@@ -50,8 +50,12 @@ export interface HostMetrics {
   rouletteAvgMins: number;
   peakHours: PeakHourMetric[];
   peakWindowLabel: string;
-  hostQualityScore: number;
-  acceptanceRatePercent: number;
+  /** null when not stored / no reviews — never invent 5.0 */
+  hostQualityScore: number | null;
+  /** null when not stored — never invent 100% */
+  acceptanceRatePercent: number | null;
+  /** True when call_logs (or client) actually record audio/roulette flags */
+  hasCallTypeBreakdown: boolean;
 }
 
 export interface CallerMetrics {
@@ -62,7 +66,8 @@ export interface CallerMetrics {
   totalUSDSpent: number;
   monthlyCoinsSpent: number;
   monthlyUSDSpent: number;
-  totalGiftsCount: number;
+  /** null when no persisted gift-sent source exists */
+  totalGiftsCount: number | null;
   friendSavingsCoins: number;
   friendSavingsUSD: number;
 }
@@ -77,7 +82,8 @@ export interface FavoriteHostStat {
   totalCoinsSpent: number;
   totalUSDSpent: number;
   callsCount: number;
-  giftsSentCount: number;
+  /** null when no persisted gift-sent source exists */
+  giftsSentCount: number | null;
   lastCallDate: string;
   isFriend: boolean;
   hourlyCoinRate: number;
@@ -113,15 +119,16 @@ export function computeHostEarningsData(
 
       const coinsEarned = dayLogs.reduce((acc, l) => acc + (l.coinsEarned || 0), 0);
       const minutes = dayLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
-      const totalUSD = coinsEarned * femalePayoutRatioUSD;
+      const totalUSD = Number((coinsEarned * femalePayoutRatioUSD).toFixed(2));
 
+      // Real call earnings only — no cosmetic Video/Audio/Gifts percentage splits
       points.push({
         period: periodLabel,
-        videoCallsUSD: Number((totalUSD * 0.85).toFixed(2)),
-        audioCallsUSD: Number((totalUSD * 0.10).toFixed(2)),
-        giftsUSD: Number((totalUSD * 0.05).toFixed(2)),
+        videoCallsUSD: totalUSD,
+        audioCallsUSD: 0,
+        giftsUSD: 0,
         rouletteUSD: 0,
-        totalUSD: Number(totalUSD.toFixed(2)),
+        totalUSD,
         callMinutes: minutes,
         coinsEarned,
       });
@@ -142,15 +149,15 @@ export function computeHostEarningsData(
 
       const coinsEarned = weekLogs.reduce((acc, l) => acc + (l.coinsEarned || 0), 0);
       const minutes = weekLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
-      const totalUSD = coinsEarned * femalePayoutRatioUSD;
+      const totalUSD = Number((coinsEarned * femalePayoutRatioUSD).toFixed(2));
 
       points.push({
         period: weekLabel,
-        videoCallsUSD: Number((totalUSD * 0.85).toFixed(2)),
-        audioCallsUSD: Number((totalUSD * 0.10).toFixed(2)),
-        giftsUSD: Number((totalUSD * 0.05).toFixed(2)),
+        videoCallsUSD: totalUSD,
+        audioCallsUSD: 0,
+        giftsUSD: 0,
         rouletteUSD: 0,
-        totalUSD: Number(totalUSD.toFixed(2)),
+        totalUSD,
         callMinutes: minutes,
         coinsEarned,
       });
@@ -167,15 +174,15 @@ export function computeHostEarningsData(
 
       const coinsEarned = monthLogs.reduce((acc, l) => acc + (l.coinsEarned || 0), 0);
       const minutes = monthLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
-      const totalUSD = coinsEarned * femalePayoutRatioUSD;
+      const totalUSD = Number((coinsEarned * femalePayoutRatioUSD).toFixed(2));
 
       points.push({
         period: monthLabel,
-        videoCallsUSD: Number((totalUSD * 0.85).toFixed(2)),
-        audioCallsUSD: Number((totalUSD * 0.10).toFixed(2)),
-        giftsUSD: Number((totalUSD * 0.05).toFixed(2)),
+        videoCallsUSD: totalUSD,
+        audioCallsUSD: 0,
+        giftsUSD: 0,
         rouletteUSD: 0,
-        totalUSD: Number(totalUSD.toFixed(2)),
+        totalUSD,
         callMinutes: minutes,
         coinsEarned,
       });
@@ -191,15 +198,15 @@ export function computeHostEarningsData(
 
       const coinsEarned = yearLogs.reduce((acc, l) => acc + (l.coinsEarned || 0), 0);
       const minutes = yearLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
-      const totalUSD = coinsEarned * femalePayoutRatioUSD;
+      const totalUSD = Number((coinsEarned * femalePayoutRatioUSD).toFixed(2));
 
       points.push({
         period: `${year}`,
-        videoCallsUSD: Number((totalUSD * 0.85).toFixed(2)),
-        audioCallsUSD: Number((totalUSD * 0.10).toFixed(2)),
-        giftsUSD: Number((totalUSD * 0.05).toFixed(2)),
+        videoCallsUSD: totalUSD,
+        audioCallsUSD: 0,
+        giftsUSD: 0,
         rouletteUSD: 0,
-        totalUSD: Number(totalUSD.toFixed(2)),
+        totalUSD,
         callMinutes: minutes,
         coinsEarned,
       });
@@ -236,19 +243,30 @@ export function computeHostMetrics(
   });
   const repeatCallerRatePercent = totalCallersCount > 0 ? Number(((repeatCallersCount / totalCallersCount) * 100).toFixed(1)) : 0;
 
-  // Session Types
-  const videoLogs = hostLogs.filter((l) => !l.isAudioOnly && !l.isRoulette);
-  const audioLogs = hostLogs.filter((l) => l.isAudioOnly);
-  const rouletteLogs = hostLogs.filter((l) => l.isRoulette);
+  // Session Types — only when logs actually carry audio/roulette flags (schema does not persist these)
+  const hasCallTypeBreakdown = hostLogs.some(
+    (l) => l.isAudioOnly === true || l.isRoulette === true
+  );
+  const videoLogs = hasCallTypeBreakdown
+    ? hostLogs.filter((l) => !l.isAudioOnly && !l.isRoulette)
+    : hostLogs;
+  const audioLogs = hasCallTypeBreakdown ? hostLogs.filter((l) => l.isAudioOnly) : [];
+  const rouletteLogs = hasCallTypeBreakdown ? hostLogs.filter((l) => l.isRoulette) : [];
 
   const videoMinutes = videoLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
   const audioMinutes = audioLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
   const rouletteMinutes = rouletteLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
 
   const totalTypeMins = (videoMinutes + audioMinutes + rouletteMinutes) || 1;
-  const videoPercent = Math.round((videoMinutes / totalTypeMins) * 100);
-  const audioPercent = Math.round((audioMinutes / totalTypeMins) * 100);
-  const roulettePercent = Math.max(0, 100 - videoPercent - audioPercent);
+  const videoPercent = hasCallTypeBreakdown
+    ? Math.round((videoMinutes / totalTypeMins) * 100)
+    : hostLogs.length > 0
+    ? 100
+    : 0;
+  const audioPercent = hasCallTypeBreakdown ? Math.round((audioMinutes / totalTypeMins) * 100) : 0;
+  const roulettePercent = hasCallTypeBreakdown
+    ? Math.max(0, 100 - videoPercent - audioPercent)
+    : 0;
 
   const videoAvgMins = videoLogs.length > 0 ? Number((videoMinutes / videoLogs.length).toFixed(1)) : 0;
   const audioAvgMins = audioLogs.length > 0 ? Number((audioMinutes / audioLogs.length).toFixed(1)) : 0;
@@ -295,7 +313,15 @@ export function computeHostMetrics(
 
   const peakWindowLabel = hostLogs.length > 0 && maxBucketIndex >= 0
     ? `${hourBuckets[maxBucketIndex].label} - ${hourBuckets[(maxBucketIndex + 1) % 8].label}`
-    : '8 PM - 1 AM';
+    : 'N/A';
+
+  // Only surface stored quality/acceptance — never invent 5.0 / 100% in the helper
+  const hasStoredRating =
+    typeof user.ratingScore === 'number' &&
+    Number.isFinite(user.ratingScore) &&
+    (user.totalReviewsCount || 0) > 0;
+  const hasStoredAcceptance =
+    typeof user.acceptanceRatePercent === 'number' && Number.isFinite(user.acceptanceRatePercent);
 
   return {
     totalCalls,
@@ -319,8 +345,9 @@ export function computeHostMetrics(
     rouletteAvgMins,
     peakHours,
     peakWindowLabel,
-    hostQualityScore: user.ratingScore || 5.0,
-    acceptanceRatePercent: user.acceptanceRatePercent || 100,
+    hostQualityScore: hasStoredRating ? user.ratingScore! : null,
+    acceptanceRatePercent: hasStoredAcceptance ? user.acceptanceRatePercent! : null,
+    hasCallTypeBreakdown,
   };
 }
 
@@ -441,7 +468,8 @@ export function computeCallerMetrics(
     totalUSDSpent,
     monthlyCoinsSpent,
     monthlyUSDSpent,
-    totalGiftsCount: 0,
+    // No gifts-sent ledger/table — omit KPI rather than hardcoding 0 as real activity
+    totalGiftsCount: null,
     friendSavingsCoins,
     friendSavingsUSD,
   };
@@ -483,7 +511,7 @@ export function computeFavoriteHosts(
         totalCoinsSpent: stat.coins,
         totalUSDSpent: Number((stat.coins * 0.01).toFixed(2)),
         callsCount: stat.count,
-        giftsSentCount: 0,
+        giftsSentCount: null,
         lastCallDate: stat.lastDate,
         isFriend: friendsList.includes(host.id),
         hourlyCoinRate: host.hourlyCoinRate || 120,

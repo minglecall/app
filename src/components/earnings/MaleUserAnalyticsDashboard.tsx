@@ -4,9 +4,7 @@ import {
   Coins,
   TrendingDown,
   Video,
-  Gift,
   Clock,
-  Send,
   AlertCircle,
   CheckCircle2,
   Building,
@@ -83,7 +81,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
     callLogs,
     friends,
     users,
-    showToast,
   } = useApp();
   const activeUser = user || currentUser;
 
@@ -102,10 +99,10 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
   // Selected Receipt for Invoice Modal
   const [selectedReceipt, setSelectedReceipt] = useState<TransactionReceipt | null>(null);
 
-  // Auto-Recharge State
-  const [autoRechargeEnabled, setAutoRechargeEnabled] = useState(true);
-  const [autoRechargeThreshold, setAutoRechargeThreshold] = useState(50);
-  const [autoRechargePackage, setAutoRechargePackage] = useState(500);
+  // Auto-Recharge is not live billing — UI only (Coming soon)
+  const [autoRechargeEnabled] = useState(false);
+  const [autoRechargeThreshold] = useState(50);
+  const [autoRechargePackage] = useState(500);
 
   // Real Caller Metrics computed dynamically from live database call logs
   const callerMetrics = useMemo(() => {
@@ -180,17 +177,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
   const chartData: SpendingDataPoint[] = useMemo(() => {
     return computeCallerSpendingData(activeUser.id, callLogs, systemSettings.coinToUSDRatio, timeframe);
   }, [activeUser.id, callLogs, systemSettings.coinToUSDRatio, timeframe]);
-
-  const handleToggleAutoRecharge = () => {
-    setAutoRechargeEnabled(!autoRechargeEnabled);
-    showToast(
-      !autoRechargeEnabled ? 'Auto-Recharge Activated ⚡' : 'Auto-Recharge Paused',
-      !autoRechargeEnabled
-        ? `Your wallet will automatically refill when coins fall below ${autoRechargeThreshold}.`
-        : 'Automatic coin top-ups have been disabled.',
-      !autoRechargeEnabled ? 'success' : 'info'
-    );
-  };
 
   return (
     <div id="male-user-analytics-dashboard" className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-6 space-y-6">
@@ -356,22 +342,23 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
           </div>
         </div>
 
-        {/* Card 3: Gifts Sent */}
+        {/* Card 3: Total Coins Spent (real call logs) — gifts KPI omitted (no gifts-sent ledger) */}
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
               <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-pink-400 font-mono text-[9px] font-bold select-all">
                 UR-0.3
               </span>
-              <span>Virtual Gifts Sent</span>
+              <span>Coins Spent on Calls</span>
             </span>
-            <Gift className="w-4 h-4 text-pink-400" />
+            <Coins className="w-4 h-4 text-pink-400" />
           </div>
           <div className="text-xl sm:text-2xl font-black text-white font-mono">
-            {callerMetrics.totalGiftsCount} <span className="text-xs text-pink-300 font-normal">gifts</span>
+            {callerMetrics.totalCoinsSpent.toLocaleString()}{' '}
+            <span className="text-xs text-pink-300 font-normal">🪙</span>
           </div>
           <div className="text-[10px] text-pink-400 font-mono">
-            {callerMetrics.totalGiftsCount > 0 ? 'Gifts sent to hosts' : 'No gifts sent yet'}
+            ~${callerMetrics.totalUSDSpent.toFixed(2)} USD from call logs
           </div>
         </div>
 
@@ -411,7 +398,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                   <span>Spending Distribution & Habits (Coins)</span>
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Visual breakdown of coins spent across Video Calls, Live Messaging, Virtual Gifts, and Moments.
+                  Coins spent on 1-on-1 calls from live call logs.
                 </p>
               </div>
 
@@ -440,7 +427,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
               </div>
             </div>
 
-            {/* Recharts Area Chart */}
+            {/* Recharts Area Chart — call spend only (no zero Chat/Gifts/Moments series) */}
             <div className="h-72 w-full pt-2">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
@@ -448,10 +435,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                     <linearGradient id="colorCallSpend" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#6366F1" stopOpacity={0.4} />
                       <stop offset="95%" stopColor="#6366F1" stopOpacity={0.0} />
-                    </linearGradient>
-                    <linearGradient id="colorGiftSpend" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#EC4899" stopOpacity={0.4} />
-                      <stop offset="95%" stopColor="#EC4899" stopOpacity={0.0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
@@ -470,35 +453,17 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                   <Legend
                     wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }}
                     formatter={(val) => (
-                      <span className="text-slate-300 font-mono text-xs capitalize">{val.replace('Coins', '')}</span>
+                      <span className="text-slate-300 font-mono text-xs capitalize">{val}</span>
                     )}
                   />
                   <Area
                     type="monotone"
                     dataKey="videoCallsCoins"
-                    name="1-on-1 Video Calls"
+                    name="1-on-1 Call Spend"
                     stroke="#6366F1"
                     strokeWidth={2}
                     fillOpacity={1}
                     fill="url(#colorCallSpend)"
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="giftsCoins"
-                    name="Virtual Gifts & Tips"
-                    stroke="#EC4899"
-                    strokeWidth={2}
-                    fillOpacity={1}
-                    fill="url(#colorGiftSpend)"
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="chatCoins"
-                    name="Chat & Translation"
-                    stroke="#10B981"
-                    strokeWidth={2}
-                    fillOpacity={0.2}
-                    fill="#10B981"
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -508,8 +473,8 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
           {/* Auto-Recharge Control & Wallet Ledger Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
-            {/* Auto-Recharge Widget */}
-            <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
+            {/* Auto-Recharge Widget — Coming soon (local UI only; no payment gateway) */}
+            <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl opacity-80">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
                   <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
@@ -520,30 +485,22 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                     Auto-Recharge
                   </h3>
                 </div>
-                <button
-                  onClick={handleToggleAutoRecharge}
-                  className={`px-3 py-1 rounded-full text-xs font-mono font-bold transition-all cursor-pointer ${
-                    autoRechargeEnabled
-                      ? 'bg-emerald-500 text-slate-950'
-                      : 'bg-slate-800 text-slate-400'
-                  }`}
-                >
-                  {autoRechargeEnabled ? 'ACTIVE' : 'PAUSED'}
-                </button>
+                <span className="px-3 py-1 rounded-full text-xs font-mono font-bold bg-slate-800 text-amber-300 border border-amber-500/30">
+                  Coming soon
+                </span>
               </div>
 
               <p className="text-xs text-slate-400">
-                Never get disconnected mid-call. When your coin balance drops below threshold, your wallet auto-refills seamlessly.
+                Automatic wallet top-ups are not available yet. Coin purchases will require a real payment integration when this launches.
               </p>
 
-              <div className="space-y-3 font-mono text-xs">
+              <div className="space-y-3 font-mono text-xs pointer-events-none">
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">Trigger Threshold</label>
                   <select
                     value={autoRechargeThreshold}
-                    onChange={(e) => setAutoRechargeThreshold(Number(e.target.value))}
-                    disabled={!autoRechargeEnabled}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white text-xs font-mono"
+                    disabled
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-500 text-xs font-mono"
                   >
                     <option value={20}>When below 20 coins (~2 mins)</option>
                     <option value={50}>When below 50 coins (~5 mins)</option>
@@ -555,24 +512,23 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                   <label className="block text-[11px] text-slate-400 mb-1">Recharge Package</label>
                   <select
                     value={autoRechargePackage}
-                    onChange={(e) => setAutoRechargePackage(Number(e.target.value))}
-                    disabled={!autoRechargeEnabled}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white text-xs font-mono"
+                    disabled
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-500 text-xs font-mono"
                   >
-                    <option value={500}>500 Coins ($4.99 USD)</option>
-                    <option value={1200}>1,200 Coins + 200 Bonus ($9.99 USD)</option>
-                    <option value={3000}>3,000 Coins + 600 Bonus ($24.99 USD)</option>
+                    <option value={500}>500 Coins</option>
+                    <option value={1200}>1,200 Coins</option>
+                    <option value={3000}>3,000 Coins</option>
                   </select>
                 </div>
 
-                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-400 space-y-1">
+                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-500 space-y-1">
                   <div className="flex justify-between">
-                    <span>Payment Method:</span>
-                    <span className="text-white font-bold">Apple Pay / Visa •••• 4242</span>
+                    <span>Status:</span>
+                    <span className="text-amber-400 font-bold">Not live · no payment method linked</span>
                   </div>
                   <div className="flex justify-between">
-                    <span>Protection:</span>
-                    <span className="text-emerald-400">Cancel anytime • Instant receipt</span>
+                    <span>Billing:</span>
+                    <span>{autoRechargeEnabled ? 'Enabled' : 'Disabled'} (preview only)</span>
                   </div>
                 </div>
               </div>
@@ -847,8 +803,8 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                         <strong className="text-amber-400">{host.totalCoinsSpent} 🪙</strong>
                       </div>
                       <div className="flex justify-between text-slate-400">
-                        <span>Gifts Sent:</span>
-                        <strong className="text-pink-400">{host.giftsSentCount} gifts</strong>
+                        <span>Calls:</span>
+                        <strong className="text-white">{host.callsCount}</strong>
                       </div>
                     </div>
                   </div>

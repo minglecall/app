@@ -2011,31 +2011,51 @@ export async function fetchCallLogsFromSupabase(): Promise<any[] | null> {
       .from('call_logs')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(100);
+      .limit(2000);
 
     if (error) {
       console.warn('Supabase fetchCallLogs error:', error.message);
       return null;
     }
 
-    return (data || []).map((row: any) => ({
-      id: row.id,
-      callerId: row.caller_id,
-      callerName: row.caller_id,
-      callerAvatar: '',
-      callerCountry: '',
-      receiverId: row.receiver_id,
-      receiverName: row.receiver_id,
-      receiverAvatar: '',
-      startTime: new Date(row.start_time).getTime(),
-      endTime: row.end_time ? new Date(row.end_time).getTime() : undefined,
-      durationSeconds: Number(row.duration_seconds || 0),
-      coinsSpent: Number(row.coins_spent || 0),
-      coinsEarned: Number(row.coins_earned || 0),
-      wasFriendCall: Boolean(row.was_friend_call),
-      status: row.status || 'completed',
-      timestamp: row.start_time ? new Date(row.start_time).toLocaleString() : new Date().toLocaleString(),
-    }));
+    return (data || []).map((row: any) => {
+      const startRaw = row.start_time || row.started_at || row.created_at;
+      const endRaw = row.end_time || row.ended_at;
+      const callerName =
+        row.caller_name && String(row.caller_name).trim()
+          ? String(row.caller_name).trim()
+          : '';
+      const hostName =
+        (row.host_name && String(row.host_name).trim()) ||
+        (row.receiver_name && String(row.receiver_name).trim()) ||
+        '';
+      const receiverId = row.receiver_id || row.host_id || '';
+
+      return {
+        id: row.id,
+        callerId: row.caller_id,
+        callerName: callerName || row.caller_id || 'Caller',
+        callerAvatar: '',
+        callerCountry: '',
+        receiverId,
+        receiverName: hostName || receiverId || 'Host',
+        receiverAvatar: '',
+        hostId: row.host_id || receiverId,
+        hostName: hostName || undefined,
+        startTime: startRaw ? new Date(startRaw).getTime() : Date.now(),
+        endTime: endRaw ? new Date(endRaw).getTime() : undefined,
+        durationSeconds: Number(row.duration_seconds || 0),
+        coinsSpent: Number(row.coins_spent || 0),
+        coinsEarned: Number(row.coins_earned || 0),
+        teamLeaderEarnedCoins: Number(row.team_leader_earned_coins || 0),
+        teamLeaderId: row.team_leader_id || undefined,
+        wasFriendCall: Boolean(row.was_friend_call),
+        status: row.status || row.end_reason || 'completed',
+        timestamp: startRaw
+          ? new Date(startRaw).toLocaleString()
+          : new Date().toLocaleString(),
+      };
+    });
   } catch (err) {
     console.warn('Supabase fetchCallLogs exception:', err);
     return null;
@@ -2049,6 +2069,9 @@ export async function insertCallLogToSupabase(log: any): Promise<boolean> {
       id: log.id,
       caller_id: log.callerId,
       receiver_id: log.receiverId,
+      host_id: log.hostId || log.receiverId || null,
+      caller_name: log.callerName || null,
+      host_name: log.hostName || log.receiverName || null,
       start_time: new Date(log.startTime || Date.now()).toISOString(),
       end_time: log.endTime ? new Date(log.endTime).toISOString() : null,
       duration_seconds: log.durationSeconds || 0,
@@ -2056,6 +2079,8 @@ export async function insertCallLogToSupabase(log: any): Promise<boolean> {
       coins_earned: log.coinsEarned || 0,
       was_friend_call: Boolean(log.wasFriendCall),
       status: log.status || 'completed',
+      team_leader_id: log.teamLeaderId || null,
+      team_leader_earned_coins: log.teamLeaderEarnedCoins || 0,
     };
 
     const { error } = await supabase.from('call_logs').upsert(payload as any, { onConflict: 'id' });
