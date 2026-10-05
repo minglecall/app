@@ -15,6 +15,7 @@ import {
   isSupabaseServiceRoleConfigured,
   backfillMissingAuthIdsAdmin,
   authenticateUserWithPasswordAdmin,
+  updateSupabaseRuntimeConfig,
 } from '../supabaseAdmin';
 import { hardDeleteUserCompletely, cleanupOrphanAuthUsersAdmin } from '../userHardDelete';
 import { isR2Configured, updateR2RuntimeConfig } from '../r2Storage';
@@ -488,16 +489,43 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
   // POST Update Infrastructure & Performance Parameters
   router.post('/infra-config', requireAdmin, (req, res) => {
     try {
-      const updates = req.body;
+      const updates = req.body || {};
       Object.assign(infraConfig, updates);
 
-      if (updates.supabaseUrl !== undefined) process.env.VITE_SUPABASE_URL = updates.supabaseUrl;
-      if (updates.supabaseAnonKey !== undefined) process.env.VITE_SUPABASE_ANON_KEY = updates.supabaseAnonKey;
+      const nextUrl =
+        updates.supabaseUrl !== undefined ? String(updates.supabaseUrl).trim() : undefined;
+      const nextAnon =
+        updates.supabaseAnonKey !== undefined &&
+        !String(updates.supabaseAnonKey).startsWith('••••')
+          ? String(updates.supabaseAnonKey).trim()
+          : undefined;
+
+      if (nextUrl !== undefined) {
+        process.env.VITE_SUPABASE_URL = nextUrl;
+        process.env.SUPABASE_URL = nextUrl;
+        infraConfig.supabaseUrl = nextUrl;
+      }
+      if (nextAnon !== undefined) {
+        process.env.VITE_SUPABASE_ANON_KEY = nextAnon;
+        process.env.SUPABASE_ANON_KEY = nextAnon;
+        infraConfig.supabaseAnonKey = nextAnon;
+      }
       if (updates.r2AccountId !== undefined) process.env.R2_ACCOUNT_ID = updates.r2AccountId;
       if (updates.r2AccessKeyId !== undefined) process.env.R2_ACCESS_KEY_ID = updates.r2AccessKeyId;
-      if (updates.r2SecretAccessKey !== undefined) process.env.R2_SECRET_ACCESS_KEY = updates.r2SecretAccessKey;
+      if (
+        updates.r2SecretAccessKey !== undefined &&
+        !String(updates.r2SecretAccessKey).startsWith('••••')
+      ) {
+        process.env.R2_SECRET_ACCESS_KEY = updates.r2SecretAccessKey;
+      }
       if (updates.r2BucketName !== undefined) process.env.R2_BUCKET_NAME = updates.r2BucketName;
       if (updates.r2PublicUrl !== undefined) process.env.R2_PUBLIC_URL = updates.r2PublicUrl;
+
+      // Keep admin Supabase client pointed at the URL the admin just saved.
+      // Service role key stays from env (never accept service_role from the browser).
+      if (nextUrl !== undefined) {
+        updateSupabaseRuntimeConfig(nextUrl, undefined);
+      }
 
       // Dynamically update R2 active runtime config
       updateR2RuntimeConfig({
@@ -510,10 +538,12 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
 
       return res.json({
         success: true,
-        message: 'Infrastructure parameters updated successfully.',
+        message:
+          'Infrastructure parameters updated for this server instance. On Vercel, also set VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY in Project Settings → Environment Variables and redeploy for a permanent client build.',
         config: {
           r2Configured: isR2Configured(),
           supabaseConfigured: Boolean(infraConfig.supabaseUrl),
+          vercel: Boolean(process.env.VERCEL),
         },
       });
     } catch (err: any) {

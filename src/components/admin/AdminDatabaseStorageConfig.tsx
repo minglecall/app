@@ -31,7 +31,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { supabase, testSupabaseConnection, isSupabaseConfigured } from '../../lib/supabase';
+import { supabase, testSupabaseConnection, isSupabaseConfigured, reconfigureSupabaseClient } from '../../lib/supabase';
 import { getSupabaseProfilesStats, pushAllTaxonomiesAndSettingsToSupabase } from '../../services/supabaseService';
 import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { InfraSystemConfig } from '../../types';
@@ -381,14 +381,58 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
       try {
         data = JSON.parse(text);
       } catch {
-        data = { message: text.substring(0, 150) };
+        data = { message: text.substring(0, 200) };
       }
-      if (res.ok) {
-        showToast('Infrastructure Updated ⚡', 'Database & storage parameters saved successfully!', 'success');
+
+      const looksLikeVercel404 =
+        res.status === 404 ||
+        /NOT_FOUND/i.test(String(data.message || '')) ||
+        /page could not be found/i.test(String(data.message || ''));
+
+      const canReconfigureClient =
+        Boolean(config.supabaseUrl?.trim()) &&
+        Boolean(config.supabaseAnonKey?.trim()) &&
+        !String(config.supabaseAnonKey).startsWith('••••');
+
+      if (canReconfigureClient) {
+        const clientRes = reconfigureSupabaseClient(config.supabaseUrl, config.supabaseAnonKey);
+        if (!clientRes.success) {
+          showToast('Client Config Failed', clientRes.error || 'Could not apply Supabase client settings.', 'error');
+          return;
+        }
+      }
+
+      if (res.ok && data.success !== false) {
+        showToast(
+          'Infrastructure Updated ⚡',
+          data.message ||
+            'Database & storage parameters saved. Also set VITE_SUPABASE_* / SUPABASE_SERVICE_ROLE_KEY in Vercel Environment Variables and redeploy for a permanent build.',
+          'success'
+        );
         fetchConfig();
-      } else {
-        showToast('Save Failed', data.error || data.message || 'Could not update infrastructure settings.', 'error');
+        await checkProfilesStatus();
+        return;
       }
+
+      if (looksLikeVercel404) {
+        if (canReconfigureClient) {
+          showToast(
+            'Client Updated (API Missing)',
+            'Browser Supabase URL/anon key applied locally. Push latest code (api/index.ts + vercel.json), set Vercel env vars, and Redeploy so /api works. Service-role APIs need SUPABASE_SERVICE_ROLE_KEY on Vercel.',
+            'warning'
+          );
+          await checkProfilesStatus();
+        } else {
+          showToast(
+            'API Not Found on Vercel',
+            'POST /api/admin/infra-config returned 404. Push api/index.ts + vercel.json, set VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY in Vercel, then Redeploy.',
+            'error'
+          );
+        }
+        return;
+      }
+
+      showToast('Save Failed', data.error || data.message || 'Could not update infrastructure settings.', 'error');
     } catch (e: any) {
       showToast('Network Error', e.message || 'Failed to communicate with configuration backend.', 'error');
     } finally {

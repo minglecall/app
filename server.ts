@@ -107,10 +107,13 @@ interface CallState {
   billedMinutes?: number;
 }
 
-async function startServer() {
+/** Vercel Fluid/serverless: do not listen(); export the Express app instead. */
+const IS_VERCEL = Boolean(process.env.VERCEL);
+
+async function startServer(): Promise<express.Express> {
   const app = express();
   const httpServer = createServer(app);
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '25mb' }));
   app.use(express.text({ type: ['text/plain', 'text/*', 'application/json'] }));
@@ -3725,26 +3728,42 @@ async function startServer() {
   });
 
 
-  // Vite middleware for development vs static serve for production
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+  // Vite / static SPA: only when running as a long-lived Node process (not Vercel CDN).
+  if (!IS_VERCEL) {
+    if (process.env.NODE_ENV !== 'production') {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
+
+    httpServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 LiveCall Express + Real-Time WebSockets Server running on http://0.0.0.0:${PORT}`);
     });
-    app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    console.log('🚀 LiveCall Express API ready for Vercel serverless (WebSocket /ws is not available on Vercel).');
   }
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 LiveCall Express + Real-Time WebSockets Server running on http://0.0.0.0:${PORT}`);
-  });
+  return app;
 }
 
-startServer().catch((err) => {
+const appPromise = startServer().catch((err) => {
   console.error('Fatal error starting LiveCall server:', err);
+  throw err;
 });
+
+/**
+ * Vercel / serverless entry: await warm Express app, then handle the request.
+ * Local `npm run dev` / `npm start` still use httpServer.listen above.
+ */
+export default async function handler(req: any, res: any) {
+  const app = await appPromise;
+  return app(req, res);
+}
