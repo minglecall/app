@@ -50,7 +50,7 @@ export function getR2Env() {
     accountId: clean(process.env.R2_ACCOUNT_ID || ''),
     accessKeyId: clean(process.env.R2_ACCESS_KEY_ID || ''),
     secretAccessKey: clean(process.env.R2_SECRET_ACCESS_KEY || ''),
-    bucketName: clean(process.env.R2_BUCKET_NAME || 'livecall-media-storage') || 'livecall-media-storage',
+    bucketName: clean(process.env.R2_BUCKET_NAME || 'datingappbucket') || 'datingappbucket',
     publicUrl: clean(process.env.R2_PUBLIC_URL || '').replace(/\/$/, ''),
   };
 }
