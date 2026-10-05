@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
+// NOTE: do not static-import `vite` — it breaks Vercel serverless function boot.
 import { generateSixDigitOtp, sendOtpEmail, isSmtpConfigured, updateSmtpRuntimeConfig, getSmtpConfig, getShowOtpInForm, getRawSmtpConfigForAdmin } from './server/emailService';
 import {
   upsertProfileAdmin,
@@ -1183,10 +1183,14 @@ async function startServer(): Promise<express.Express> {
     }
   }, 20000);
 
-  // WebSocket Server Setup attached to path /ws
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  // WebSocket Server Setup attached to path /ws (long-lived Node only).
+  // On Vercel, skip real WS — serverless cannot hold socket connections.
+  const wss: WebSocketServer | { clients: Set<WebSocket>; on: (...args: any[]) => void } = IS_VERCEL
+    ? { clients: new Set(), on: () => {} }
+    : new WebSocketServer({ server: httpServer, path: '/ws' });
 
-  wss.on('connection', (ws: WebSocket) => {
+  if (!IS_VERCEL) {
+  (wss as WebSocketServer).on('connection', (ws: WebSocket) => {
     let authenticatedUserId: string | null = null;
     const socketId = `sock_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
@@ -1810,11 +1814,14 @@ async function startServer(): Promise<express.Express> {
       authenticatedUserId = null;
     });
   });
+  } // end if (!IS_VERCEL) WebSocket connection handler
 
   // Background Stale Presence + Call Reaper (runs every 4 seconds)
   // - Marks offline users with no socket / stale heartbeat
   // - Expires abandoned ringing calls so activeCalls cannot leak
   // - Prunes dead WebSocket entries
+  // Skip heavy reaper timers on Vercel (ephemeral instances; no WS peers).
+  if (!IS_VERCEL) {
   setInterval(async () => {
     try {
       const now = Date.now();
@@ -1893,6 +1900,7 @@ async function startServer(): Promise<express.Express> {
       // Keep reaper running
     }
   }, 4000);
+  } // end if (!IS_VERCEL) presence/call reaper
 
   // LiveKit dynamic configuration state (shared with modular livekit routes)
   const livekitConfig = {
@@ -3731,6 +3739,7 @@ async function startServer(): Promise<express.Express> {
   // Vite / static SPA: only when running as a long-lived Node process (not Vercel CDN).
   if (!IS_VERCEL) {
     if (process.env.NODE_ENV !== 'production') {
+      const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: 'spa',
@@ -3754,16 +3763,56 @@ async function startServer(): Promise<express.Express> {
   return app;
 }
 
-const appPromise = startServer().catch((err) => {
-  console.error('Fatal error starting LiveCall server:', err);
-  throw err;
-});
+let cachedApp: express.Express | null = null;
+let bootPromise: Promise<express.Express> | null = null;
+
+async function getApp(): Promise<express.Express> {
+  if (cachedApp) return cachedApp;
+  if (!bootPromise) {
+    bootPromise = startServer()
+      .then((app) => {
+        cachedApp = app;
+        return app;
+      })
+      .catch((err) => {
+        bootPromise = null;
+        console.error('Fatal error starting LiveCall server:', err);
+        throw err;
+      });
+  }
+  return bootPromise;
+}
+
+// Local Node: start immediately so listen() binds.
+if (!IS_VERCEL) {
+  getApp().catch((err) => {
+    console.error('Fatal error starting LiveCall server:', err);
+    process.exit(1);
+  });
+}
 
 /**
- * Vercel / serverless entry: await warm Express app, then handle the request.
- * Local `npm run dev` / `npm start` still use httpServer.listen above.
+ * Vercel serverless entry. Export a request listener (not only Express)
+ * so boot failures return JSON instead of FUNCTION_INVOCATION_FAILED with no body.
  */
 export default async function handler(req: any, res: any) {
-  const app = await appPromise;
-  return app(req, res);
+  try {
+    const app = await getApp();
+    return app(req, res);
+  } catch (err: any) {
+    console.error('[Vercel API] boot/handle failed:', err);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          success: false,
+          error: {
+            message: err?.message || 'API function failed to start',
+            code: 'FUNCTION_BOOT_FAILED',
+          },
+        })
+      );
+    }
+  }
 }

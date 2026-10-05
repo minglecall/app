@@ -356,7 +356,27 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
         try {
           const data = JSON.parse(text);
           if (data && data.config) {
-            setConfig((prev) => ({ ...prev, ...data.config }));
+            setConfig((prev) => {
+              const next = { ...prev, ...data.config };
+              // Never replace a real typed secret with the server mask.
+              if (
+                typeof data.config.supabaseAnonKey === 'string' &&
+                String(data.config.supabaseAnonKey).startsWith('••••') &&
+                prev.supabaseAnonKey &&
+                !String(prev.supabaseAnonKey).startsWith('••••')
+              ) {
+                next.supabaseAnonKey = prev.supabaseAnonKey;
+              }
+              if (
+                typeof data.config.r2SecretAccessKey === 'string' &&
+                String(data.config.r2SecretAccessKey).startsWith('••••') &&
+                prev.r2SecretAccessKey &&
+                !String(prev.r2SecretAccessKey).startsWith('••••')
+              ) {
+                next.r2SecretAccessKey = prev.r2SecretAccessKey;
+              }
+              return next;
+            });
           }
         } catch {
           // Ignore if non-JSON received
@@ -371,10 +391,21 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     if (e) e.preventDefault();
     setIsSaving(true);
     try {
+      const payload = {
+        ...config,
+        // Do not send masked placeholders back to the API.
+        supabaseAnonKey: String(config.supabaseAnonKey || '').startsWith('••••')
+          ? undefined
+          : config.supabaseAnonKey,
+        r2SecretAccessKey: String(config.r2SecretAccessKey || '').startsWith('••••')
+          ? undefined
+          : config.r2SecretAccessKey,
+      };
+
       const res = await authFetch('/api/admin/infra-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
+        body: JSON.stringify(payload),
       });
       const text = await res.text();
       let data: any = {};
@@ -384,9 +415,12 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
         data = { message: text.substring(0, 200) };
       }
 
-      const looksLikeVercel404 =
+      const looksLikeHostFailure =
         res.status === 404 ||
-        /NOT_FOUND/i.test(String(data.message || '')) ||
+        res.status >= 500 ||
+        /NOT_FOUND|FUNCTION_INVOCATION_FAILED|FUNCTION_BOOT_FAILED/i.test(
+          String(data.message || data.error?.message || data.error || '')
+        ) ||
         /page could not be found/i.test(String(data.message || ''));
 
       const canReconfigureClient =
@@ -414,25 +448,31 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
         return;
       }
 
-      if (looksLikeVercel404) {
+      if (looksLikeHostFailure) {
         if (canReconfigureClient) {
           showToast(
-            'Client Updated (API Missing)',
-            'Browser Supabase URL/anon key applied locally. Push latest code (api/index.ts + vercel.json), set Vercel env vars, and Redeploy so /api works. Service-role APIs need SUPABASE_SERVICE_ROLE_KEY on Vercel.',
+            'Client Updated (API Error)',
+            'Browser Supabase URL/anon key applied locally. Set the same values plus SUPABASE_SERVICE_ROLE_KEY in Vercel → Settings → Environment Variables, then Redeploy so /api works reliably.',
             'warning'
           );
           await checkProfilesStatus();
         } else {
           showToast(
-            'API Not Found on Vercel',
-            'POST /api/admin/infra-config returned 404. Push api/index.ts + vercel.json, set VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY in Vercel, then Redeploy.',
+            'API Failed on Vercel',
+            data.error?.message ||
+              data.message ||
+              'Paste a fresh anon key (not ••••••••), set Vercel env vars (VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY), and Redeploy.',
             'error'
           );
         }
         return;
       }
 
-      showToast('Save Failed', data.error || data.message || 'Could not update infrastructure settings.', 'error');
+      showToast(
+        'Save Failed',
+        data.error?.message || data.error || data.message || 'Could not update infrastructure settings.',
+        'error'
+      );
     } catch (e: any) {
       showToast('Network Error', e.message || 'Failed to communicate with configuration backend.', 'error');
     } finally {
