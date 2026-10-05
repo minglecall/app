@@ -1900,30 +1900,6 @@ EXCEPTION WHEN duplicate_object THEN
   NULL;
 END $$;
 
--- Expand settlement_line_items.component for share true-up
-DO $$
-BEGIN
-  ALTER TABLE public.settlement_line_items DROP CONSTRAINT IF EXISTS settlement_line_items_component_check;
-EXCEPTION WHEN undefined_object THEN
-  NULL;
-END $$;
-ALTER TABLE public.settlement_line_items DROP CONSTRAINT IF EXISTS settlement_line_items_component_check;
-DO $$
-BEGIN
-  ALTER TABLE public.settlement_line_items
-    ADD CONSTRAINT settlement_line_items_component_check
-    CHECK (component IN (
-      'call_earnings',
-      'gift_earnings',
-      'target_bonus',
-      'target_share_trueup',
-      'tl_commission',
-      'other'
-    ));
-EXCEPTION WHEN duplicate_object THEN
-  NULL;
-END $$;
-
 -- One admin remittance unit: TL bundle (TL commission + managed host salaries) or direct host
 CREATE TABLE IF NOT EXISTS public.settlement_batches (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1996,6 +1972,32 @@ CREATE TABLE IF NOT EXISTS public.settlement_line_items (
       amount_coins >= 0 AND amount_usd >= 0
     )
 );
+
+-- Widen component on databases created before target_share_trueup.
+-- CREATE TABLE above already includes the full list; this replaces an older check.
+DO $$
+BEGIN
+  IF to_regclass('public.settlement_line_items') IS NULL THEN
+    RETURN;
+  END IF;
+
+  ALTER TABLE public.settlement_line_items
+    DROP CONSTRAINT IF EXISTS settlement_line_items_component_check;
+
+  ALTER TABLE public.settlement_line_items
+    ADD CONSTRAINT settlement_line_items_component_check
+    CHECK (component IN (
+      'call_earnings',
+      'gift_earnings',
+      'target_bonus',
+      'target_share_trueup',
+      'tl_commission',
+      'other'
+    ));
+EXCEPTION
+  WHEN duplicate_object THEN
+    NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_settlement_line_items_batch
   ON public.settlement_line_items (batch_id);
