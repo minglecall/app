@@ -2953,6 +2953,15 @@ AS $$
   );
 $$;
 
+-- API roles need table privileges (RLS still applies for anon/authenticated).
+-- Fresh projects that omit these grants fail with: permission denied for table profiles
+GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO postgres, anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, anon, authenticated, service_role;
+
 REVOKE SELECT (password_hash) ON public.profiles FROM anon, authenticated;
 
 DROP POLICY IF EXISTS "public select profiles" ON public.profiles;
