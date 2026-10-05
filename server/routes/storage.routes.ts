@@ -347,12 +347,26 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   router.post('/test-connection', requireAdmin, async (req, res) => {
     try {
       const { accountId, accessKeyId, secretAccessKey, bucketName, publicUrl } = req.body || {};
-      const overrideConfig = (accountId || accessKeyId || secretAccessKey || bucketName)
-        ? { accountId, accessKeyId, secretAccessKey, bucketName, publicUrl }
+      const isMasked = (v: unknown) =>
+        typeof v === 'string' && (v.startsWith('••••') || v.includes('…'));
+      const hasRealOverride =
+        (accountId && !isMasked(accountId)) ||
+        (accessKeyId && !isMasked(accessKeyId)) ||
+        (secretAccessKey && !isMasked(secretAccessKey)) ||
+        Boolean(bucketName);
+
+      const overrideConfig = hasRealOverride
+        ? {
+            accountId: isMasked(accountId) ? undefined : accountId,
+            accessKeyId: isMasked(accessKeyId) ? undefined : accessKeyId,
+            secretAccessKey: isMasked(secretAccessKey) ? undefined : secretAccessKey,
+            bucketName,
+            publicUrl,
+          }
         : undefined;
 
       const result = await testR2Connectivity(overrideConfig);
-      return res.json(result);
+      return res.json({ ...result, source: overrideConfig ? 'override' : 'environment' });
     } catch (err: any) {
       return res.status(500).json({
         success: false,

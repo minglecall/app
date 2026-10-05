@@ -438,9 +438,9 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
 
       if (res.ok && data.success !== false) {
         showToast(
-          'Infrastructure Updated ⚡',
+          'Infrastructure Status ⚡',
           data.message ||
-            'Database & storage parameters saved. Also set VITE_SUPABASE_* / SUPABASE_SERVICE_ROLE_KEY in Vercel Environment Variables and redeploy for a permanent build.',
+            'Using server environment credentials. Set VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Vercel Environment Variables (not in this form).',
           'success'
         );
         fetchConfig();
@@ -541,28 +541,40 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     setIsTestingR2(true);
     setR2ConnResult(null);
     try {
+      // Prefer server env credentials. Only send body overrides when the admin typed real values
+      // (never send masked •••• placeholders — that breaks R2 auth).
+      const override: Record<string, string> = {};
+      if (config.r2AccountId?.trim() && !String(config.r2AccountId).includes('…') && !String(config.r2AccountId).startsWith('••••')) {
+        override.accountId = config.r2AccountId.trim();
+      }
+      if (config.r2AccessKeyId?.trim() && !String(config.r2AccessKeyId).includes('…') && !String(config.r2AccessKeyId).startsWith('••••')) {
+        override.accessKeyId = config.r2AccessKeyId.trim();
+      }
+      if (config.r2SecretAccessKey?.trim() && !String(config.r2SecretAccessKey).startsWith('••••')) {
+        override.secretAccessKey = config.r2SecretAccessKey.trim();
+      }
+      if (config.r2BucketName?.trim()) override.bucketName = config.r2BucketName.trim();
+      if (config.r2PublicUrl?.trim()) override.publicUrl = config.r2PublicUrl.trim();
+
       const res = await authFetch('/api/storage/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountId: config.r2AccountId,
-          accessKeyId: config.r2AccessKeyId,
-          secretAccessKey: config.r2SecretAccessKey,
-          bucketName: config.r2BucketName,
-          publicUrl: config.r2PublicUrl,
-        }),
+        body: JSON.stringify(override),
       });
 
       const text = await res.text();
       let data: any = null;
       try {
         data = JSON.parse(text);
-      } catch (jsonErr) {
+      } catch {
         data = {
           success: false,
-          message: res.status === 404
-            ? 'Endpoint /api/storage/test-connection was not found (404). Please ensure the backend dev server is running.'
-            : `Server returned non-JSON response (${res.status}): ${text.slice(0, 180)}`,
+          message:
+            res.status === 404
+              ? 'Endpoint /api/storage/test-connection was not found (404). Redeploy with the latest api/storage routes, and set R2_* in Vercel Environment Variables.'
+              : res.status >= 500
+                ? `R2 API failed (${res.status}). Set R2_* in Vercel Environment Variables and check Function logs.`
+                : `Server returned non-JSON response (${res.status}): ${text.slice(0, 180)}`,
         };
       }
 
@@ -979,8 +991,18 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
                 <span>Supabase PostgreSQL Client & Connection Settings</span>
               </h3>
               <p className="text-xs text-slate-400 mt-1">
-                Configure your Supabase Project REST Endpoint and Anonymous Key to enable direct live PostgreSQL synchronization.
+                Credentials are loaded from the <span className="text-emerald-300 font-semibold">server environment</span>
+                {' '}(<code className="text-slate-300">VITE_SUPABASE_*</code> /{' '}
+                <code className="text-slate-300">SUPABASE_SERVICE_ROLE_KEY</code>). On Vercel, set them in Project Settings →
+                Environment Variables — do not paste secrets into this form.
               </p>
+              {(config as any).supabaseConfigured && (
+                <div className="mt-3 text-[11px] font-mono text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2">
+                  Supabase configured from environment
+                  {config.supabaseUrl ? ` · ${config.supabaseUrl}` : ''}.
+                  Anon / service-role keys stay on the server.
+                </div>
+              )}
             </div>
 
             <div className="space-y-4">
@@ -1245,8 +1267,18 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
                 <span>Cloudflare R2 Presigned Direct Storage Credentials</span>
               </h3>
               <p className="text-xs text-slate-400 mt-1">
-                Zero egress fees with S3-compatible presigned URLs. Files are uploaded directly from client browsers to Cloudflare R2 without burdening the application database.
+                R2 keys come from server env (<code className="text-slate-300">R2_ACCOUNT_ID</code>,{' '}
+                <code className="text-slate-300">R2_ACCESS_KEY_ID</code>,{' '}
+                <code className="text-slate-300">R2_SECRET_ACCESS_KEY</code>,{' '}
+                <code className="text-slate-300">R2_BUCKET_NAME</code>). On Vercel set them in Environment Variables.
+                Test Connection uses those server values — you do not need to paste secrets into this form.
               </p>
+              {config.r2Configured && (
+                <div className="mt-3 text-[11px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/30 rounded-lg px-3 py-2">
+                  R2 configured from environment
+                  {config.r2BucketName ? ` · bucket ${config.r2BucketName}` : ''}.
+                </div>
+              )}
               {storageRuntimeStatus?.mockStorageActive && (
                 <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
