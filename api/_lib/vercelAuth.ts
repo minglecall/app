@@ -45,12 +45,13 @@ export function getSupabaseEnv() {
 }
 
 export function getR2Env() {
+  const clean = (v: string) => v.trim().replace(/^["']|["']$/g, '');
   return {
-    accountId: (process.env.R2_ACCOUNT_ID || '').trim(),
-    accessKeyId: (process.env.R2_ACCESS_KEY_ID || '').trim(),
-    secretAccessKey: (process.env.R2_SECRET_ACCESS_KEY || '').trim(),
-    bucketName: (process.env.R2_BUCKET_NAME || 'livecall-media-storage').trim(),
-    publicUrl: (process.env.R2_PUBLIC_URL || '').trim().replace(/\/$/, ''),
+    accountId: clean(process.env.R2_ACCOUNT_ID || ''),
+    accessKeyId: clean(process.env.R2_ACCESS_KEY_ID || ''),
+    secretAccessKey: clean(process.env.R2_SECRET_ACCESS_KEY || ''),
+    bucketName: clean(process.env.R2_BUCKET_NAME || 'livecall-media-storage') || 'livecall-media-storage',
+    publicUrl: clean(process.env.R2_PUBLIC_URL || '').replace(/\/$/, ''),
   };
 }
 

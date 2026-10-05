@@ -541,25 +541,11 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     setIsTestingR2(true);
     setR2ConnResult(null);
     try {
-      // Prefer server env credentials. Only send body overrides when the admin typed real values
-      // (never send masked •••• placeholders — that breaks R2 auth).
-      const override: Record<string, string> = {};
-      if (config.r2AccountId?.trim() && !String(config.r2AccountId).includes('…') && !String(config.r2AccountId).startsWith('••••')) {
-        override.accountId = config.r2AccountId.trim();
-      }
-      if (config.r2AccessKeyId?.trim() && !String(config.r2AccessKeyId).includes('…') && !String(config.r2AccessKeyId).startsWith('••••')) {
-        override.accessKeyId = config.r2AccessKeyId.trim();
-      }
-      if (config.r2SecretAccessKey?.trim() && !String(config.r2SecretAccessKey).startsWith('••••')) {
-        override.secretAccessKey = config.r2SecretAccessKey.trim();
-      }
-      if (config.r2BucketName?.trim()) override.bucketName = config.r2BucketName.trim();
-      if (config.r2PublicUrl?.trim()) override.publicUrl = config.r2PublicUrl.trim();
-
-      const res = await authFetch('/api/storage/test-connection', {
+      // Always use server/Vercel env — do not send form secrets (masked or typed).
+      const res = await authFetch('/api/r2-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(override),
+        body: '{}',
       });
 
       const text = await res.text();
@@ -567,20 +553,24 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
       try {
         data = JSON.parse(text);
       } catch {
+        const snippet = text.replace(/\s+/g, ' ').slice(0, 220);
         data = {
           success: false,
           message:
             res.status === 404
-              ? 'Endpoint /api/storage/test-connection was not found (404). Redeploy with the latest api/storage routes, and set R2_* in Vercel Environment Variables.'
-              : res.status >= 500
-                ? `R2 API failed (${res.status}). Set R2_* in Vercel Environment Variables and check Function logs.`
-                : `Server returned non-JSON response (${res.status}): ${text.slice(0, 180)}`,
+              ? 'R2 test route missing (404). Redeploy the latest commit that includes /api/r2-test.'
+              : `R2 API returned non-JSON (${res.status}). ${snippet || 'Check Vercel Function logs for api/r2-test.'}`,
         };
+      }
+
+      // Auth/config errors may be HTTP 503 with JSON body
+      if (!data.message && data.error?.message) {
+        data.message = data.error.message;
       }
 
       setR2ConnResult(data);
       if (data && data.success) {
-        showToast('R2 Bucket Connected 🟢', `Connected to bucket "${data.bucket}" (${data.latencyMs}ms)`, 'success');
+        showToast('R2 Bucket Connected 🟢', data.message || `Connected to bucket "${data.bucket}"`, 'success');
       } else {
         showToast('R2 Connection Notice 🔴', data?.message || 'Failed to reach R2 bucket', 'error');
       }

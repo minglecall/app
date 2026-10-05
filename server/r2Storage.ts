@@ -91,12 +91,13 @@ export function updateR2RuntimeConfig(newConfig: Partial<R2CredentialsConfig>) {
 }
 
 export function getR2RuntimeConfig(): R2CredentialsConfig {
+  const clean = (v: string) => String(v || '').trim().replace(/^["']|["']$/g, '');
   return {
-    accountId: activeConfig.accountId || process.env.R2_ACCOUNT_ID || '',
-    accessKeyId: activeConfig.accessKeyId || process.env.R2_ACCESS_KEY_ID || '',
-    secretAccessKey: activeConfig.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY || '',
-    bucketName: activeConfig.bucketName || process.env.R2_BUCKET_NAME || 'livecall-media-storage',
-    publicUrl: (activeConfig.publicUrl || process.env.R2_PUBLIC_URL || '').replace(/\/$/, ''),
+    accountId: clean(activeConfig.accountId || process.env.R2_ACCOUNT_ID || ''),
+    accessKeyId: clean(activeConfig.accessKeyId || process.env.R2_ACCESS_KEY_ID || ''),
+    secretAccessKey: clean(activeConfig.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY || ''),
+    bucketName: clean(activeConfig.bucketName || process.env.R2_BUCKET_NAME || 'livecall-media-storage') || 'livecall-media-storage',
+    publicUrl: clean(activeConfig.publicUrl || process.env.R2_PUBLIC_URL || '').replace(/\/$/, ''),
   };
 }
 

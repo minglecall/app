@@ -9,6 +9,7 @@
     "api/health.ts": { "maxDuration": 10, "memory": 256 },
     "api/admin/infra-config.ts": { "maxDuration": 30, "memory": 512 },
     "api/storage/config.ts": { "maxDuration": 15, "memory": 256 },
+    "api/r2-test.ts": { "maxDuration": 30, "memory": 512 },
     "api/storage/test-connection.ts": { "maxDuration": 30, "memory": 512 },
     "api/storage/presigned-url.ts": { "maxDuration": 30, "memory": 512 },
     "api/livekit/config.ts": { "maxDuration": 15, "memory": 256 },
