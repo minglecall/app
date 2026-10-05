@@ -1,4 +1,4 @@
 /**
- * Keep /api/storage/test-connection working by delegating to the same logic as /api/r2-test.
+ * Keep legacy path working — re-export standalone r2-test (no Express).
  */
 export { default } from '../r2-test';
