@@ -54,8 +54,6 @@ const PRIVILEGED_PROFILE_KEYS = new Set([
   'is_verified',
   'kycStatus',
   'kyc_status',
-  'vipTier',
-  'vip_tier',
   'totalLifetimeEarnedUSD',
   'total_lifetime_earned_usd',
 ]);
@@ -250,10 +248,21 @@ export function stripPrivilegedProfileFields<T extends Record<string, any>>(body
   return next as Partial<T>;
 }
 
-export function callerOwnsCreator(leader: ResolvedProfile, creator: { teamLeaderId?: string | null; createdById?: string | null; agencyName?: string | null }) {
+/** Ownership by profile IDs only — never agencyName string match (avoids cross-agency leakage). */
+export function callerOwnsCreator(
+  leader: ResolvedProfile,
+  creator: { teamLeaderId?: string | null; createdById?: string | null; agencyName?: string | null }
+) {
   if (leader.role === 'admin') return true;
   if (creator.teamLeaderId && creator.teamLeaderId === leader.id) return true;
   if (creator.createdById && creator.createdById === leader.id) return true;
-  if (leader.agencyName && creator.agencyName && creator.agencyName === leader.agencyName) return true;
   return false;
+}
+
+export function ownsCreatorByLeaderId(
+  leaderId: string,
+  creator: { teamLeaderId?: string | null; createdById?: string | null }
+) {
+  if (!leaderId) return false;
+  return creator.teamLeaderId === leaderId || creator.createdById === leaderId;
 }

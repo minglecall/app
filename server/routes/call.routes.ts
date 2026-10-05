@@ -1,10 +1,19 @@
 import { Router } from 'express';
 import type { ServerRuntime } from '../runtimeTypes';
 import { requireAuth } from '../middleware/auth';
+import { sensitiveActionLimiter } from '../middleware/rateLimit';
 import {
   getSupabaseAdmin,
   isSupabaseAdminConfigured,
+  upsertCallLogAdmin,
 } from '../supabaseAdmin';
+import { loadFinanceSystemConfig } from '../finance/config';
+import {
+  computeCallMinuteSplit,
+  hasMetCreatorPeriodTarget,
+  resolveCallHostSharePercent,
+  resolveEconomyBurnRates,
+} from '../../shared/finance/economyBurn';
 
 /** In-memory idempotency when Supabase RPC is unavailable. */
 const memoryBurnKeys = new Set<string>();
@@ -71,6 +80,7 @@ export function createCallRouter(ctx: ServerRuntime): Router {
     broadcastActiveCalls,
     broadcastAll,
     sendToUser,
+    recordCreatorEarnCoins,
   } = ctx;
 
   const terminateCallInsufficientBalance = (callId: string) => {
@@ -81,8 +91,40 @@ export function createCallRouter(ctx: ServerRuntime): Router {
         callId,
         reason: 'INSUFFICIENT_BALANCE',
         code: 'INSUFFICIENT_BALANCE',
+        outcome: 'failed',
+        status: 'failed',
       });
       return;
+    }
+
+    const endedAt = Date.now();
+    const billedDuration =
+      call.durationSeconds ||
+      (call.billedMinutes ? Math.max(0, (call.billedMinutes - 1) * 60) : 0) ||
+      (call.startTime ? Math.max(0, Math.floor((endedAt - call.startTime) / 1000)) : 0);
+
+    const callerProfile = serverUsers.get(call.callerId);
+    const receiverProfile = serverUsers.get(call.receiverId);
+
+    if (isSupabaseAdminConfigured()) {
+      upsertCallLogAdmin({
+        id: call.id,
+        callerId: call.callerId,
+        receiverId: call.receiverId,
+        hostId: call.receiverId,
+        callerName: callerProfile?.name,
+        hostName: receiverProfile?.name,
+        receiverName: receiverProfile?.name,
+        startTime: call.startTime || call.ringingAt || endedAt,
+        endTime: endedAt,
+        durationSeconds: billedDuration,
+        coinsSpent: call.coinsSpent || 0,
+        coinsEarned: call.coinsEarned || 0,
+        teamLeaderId: call.teamLeaderId || receiverProfile?.teamLeaderId || receiverProfile?.createdById || null,
+        teamLeaderEarnedCoins: call.teamLeaderEarnedCoins || 0,
+        status: 'failed',
+        endReason: 'INSUFFICIENT_BALANCE',
+      }).catch(() => {});
     }
 
     call.status = 'ended';
@@ -104,20 +146,25 @@ export function createCallRouter(ctx: ServerRuntime): Router {
       reason: 'INSUFFICIENT_BALANCE',
       code: 'INSUFFICIENT_BALANCE',
       endedBy: 'billing_engine',
+      outcome: 'failed',
+      status: 'failed',
+      callerId: call.callerId,
+      receiverId: call.receiverId,
     };
 
     sendToUser?.(call.callerId, payload);
     sendToUser?.(call.receiverId, payload);
     broadcastAll(payload);
     broadcastActiveCalls();
+    broadcastAll({ type: 'call_logs:updated', callId });
   };
 
   /**
    * POST /api/calls/burn
    * Body: { callId, billingMinute } only.
-   * Rates, friendship, and 40/10/50 vs 100% platform split are server-derived.
+   * Rates, friendship, and host/TL/platform split are server-derived from Economy config.
    */
-  router.post('/burn', requireAuth, async (req, res) => {
+  router.post('/burn', requireAuth, sensitiveActionLimiter, async (req, res) => {
     try {
       const authUser = (req as any).user as { id: string; email?: string | null };
       const callId = typeof req.body?.callId === 'string' ? req.body.callId.trim() : '';
@@ -181,26 +228,53 @@ export function createCallRouter(ctx: ServerRuntime): Router {
 
       const supabase = getSupabaseAdmin();
 
-      // Live rates + split percents from system_configs
-      let standardRate = 120;
-      let friendRate = 80;
-      let hostSharePercent = 40;
-      let tlSharePercent = 10;
+      // Live rates + split percents from system_configs (finance config cache / DB)
+      const financeCfg = await loadFinanceSystemConfig();
+      const burnRates = financeCfg.burn?.coinBurnRatePerMin
+        ? financeCfg.burn
+        : resolveEconomyBurnRates(financeCfg.raw);
+      let standardRate = burnRates.coinBurnRatePerMin;
+      let friendRate = burnRates.coinBurnRateFriendPerMin;
+      let hostBaseSharePercent = burnRates.femaleHostSharePercent;
+      let hostTargetSharePercent = burnRates.femaleHostTargetSharePercent;
+      let tlSharePercent = burnRates.teamLeaderSharePercent;
 
+      // Prefer fresh DB read so Economy edits apply on the next burn minute
       if (supabase) {
-        const { data: cfg } = await supabase
+        const { data: cfg, error: cfgErr } = await supabase
           .from('system_configs')
           .select(
-            'coin_burn_rate_per_min, coin_burn_rate_friend_per_min, female_host_share_percent, team_leader_share_percent'
+            [
+              'coin_burn_rate_per_min',
+              'coin_burn_rate_friend_per_min',
+              'female_host_share_percent',
+              'female_host_target_share_percent',
+              'team_leader_share_percent',
+              'creator_target_bronze_hours',
+              'creator_target_bronze_coins',
+            ].join(', ')
           )
           .eq('id', 'default')
           .maybeSingle();
 
+        if (cfgErr) {
+          console.warn('[calls/burn] live system_configs read failed:', cfgErr.message);
+        }
+
         if (cfg) {
-          standardRate = Number(cfg.coin_burn_rate_per_min) || 120;
-          friendRate = Number(cfg.coin_burn_rate_friend_per_min) || 80;
-          hostSharePercent = Number(cfg.female_host_share_percent) || 40;
-          tlSharePercent = Number(cfg.team_leader_share_percent) || 10;
+          const live = resolveEconomyBurnRates(cfg);
+          standardRate = live.coinBurnRatePerMin;
+          friendRate = live.coinBurnRateFriendPerMin;
+          hostBaseSharePercent = live.femaleHostSharePercent;
+          hostTargetSharePercent = live.femaleHostTargetSharePercent;
+          tlSharePercent = live.teamLeaderSharePercent;
+          // Keep thresholds in sync for target-met check when select includes them
+          if ((cfg as any).creator_target_bronze_hours != null) {
+            financeCfg.thresholds.bronzeHours = Number((cfg as any).creator_target_bronze_hours);
+          }
+          if ((cfg as any).creator_target_bronze_coins != null) {
+            financeCfg.thresholds.bronzeCoins = Number((cfg as any).creator_target_bronze_coins);
+          }
         }
 
         if (!receiver) {
@@ -262,19 +336,49 @@ export function createCallRouter(ctx: ServerRuntime): Router {
         ? (receiver.teamLeaderId || receiver.createdById || null)
         : null;
 
+      // Analytics only: bronze+ already met mid-period (does NOT change live host %).
+      // Live HOST_EARN always uses base share; target share is period-end true-up (Phase 3).
+      let targetMet = false;
+      if (isCreator && supabase) {
+        const { data: metrics } = await supabase
+          .from('creator_metrics')
+          .select('active_online_hours, total_target_coins')
+          .eq('creator_id', receiverId)
+          .maybeSingle();
+        if (metrics) {
+          targetMet = hasMetCreatorPeriodTarget(
+            Number(metrics.active_online_hours) || 0,
+            Number(metrics.total_target_coins) || 0,
+            financeCfg.thresholds
+          );
+        }
+      }
+
+      // Phase 1: live burns always credit host at BASE share % (never mid-period target %).
+      const hostSharePercent = isCreator
+        ? resolveCallHostSharePercent({
+            baseSharePercent: hostBaseSharePercent,
+            targetSharePercent: hostTargetSharePercent,
+            targetMet,
+          })
+        : 0;
+
       let hostCoinsEarned = 0;
       let tlCoinsEarned = 0;
+      let usedOverride = false;
 
       if (isCreator) {
-        const override = receiver.coinEarnOverrideRate;
-        if (override !== undefined && override !== null && Number(override) > 0) {
-          hostCoinsEarned = Math.min(coinsBurned, Number(override));
-        } else {
-          hostCoinsEarned = Math.max(1, Math.round(coinsBurned * (hostSharePercent / 100)));
-        }
-        if (tlId) {
-          tlCoinsEarned = Math.max(1, Math.round(coinsBurned * (tlSharePercent / 100)));
-        }
+        const split = computeCallMinuteSplit({
+          coinsBurned,
+          hostSharePercent,
+          tlSharePercent,
+          hasTeamLeader: Boolean(tlId),
+          targetMet, // metadata / analytics only — does not change host %
+          coinEarnOverrideRate: receiver.coinEarnOverrideRate,
+        });
+        hostCoinsEarned = split.hostCoins;
+        tlCoinsEarned = split.tlCoins;
+        usedOverride = split.usedOverride;
       }
       // ELSE: regular female / male / unmanaged → 0% host, 0% TL, 100% platform
 
@@ -287,7 +391,12 @@ export function createCallRouter(ctx: ServerRuntime): Router {
         isFriendPair,
         ratePerMin: coinsBurned,
         hostSharePercent,
+        hostBaseSharePercent,
+        hostTargetSharePercent,
         tlSharePercent,
+        targetMet,
+        usedOverride,
+        receiverId,
         receiverRole: receiver.role,
         isFemaleCreator: isCreator,
       };
@@ -423,6 +532,8 @@ export function createCallRouter(ctx: ServerRuntime): Router {
       if (!isDuplicate) {
         call.coinsSpent = (call.coinsSpent || 0) + burned;
         call.coinsEarned = (call.coinsEarned || 0) + hostEarned;
+        call.teamLeaderEarnedCoins = (call.teamLeaderEarnedCoins || 0) + tlEarned;
+        if (tlId) call.teamLeaderId = tlId;
         call.durationSeconds = Math.max(call.durationSeconds || 0, (billingMinute - 1) * 60);
         (call as any).billedMinutes = billingMinute;
       }
@@ -443,6 +554,11 @@ export function createCallRouter(ctx: ServerRuntime): Router {
           memTl.earningsCoins = newTlEarnings;
           serverUsers.set(tlId, memTl);
         }
+      }
+
+      // Period target metrics — coins from calls (feeds finance targetBonus at close)
+      if (!isDuplicate && hostEarned > 0 && isCreator) {
+        recordCreatorEarnCoins?.(receiverId, { callCoins: hostEarned });
       }
 
       broadcastUsers();

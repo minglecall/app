@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { isSupabaseConfigured } from '../../services/supabaseService';
+import { authFetch } from '../../utils/apiClient';
 import { ResetDataOptions } from '../../types';
 import {
   Trash2,
@@ -59,35 +60,35 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
 
   const supabaseActive = isSupabaseConfigured();
 
-  // Selected categories state
+  // Selected categories state — user deletes OFF by default (destructive)
   const [options, setOptions] = useState<ResetDataOptions>({
-    mockFemaleCreators: true,
-    mockMaleCallers: true,
-    customUsers: true,
+    mockFemaleCreators: false,
+    mockMaleCallers: false,
+    customUsers: false,
     teamLeaderAgencies: false,
     adminAccount: false,
-    profilesMedia: true,
+    profilesMedia: false,
     r2PurgeAllUploads: false,
-    userCoins: true,
-    creatorEarnings: true,
-    vipTiers: true,
-    payoutRequests: true,
+    userCoins: false,
+    creatorEarnings: false,
+    walletLedger: false,
+    payoutRequests: false,
     coinPackages: false,
     virtualGiftsCatalog: false,
     chatMessages: true,
     friendRequests: true,
     friendsList: true,
     favoritesList: true,
-    blockedList: true,
+    blockedList: false,
     callLogs: true,
     liveHostsPool: true,
     quickMatchQueues: true,
     surveillanceLogs: true,
     feedPosts: true,
-    creatorGoals: true,
-    creatorAnalytics: true,
-    creatorReviews: true,
-    dailyRewardsAndQuests: true,
+    creatorGoals: false,
+    creatorAnalytics: false,
+    creatorReviews: false,
+    dailyRewardsAndQuests: false,
     homeBanners: false,
     policyDocuments: false,
     quickLinks: false,
@@ -99,19 +100,75 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
   });
 
   const [isProcessing, setIsProcessing] = useState(false);
+  const [confirmPhrase, setConfirmPhrase] = useState('');
+  const [factoryResetAllowed, setFactoryResetAllowed] = useState<boolean | null>(null);
+  const [factoryResetHint, setFactoryResetHint] = useState('');
+  const [factoryResetEnvValue, setFactoryResetEnvValue] = useState('');
   const [resetFeedback, setResetFeedback] = useState<{
     success?: boolean;
     summary?: string;
     categories?: string[];
   } | null>(null);
 
+  const refreshFactoryResetStatus = async (): Promise<boolean | null> => {
+    try {
+      const res = await authFetch('/api/admin/factory-reset-status');
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json?.success && json?.data) {
+        const allowed = json.data.allowed === true;
+        setFactoryResetAllowed(allowed);
+        setFactoryResetHint(String(json.data.hint || ''));
+        setFactoryResetEnvValue(String(json.data.envValue ?? ''));
+        return allowed;
+      }
+      setFactoryResetAllowed(null);
+      setFactoryResetEnvValue('');
+      setFactoryResetHint('Could not verify ALLOW_FACTORY_RESET status. Server may refuse the wipe.');
+      return null;
+    } catch {
+      setFactoryResetAllowed(null);
+      setFactoryResetEnvValue('');
+      setFactoryResetHint('Could not reach factory-reset status endpoint.');
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    (async () => {
+      await refreshFactoryResetStatus();
+      if (cancelled) return;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   // Counts calculation
-  const mockFemaleCount = users.filter((u) => u.gender === 'female' || u.role === 'female_creator').length;
-  const mockMaleCount = users.filter((u) => u.gender === 'male' && u.role === 'male_user').length;
-  const customUsersCount = users.filter((u) => u.role !== 'admin').length;
-  const teamLeadersCount = users.filter((u) => u.role === 'team_leader' || Boolean(u.teamLeaderId)).length;
+  const nonAdminCount = users.filter((u) => u.role !== 'admin').length;
+  // Agencies = Team Leader / agency_manager only (not managed hosts with teamLeaderId).
+  // Dedupe by email/id so dual id/authId ghosts do not inflate the badge.
+  const teamLeadersCount = (() => {
+    const seen = new Set<string>();
+    let n = 0;
+    for (const u of users) {
+      if (u.role !== 'team_leader' && u.role !== 'agency_manager') continue;
+      const key = (u.email || u.id || '').toLowerCase().trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      n += 1;
+    }
+    return n;
+  })();
+
+  const requiresTypedConfirm = Boolean(options.customUsers || options.adminAccount || options.r2PurgeAllUploads);
+  const deleteTyped = confirmPhrase.trim().toUpperCase() === 'DELETE';
+  const confirmOk = !requiresTypedConfirm || deleteTyped;
+  const serverBlocksReset = factoryResetAllowed === false;
+  const factoryWipeUnlocked = deleteTyped && !serverBlocksReset;
 
   const toggleOption = (key: keyof ResetDataOptions) => {
     setOptions((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -120,8 +177,8 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
   // Quick Presets
   const handleSelectAll = () => {
     setOptions({
-      mockFemaleCreators: true,
-      mockMaleCallers: true,
+      mockFemaleCreators: false,
+      mockMaleCallers: false,
       customUsers: true,
       teamLeaderAgencies: true,
       adminAccount: true,
@@ -129,7 +186,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       r2PurgeAllUploads: true,
       userCoins: true,
       creatorEarnings: true,
-      vipTiers: true,
+      walletLedger: true,
       payoutRequests: true,
       coinPackages: true,
       virtualGiftsCatalog: true,
@@ -169,7 +226,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       r2PurgeAllUploads: false,
       userCoins: false,
       creatorEarnings: false,
-      vipTiers: false,
+      walletLedger: false,
       payoutRequests: false,
       coinPackages: false,
       virtualGiftsCatalog: false,
@@ -200,15 +257,15 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
 
   const handlePresetMockDataOnly = () => {
     setOptions({
-      mockFemaleCreators: true,
-      mockMaleCallers: true,
+      mockFemaleCreators: false,
+      mockMaleCallers: false,
       customUsers: false,
       teamLeaderAgencies: false,
       adminAccount: false,
-      profilesMedia: true,
+      profilesMedia: false,
+      walletLedger: true,
       userCoins: true,
       creatorEarnings: true,
-      vipTiers: true,
       payoutRequests: true,
       coinPackages: false,
       virtualGiftsCatalog: false,
@@ -233,6 +290,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       taxonomiesAndFlags: false,
       syncWithSupabase: supabaseActive,
       syncWithServer: true,
+      clientStoragePurge: false,
     });
   };
 
@@ -244,9 +302,9 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       teamLeaderAgencies: false,
       adminAccount: false,
       profilesMedia: false,
+      walletLedger: false,
       userCoins: false,
       creatorEarnings: false,
-      vipTiers: false,
       payoutRequests: false,
       coinPackages: false,
       virtualGiftsCatalog: false,
@@ -284,7 +342,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       profilesMedia: false,
       userCoins: true,
       creatorEarnings: true,
-      vipTiers: true,
+      walletLedger: true,
       payoutRequests: true,
       coinPackages: true,
       virtualGiftsCatalog: true,
@@ -318,9 +376,29 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
   ).length;
 
   const handleExecuteReset = async () => {
+    const allowedNow = await refreshFactoryResetStatus();
+    if (allowedNow === false) {
+      showToast(
+        'Factory Reset Disabled',
+        factoryResetHint ||
+          'Set ALLOW_FACTORY_RESET=true in server .env, then click Refresh in this modal.',
+        'warning'
+      );
+      return;
+    }
     if (activeKeysCount === 0) {
       showToast('Select Category', 'Please check at least one data category to reset.', 'warning');
       return;
+    }
+    if (!confirmOk) {
+      showToast('Confirmation Required', 'Type DELETE to confirm destructive user / admin / R2 purge options.', 'warning');
+      return;
+    }
+    if (options.customUsers) {
+      const ok = window.confirm(
+        `⚠️ DESTRUCTIVE: Delete ALL ${nonAdminCount} non-admin user accounts from the database?\n\nThis is not limited to demo accounts.\n\nServer must have ALLOW_FACTORY_RESET=true.`
+      );
+      if (!ok) return;
     }
 
     setIsProcessing(true);
@@ -349,12 +427,31 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
   };
 
   const handleResetAllWipe = async () => {
+    const allowedNow = await refreshFactoryResetStatus();
+    if (allowedNow === false) {
+      showToast(
+        'Factory Wipe Disabled',
+        factoryResetHint ||
+          'Set ALLOW_FACTORY_RESET=true in server .env, then click Refresh in this modal.',
+        'warning'
+      );
+      return;
+    }
+    if (!deleteTyped) {
+      showToast('Confirmation Required', 'Type DELETE in the confirmation box before factory wipe.', 'warning');
+      return;
+    }
+    const ok = window.confirm(
+      '⚠️ FACTORY WIPE: This deletes ALL non-admin users and selected application data.\n\nAdmin password is NOT reset.\n\nRequires ALLOW_FACTORY_RESET=true on the server.\n\nContinue?'
+    );
+    if (!ok) return;
+
     setIsProcessing(true);
     setResetFeedback(null);
     try {
       const allOptions: ResetDataOptions = {
-        mockFemaleCreators: true,
-        mockMaleCallers: true,
+        mockFemaleCreators: false,
+        mockMaleCallers: false,
         customUsers: true,
         teamLeaderAgencies: true,
         adminAccount: true,
@@ -362,7 +459,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
         r2PurgeAllUploads: true,
         userCoins: true,
         creatorEarnings: true,
-        vipTiers: true,
+        walletLedger: true,
         payoutRequests: true,
         coinPackages: true,
         virtualGiftsCatalog: true,
@@ -393,7 +490,9 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       const res = await resetMockDataGranular(allOptions);
       setResetFeedback({
         success: res.success,
-        summary: 'All application and storage data has been completely wiped and restored to factory clean state.',
+        summary: res.success
+          ? 'Selected application and storage data wiped. Admin Auth password was not changed.'
+          : res.summary,
         categories: res.categoriesCleared,
       });
       setIsProcessing(false);
@@ -429,13 +528,36 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                 <span className="px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-500/50 text-rose-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
                   AD-15
                 </span>
-                <span>Reset Data & Storage Manager</span>
-                <span className="px-2 py-0.5 text-[10px] font-mono bg-rose-950/80 text-rose-400 border border-rose-800/60 rounded-full">
-                  Admin Tool
+                <span>Destructive Data Reset</span>
+                <span
+                  className={`px-2 py-0.5 text-[10px] font-mono border rounded-full ${
+                    factoryResetAllowed === true
+                      ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/60'
+                      : factoryResetAllowed === false
+                        ? 'bg-rose-950/80 text-rose-400 border-rose-800/60'
+                        : 'bg-slate-900 text-slate-400 border-slate-700'
+                  }`}
+                >
+                  {factoryResetAllowed === true
+                    ? `ENABLED (${factoryResetEnvValue || 'true'})`
+                    : factoryResetAllowed === false
+                      ? `Disabled (${factoryResetEnvValue || 'false'})`
+                      : 'Checking server…'}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => void refreshFactoryResetStatus()}
+                  className="text-[10px] text-slate-400 hover:text-white underline cursor-pointer"
+                  title="Re-read ALLOW_FACTORY_RESET from server .env"
+                >
+                  Refresh
+                </button>
               </h2>
               <p className="text-xs text-slate-400">
-                Selectively purge demo records, wallet balances, analytics, quests, chats, and calls, or perform a total factory reset.
+                {serverBlocksReset
+                  ? factoryResetHint ||
+                    'Set ALLOW_FACTORY_RESET=true in server .env, reopen this modal, run wipe, then set back to false.'
+                  : 'Type DELETE in the box below to unlock Factory Wipe. Admin password is never restored here.'}
               </p>
             </div>
           </div>
@@ -459,7 +581,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
               onClick={handlePresetMockDataOnly}
               className="px-2.5 py-1 rounded-md bg-slate-800/90 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-medium transition-colors cursor-pointer"
             >
-              🎭 Demo Mock Data Only
+              Activity Logs Only (no users)
             </button>
             <button
               type="button"
@@ -498,6 +620,25 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
 
         {/* Scrollable Content Body */}
         <div className="p-6 overflow-y-auto space-y-6 flex-1 custom-scrollbar">
+          {factoryResetAllowed === false && (
+            <div className="rounded-xl border border-amber-700/50 bg-amber-950/40 px-4 py-3 text-sm text-amber-100 space-y-1">
+              <div className="font-semibold flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-amber-300" />
+                Factory reset is disabled on this server
+              </div>
+              <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                1) Set <code className="font-mono text-amber-100">ALLOW_FACTORY_RESET=true</code> in the server{' '}
+                <code className="font-mono">.env</code> (not <code className="font-mono">.env.example</code>)
+                <br />
+                2) Click <strong>Refresh</strong> in the header (or reopen this modal)
+                <br />
+                3) Type <code className="font-mono">DELETE</code> below, then run Factory Wipe
+                <br />
+                4) Set <code className="font-mono">ALLOW_FACTORY_RESET=false</code> again afterward
+              </p>
+            </div>
+          )}
+
           {/* Feedback banner if reset just completed */}
           {resetFeedback && (
             <div
@@ -554,65 +695,21 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                 <label className="flex items-start space-x-2.5 cursor-pointer select-none group">
                   <input
                     type="checkbox"
-                    checked={options.mockFemaleCreators}
-                    onChange={() => toggleOption('mockFemaleCreators')}
-                    className="mt-0.5 rounded border-slate-700 bg-slate-900 text-rose-500 focus:ring-rose-500/40"
-                  />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-slate-200 group-hover:text-white">
-                        Demo Female Creators
-                      </span>
-                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-400 font-mono">
-                        {mockFemaleCount} hosts
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      Sophia, Yuki, Camila, Elena, and demo female creator roster.
-                    </p>
-                  </div>
-                </label>
-
-                <label className="flex items-start space-x-2.5 cursor-pointer select-none group">
-                  <input
-                    type="checkbox"
-                    checked={options.mockMaleCallers}
-                    onChange={() => toggleOption('mockMaleCallers')}
-                    className="mt-0.5 rounded border-slate-700 bg-slate-900 text-rose-500 focus:ring-rose-500/40"
-                  />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-slate-200 group-hover:text-white">
-                        Demo Male Callers
-                      </span>
-                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-400 font-mono">
-                        {mockMaleCount} users
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      Alex Vance and sample male test accounts.
-                    </p>
-                  </div>
-                </label>
-
-                <label className="flex items-start space-x-2.5 cursor-pointer select-none group">
-                  <input
-                    type="checkbox"
                     checked={options.customUsers}
                     onChange={() => toggleOption('customUsers')}
                     className="mt-0.5 rounded border-slate-700 bg-slate-900 text-rose-500 focus:ring-rose-500/40"
                   />
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
-                      <span className="font-medium text-slate-200 group-hover:text-white">
-                        Custom Registered Accounts
+                      <span className="font-medium text-rose-200 group-hover:text-white">
+                        Delete ALL Non-Admin Users
                       </span>
-                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-400 font-mono">
-                        {customUsersCount} custom
+                      <span className="px-1.5 py-0.5 rounded bg-rose-950 text-[10px] text-rose-300 border border-rose-800 font-mono">
+                        {nonAdminCount} accounts
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      Non-demo accounts registered in browser during testing.
+                      Permanently deletes every non-admin profile (real and test). Not limited to a demo roster.
                     </p>
                   </div>
                 </label>
@@ -627,14 +724,14 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
                       <span className="font-medium text-slate-200 group-hover:text-white">
-                        Team Leader & Agency Overrides
+                        Team Leader & Agency Accounts
                       </span>
                       <span className="px-1.5 py-0.5 rounded bg-amber-950 text-[10px] text-amber-300 border border-amber-800 font-mono">
                         {teamLeadersCount} agencies
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      Clears agency affiliations, custom host rate overrides, notes, and resets agency commission tiers.
+                      Deletes Team Leader accounts and their managed host roster (users with a teamLeaderId).
                     </p>
                   </div>
                 </label>
@@ -649,14 +746,14 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
                       <span className="font-medium text-slate-200 group-hover:text-white">
-                        Super Admin Account
+                        Reset Admin Profile Fields
                       </span>
                       <span className="px-1.5 py-0.5 rounded bg-purple-950 text-[10px] text-purple-300 border border-purple-800">
-                        Default Profile
+                        No Password Change
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      Resets admin profile details and password to default admin123.
+                      Resets display name / verification flags only. Password must be changed via authenticated update-password (passwordPolicy). Coin balance is left unchanged.
                     </p>
                   </div>
                 </label>
@@ -809,21 +906,21 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                 <label className="flex items-start space-x-2.5 cursor-pointer select-none group">
                   <input
                     type="checkbox"
-                    checked={options.vipTiers}
-                    onChange={() => toggleOption('vipTiers')}
+                    checked={Boolean(options.walletLedger)}
+                    onChange={() => toggleOption('walletLedger')}
                     className="mt-0.5 rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500/40"
                   />
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
                       <span className="font-medium text-slate-200 group-hover:text-white">
-                        VIP Memberships
+                        Wallet Ledger (burns, gifts, rewards)
                       </span>
                       <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-400 font-mono">
-                        → None
+                        wallet_ledger
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      Cancels all active Gold/Silver/Diamond VIP subscriptions.
+                      Deletes all wallet_ledger rows. Also auto-purged with call logs, coin resets, or full user wipe.
                     </p>
                   </div>
                 </label>
@@ -1463,9 +1560,33 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
         </div>
 
         {/* Action Footer */}
-        <div className="px-6 py-4 border-t border-slate-800 bg-slate-950/80 flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
+        <div className="px-6 py-4 border-t border-slate-800 bg-slate-950/80 flex flex-col gap-3 shrink-0">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 rounded-xl border border-rose-800/60 bg-rose-950/30 px-3 py-2">
+              <label className="text-[11px] text-rose-200 font-medium shrink-0" htmlFor="reset-confirm-phrase">
+                Type DELETE to unlock factory wipe{requiresTypedConfirm ? ' / destructive options' : ''}:
+              </label>
+              <input
+                id="reset-confirm-phrase"
+                type="text"
+                value={confirmPhrase}
+                onChange={(e) => setConfirmPhrase(e.target.value)}
+                placeholder="DELETE"
+                className="flex-1 px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white font-mono focus:outline-none focus:border-rose-500"
+                autoComplete="off"
+              />
+            </div>
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="text-xs text-slate-400">
             Selected categories: <span className="font-bold text-white">{activeKeysCount}</span>
+            {serverBlocksReset && (
+              <span className="ml-2 text-rose-400">· server gate off</span>
+            )}
+            {!serverBlocksReset && !deleteTyped && (
+              <span className="ml-2 text-amber-300">· type DELETE to unlock Factory Wipe</span>
+            )}
+            {!confirmOk && requiresTypedConfirm && (
+              <span className="ml-2 text-rose-400">· confirmation incomplete</span>
+            )}
           </div>
 
           <div className="flex items-center space-x-3 w-full sm:w-auto justify-end">
@@ -1482,7 +1603,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
               id="execute-selected-reset-btn"
               type="button"
               onClick={handleExecuteReset}
-              disabled={isProcessing || activeKeysCount === 0}
+              disabled={isProcessing || activeKeysCount === 0 || !confirmOk || serverBlocksReset}
               className="px-5 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:opacity-50 disabled:pointer-events-none rounded-xl transition-all shadow-md shadow-indigo-900/30 flex items-center space-x-1.5 cursor-pointer"
             >
               {isProcessing ? (
@@ -1502,13 +1623,26 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
               id="reset-all-wipe-btn"
               type="button"
               onClick={handleResetAllWipe}
-              disabled={isProcessing}
+              disabled={isProcessing || !factoryWipeUnlocked}
               className="px-5 py-2 text-xs font-bold text-white bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-95 disabled:opacity-50 disabled:pointer-events-none rounded-xl transition-all shadow-md shadow-rose-950/50 flex items-center space-x-1.5 border border-rose-400/30 cursor-pointer"
-              title="Wipe out all application data and restore factory clean state"
+              title={
+                serverBlocksReset
+                  ? 'Disabled: set ALLOW_FACTORY_RESET=true in .env, then click Refresh'
+                  : !deleteTyped
+                    ? 'Type DELETE in the confirmation box above to unlock'
+                    : 'Wipe application data'
+              }
             >
               <AlertTriangle className="w-3.5 h-3.5 text-rose-200" />
-              <span>Reset All Data (Wipe Everything)</span>
+              <span>
+                {serverBlocksReset
+                  ? 'Factory Wipe (Disabled on server)'
+                  : !deleteTyped
+                    ? 'Factory Wipe (type DELETE above)'
+                    : 'Factory Wipe'}
+              </span>
             </button>
+          </div>
           </div>
         </div>
       </div>

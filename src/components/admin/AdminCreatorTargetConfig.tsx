@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Crown,
@@ -25,17 +25,29 @@ import {
   BarChart3,
   Users,
 } from 'lucide-react';
-import { SystemSettings } from '../../types';
 import { AdminRotationalPriorityMatrix } from './AdminRotationalPriorityMatrix';
 import { AdminCreatorPerformanceAnalytics } from './AdminCreatorPerformanceAnalytics';
+import { patchFinanceConfig } from '../../services/financeApi';
 
 export const AdminCreatorTargetConfig: React.FC = () => {
   const { systemSettings, updateSystemSettings, showToast } = useApp();
 
   const [activeSubView, setActiveSubView] = useState<'analytics' | 'matrix' | 'targets'>('analytics');
 
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as { creatorOpsView?: string } | undefined;
+      if (detail?.creatorOpsView === 'targets') {
+        setActiveSubView('targets');
+      }
+    };
+    window.addEventListener('minglecall:admin-navigate', handler as EventListener);
+    return () => window.removeEventListener('minglecall:admin-navigate', handler as EventListener);
+  }, []);
+
   const [formData, setFormData] = useState({
     creatorTargetCycle: systemSettings.creatorTargetCycle || 'weekly',
+    periodCloseUtcTime: systemSettings.periodCloseUtcTime || '00:00',
     creatorTargetBronzeHours: systemSettings.creatorTargetBronzeHours ?? 20,
     creatorTargetBronzeCoins: systemSettings.creatorTargetBronzeCoins ?? 5000,
     creatorTargetBronzeBonusUSD: systemSettings.creatorTargetBronzeBonusUSD ?? 15,
@@ -64,7 +76,24 @@ export const AdminCreatorTargetConfig: React.FC = () => {
     setIsSaving(true);
     try {
       updateSystemSettings(formData);
-      showToast('Settings Saved 🎯', 'Creator target thresholds, bonuses, and algorithmic boost rules saved to Supabase.', 'success');
+      // Keep Financial Module period clock in sync (source of truth for close job)
+      const financePatch = await patchFinanceConfig({
+        creatorTargetCycle: formData.creatorTargetCycle,
+        periodCloseUtcTime: formData.periodCloseUtcTime,
+      });
+      if (!financePatch.success) {
+        showToast(
+          'Targets saved; finance clock warning',
+          financePatch.error?.message || 'Could not sync period_close_utc_time via Finance API.',
+          'error'
+        );
+      } else {
+        showToast(
+          'Settings Saved 🎯',
+          'Creator targets saved. Period cycle & UTC close time synced to Financial Module.',
+          'success'
+        );
+      }
     } catch (err: any) {
       showToast('Save Error', err.message || 'Failed to update target configurations.', 'error');
     } finally {
@@ -218,14 +247,14 @@ export const AdminCreatorTargetConfig: React.FC = () => {
                     className="w-4 h-4 accent-indigo-500"
                   />
                   <div>
-                    <span className="font-bold text-sm block text-white">Weekly Target Cycle (7 Days)</span>
+                    <span className="font-bold text-sm block text-white">Weekly Target Cycle</span>
                     <span className="text-[11px] text-slate-400 block mt-0.5">
-                      Evaluates target thresholds every Monday at 00:00 UTC. Recommended for fast-paced gamification and weekly host engagement.
+                      Monday 00:00 UTC → next Monday 00:00 UTC. Period close runs at the configured UTC close time on the end boundary day.
                     </span>
                   </div>
                 </div>
                 <span className="text-xs font-mono font-bold text-indigo-400 px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800 shrink-0 ml-2">
-                  7 DAYS
+                  MON→MON
                 </span>
               </label>
 
@@ -244,16 +273,36 @@ export const AdminCreatorTargetConfig: React.FC = () => {
                     className="w-4 h-4 accent-indigo-500"
                   />
                   <div>
-                    <span className="font-bold text-sm block text-white">Monthly Target Cycle (30 Days)</span>
+                    <span className="font-bold text-sm block text-white">Monthly Target Cycle</span>
                     <span className="text-[11px] text-slate-400 block mt-0.5">
-                      Evaluates target thresholds on the 1st of each calendar month. Best for agencies with monthly agency payroll schedules.
+                      Calendar month 1st 00:00 UTC → next month 1st 00:00 UTC (not rolling 30 days). Best for agency payroll calendars.
                     </span>
                   </div>
                 </div>
                 <span className="text-xs font-mono font-bold text-indigo-400 px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800 shrink-0 ml-2">
-                  30 DAYS
+                  1st→1st
                 </span>
               </label>
+            </div>
+
+            <div className="mt-4 p-3.5 rounded-xl bg-[#0F1115] border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-emerald-400" />
+                  Period close UTC time (HH:mm)
+                </label>
+                <span className="text-[10px] font-mono text-emerald-400">Financial Module</span>
+              </div>
+              <input
+                type="text"
+                placeholder="00:00"
+                value={formData.periodCloseUtcTime}
+                onChange={(e) => setFormData({ ...formData, periodCloseUtcTime: e.target.value })}
+                className="w-full sm:w-40 p-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-emerald-500"
+              />
+              <p className="text-[10px] text-slate-500">
+                Synced to <span className="font-mono text-slate-400">system_configs.period_close_utc_time</span> via Finance API on save. Cash bonuses settle in the same period-end batch (not mid-period).
+              </p>
             </div>
           </div>
 
@@ -721,40 +770,48 @@ export const AdminCreatorTargetConfig: React.FC = () => {
             </div>
           </div>
 
-          {/* 5. Direct Payout Compatibility Transparency */}
+          {/* 5. Settlement Compatibility */}
           <div className="p-5 bg-[#161922] border border-slate-800 rounded-2xl space-y-3 shadow-lg">
             <div className="flex items-center space-x-2">
               <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
                 TB-3.6
               </span>
               <Wallet className="w-4 h-4 text-emerald-400" />
-              <h4 className="text-sm font-bold text-white">Direct Payout & Balance Compatibility</h4>
+              <h4 className="text-sm font-bold text-white">Period-end settlement compatibility</h4>
             </div>
             <p className="text-xs text-slate-400">
-              How all performance bonuses seamlessly unify with the existing female creator payout architecture:
+              At period close: (1) live call minutes stay at Economy base share; (2) if bronze+ hours AND
+              coins are met, Finance posts a target share true-up so effective call commission equals the
+              Economy target share %; (3) bronze/silver/gold USD cash bonuses settle separately. All three
+              appear as distinct settlement lines — not mid-period withdrawals.
             </p>
 
             <div className="p-4 rounded-xl bg-[#0F1115] border border-slate-800 space-y-3 text-xs">
               <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                <span className="text-slate-300 font-medium">1-on-1 Call Earnings:</span>
-                <span className="font-mono font-bold text-white">Directly to user.earningsCoins</span>
+                <span className="text-slate-300 font-medium">Call earnings (base share):</span>
+                <span className="font-mono font-bold text-white">Accrue live → settle at close</span>
               </div>
               <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                <span className="text-slate-300 font-medium">Virtual Gift Tip Shares:</span>
-                <span className="font-mono font-bold text-white">Directly to user.earningsCoins</span>
+                <span className="text-slate-300 font-medium">Target share true-up:</span>
+                <span className="font-mono font-bold text-rose-300">If bronze+ met · Economy target %</span>
               </div>
               <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                <span className="text-slate-300 font-medium">Daily 1st Paid Call Bonus:</span>
-                <span className="font-mono font-bold text-emerald-400">+{formData.dailyFirstCallBonusCoins} 🪙 / +${formData.dailyFirstCallBonusUSD.toFixed(2)} USD</span>
+                <span className="text-slate-300 font-medium">Tier cash bonuses:</span>
+                <span className="font-mono font-bold text-emerald-400">
+                  +${formData.creatorTargetGoldBonusUSD.toFixed(2)} Gold / +$
+                  {formData.creatorTargetSilverBonusUSD.toFixed(2)} Silver
+                </span>
               </div>
-              <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                <span className="text-slate-300 font-medium">Tier Completion Cash Bonuses:</span>
-                <span className="font-mono font-bold text-emerald-400">+${formData.creatorTargetGoldBonusUSD.toFixed(2)} (Gold) / +${formData.creatorTargetSilverBonusUSD.toFixed(2)} (Silver)</span>
+              <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-200 text-[11px]">
+                Hosts with <code className="text-amber-100">coin_earn_override_rate</code> &gt; 0 at close
+                skip share true-up (override path). TL share stays static — no TL true-up. Gifts are
+                excluded from eligible burn for share true-up.
               </div>
               <div className="p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-emerald-300 text-[11px] flex items-center space-x-2">
                 <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
                 <span>
-                  All earnings & bonuses are 100% withdrawable via the existing Payout Request modal (Bank, PayPal, Crypto, Local).
+                  Admin remits via Financial Module settlement batches (TL bundles / direct hosts). See
+                  Admin → Financial Module for per-host breakdown.
                 </span>
               </div>
             </div>

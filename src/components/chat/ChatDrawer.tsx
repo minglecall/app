@@ -3,7 +3,6 @@ import { useApp } from '../../context/AppContext';
 import {
   X,
   Send,
-  Languages,
   Video,
   CheckCheck,
   UserPlus,
@@ -31,9 +30,14 @@ import {
   Unlock,
 } from 'lucide-react';
 import { uploadMediaDirectlyToR2, normalizeMediaUrl } from '../../utils/r2Storage';
-import { getCountryFlag, getLanguageFlag } from '../../utils/flags';
-import { ALL_LANGUAGES } from '../../utils/taxonomies';
-import { SearchableFilterDropdown } from '../common/SearchableFilterDropdown';
+import { getCountryFlag } from '../../utils/flags';
+
+function formatChatTime(value?: string): string {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 interface ChatDrawerProps {
   isOpen?: boolean;
@@ -60,8 +64,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
     removeFriend,
     isFriend,
     systemSettings,
-    blockUser,
-    reportUser,
+    openBlockReportModal,
     clearChatHistory,
     sendFriendRequest,
     friendRequests,
@@ -83,8 +86,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'creators' | 'callers' | 'friends'>('all');
   const [inputText, setInputText] = useState('');
-  const [targetLang, setTargetLang] = useState('English');
-  const [showOriginalMap, setShowOriginalMap] = useState<Record<string, boolean>>({});
   const [showGearMenu, setShowGearMenu] = useState(false);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [mediaUploadProgress, setMediaUploadProgress] = useState(0);
@@ -239,10 +240,19 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
     e.preventDefault();
     if ((!inputText.trim() && !pendingAttachment) || !currentChatUser) return;
 
-    const mediaToSend = pendingAttachment?.publicUrl || pendingAttachment?.previewUrl;
+    if (pendingAttachment?.isUploading) {
+      return;
+    }
+
+    // Only durable R2/public URLs — never blob:/data: previews
+    const mediaToSend = pendingAttachment?.publicUrl || undefined;
+    if (pendingAttachment && !mediaToSend) {
+      return;
+    }
+
     const messageText = inputText.trim() || (mediaToSend ? '📷 Photo Attachment' : '');
 
-    sendMessage(currentChatUser.id, messageText, targetLang, mediaToSend);
+    void sendMessage(currentChatUser.id, messageText, undefined, mediaToSend, mediaToSend ? 'image' : 'text');
     setInputText('');
     setPendingAttachment(null);
   };
@@ -274,17 +284,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
         setPendingAttachment((prev) =>
           prev ? { ...prev, publicUrl: uploadRes.publicUrl, isUploading: false, progress: 100 } : null
         );
+      } else {
+        setPendingAttachment(null);
       }
     } catch (err: any) {
-      console.warn('[Chat] R2 upload notice, using local preview:', err.message);
-      setPendingAttachment((prev) => (prev ? { ...prev, isUploading: false, progress: 100 } : null));
+      console.warn('[Chat] R2 upload failed:', err?.message || err);
+      setPendingAttachment(null);
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  };
-
-  const toggleShowOriginal = (msgId: string) => {
-    setShowOriginalMap((prev) => ({ ...prev, [msgId]: !prev[msgId] }));
   };
 
   // If drawer is closed, don't render
@@ -292,29 +300,30 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-slate-950/80 backdrop-blur-md cursor-pointer"
+      className="fixed inset-0 z-50 flex justify-end backdrop-blur-md cursor-pointer"
+      style={{ backgroundColor: 'var(--app-overlay)' }}
       onClick={handleClose}
     >
       <div
-        className="w-full max-w-md bg-[#0F1117] border-l border-slate-800 h-full flex flex-col justify-between shadow-2xl animate-in slide-in-from-right duration-300 cursor-default pb-16 md:pb-0"
+        className="w-full max-w-md bg-app-card border-l border-hairline h-full flex flex-col justify-between shadow-app-lg animate-in slide-in-from-right duration-300 cursor-default pb-16 md:pb-0"
         onClick={(e) => e.stopPropagation()}
       >
         {/* ========================================================= */}
         {/* VIEW 1: INBOX / ALL CHATS LIST (When no specific chat selected) */}
         {/* ========================================================= */}
         {!currentChatUser ? (
-          <div className="flex-1 flex flex-col overflow-hidden bg-[#0F1117]">
+          <div className="flex-1 flex flex-col overflow-hidden bg-app">
             {/* Header Top Bar */}
-            <div className="bg-[#0A0C10] border-b border-slate-800 p-3.5 flex items-center justify-between">
+            <div className="bg-app-card border-b border-hairline p-3.5 flex items-center justify-between">
               <div className="flex items-center space-x-2">
                 <div className="w-8 h-8 rounded-xl bg-pink-500/10 border border-pink-500/30 flex items-center justify-center text-pink-400 relative">
                   <MessageCircle className="w-4 h-4" />
                   {unreadMessagesCount > 0 && (
-                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse border border-[#0A0C10]" />
+                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse border border-[var(--app-card)]" />
                   )}
                 </div>
                 <div>
-                  <h2 className="font-extrabold text-sm text-white flex items-center space-x-2">
+                  <h2 className="font-extrabold text-sm text-app-heading flex items-center space-x-2">
                     <span>Chat Box & Inbox</span>
                     {unreadMessagesCount > 0 && (
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500 text-white font-black shadow-sm animate-pulse">
@@ -327,7 +336,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                       </span>
                     )}
                   </h2>
-                  <p className="text-[10px] text-slate-400">Select any user below to open direct messages</p>
+                  <p className="text-[10px] text-app-muted">Select any user below to open direct messages</p>
                 </div>
               </div>
 
@@ -335,7 +344,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                 {unreadMessagesCount > 0 && (
                   <button
                     onClick={markAllChatsAsRead}
-                    className="px-2 py-1 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-[10px] font-bold text-pink-300 rounded-lg transition-colors cursor-pointer"
+                    className="px-2 py-1 bg-app-input hover:bg-brand-soft border border-hairline text-[10px] font-bold text-pink-400 rounded-lg transition-colors cursor-pointer"
                     title="Mark all messages as read"
                   >
                     Mark read
@@ -343,7 +352,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                 )}
                 <button
                   onClick={handleClose}
-                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-full transition-colors shrink-0 cursor-pointer"
+                  className="p-1.5 text-app-muted hover:text-app-heading hover:bg-app-input rounded-full transition-colors shrink-0 cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -369,7 +378,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                     .map((req) => (
                       <div
                         key={req.id}
-                        className="bg-[#0D0F14]/90 border border-pink-500/40 rounded-xl p-2.5 flex items-center justify-between gap-2 shadow-md hover:border-pink-400 transition-all"
+                        className="bg-app-card border border-pink-500/40 rounded-xl p-2.5 flex items-center justify-between gap-2 shadow-md hover:border-pink-400 transition-all"
                       >
                         <div
                           className="flex items-center space-x-2.5 min-w-0 flex-1 cursor-pointer"
@@ -381,7 +390,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                             className="w-10 h-10 rounded-full object-cover ring-2 ring-pink-500 shrink-0"
                           />
                           <div className="min-w-0 flex-1">
-                            <p className="text-xs font-extrabold text-white truncate flex items-center space-x-1">
+                            <p className="text-xs font-extrabold text-app-heading truncate flex items-center space-x-1">
                               <span>{req.senderName}</span>
                               <span className="text-[10px] text-pink-400 font-normal">wants to be friends</span>
                             </p>
@@ -408,7 +417,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                               e.stopPropagation();
                               declineFriendRequest(req.id);
                             }}
-                            className="p-1 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-rose-400 rounded-lg transition-all cursor-pointer"
+                            className="p-1 bg-app-input hover:bg-app-card border border-hairline text-app-muted hover:text-rose-400 rounded-lg transition-all cursor-pointer"
                             title="Decline Request"
                           >
                             <X className="w-3.5 h-3.5" />
@@ -421,21 +430,21 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
             )}
 
             {/* Search & Filter Controls Bar */}
-            <div className="p-3 bg-[#0B0D12] border-b border-slate-800/80 space-y-2.5">
+            <div className="p-3 bg-app-card-subtle border-b border-hairline space-y-2.5">
               {/* Search Box */}
               <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-3" />
+                <Search className="w-3.5 h-3.5 text-app-muted absolute left-3 top-3" />
                 <input
                   type="text"
                   placeholder="Search user, country or message..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 transition-all"
+                  className="w-full pl-9 pr-3 py-2 bg-app-input border border-hairline rounded-xl text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-pink-500 transition-all"
                 />
                 {searchQuery && (
                   <button
                     onClick={() => setSearchQuery('')}
-                    className="absolute right-2.5 top-2.5 text-slate-500 hover:text-white text-xs"
+                    className="absolute right-2.5 top-2.5 text-app-muted hover:text-app-heading text-xs"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -449,7 +458,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   className={`px-3 py-1 rounded-lg transition-all shrink-0 cursor-pointer ${
                     filterType === 'all'
                       ? 'bg-pink-600 text-white shadow-sm'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                      : 'bg-app-input text-app-muted hover:text-app-heading border border-hairline'
                   }`}
                 >
                   All Chats ({allOtherUsers.length})
@@ -459,7 +468,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   className={`px-3 py-1 rounded-lg transition-all shrink-0 cursor-pointer ${
                     filterType === 'creators'
                       ? 'bg-pink-600 text-white shadow-sm'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                      : 'bg-app-input text-app-muted hover:text-app-heading border border-hairline'
                   }`}
                 >
                   🌸 Creators
@@ -469,7 +478,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   className={`px-3 py-1 rounded-lg transition-all shrink-0 cursor-pointer ${
                     filterType === 'callers'
                       ? 'bg-pink-600 text-white shadow-sm'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                      : 'bg-app-input text-app-muted hover:text-app-heading border border-hairline'
                   }`}
                 >
                   ♂️ Callers
@@ -479,7 +488,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   className={`px-3 py-1 rounded-lg transition-all shrink-0 cursor-pointer ${
                     filterType === 'friends'
                       ? 'bg-indigo-600 text-white shadow-sm'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                      : 'bg-app-input text-app-muted hover:text-app-heading border border-hairline'
                   }`}
                 >
                   👥 Friends ({friends.length})
@@ -490,10 +499,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
             {/* Conversation Inbox List */}
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
               {sortedUsers.length === 0 ? (
-                <div className="text-center py-16 text-slate-500 font-mono text-xs space-y-2">
-                  <Users className="w-10 h-10 text-slate-600 mx-auto" />
-                  <p className="text-slate-300 font-bold">No Users Found</p>
-                  <p className="text-[10px] text-slate-500">Try adjusting your search query or filter selection.</p>
+                <div className="text-center py-16 text-app-muted font-mono text-xs space-y-2">
+                  <Users className="w-10 h-10 text-app-muted mx-auto opacity-60" />
+                  <p className="text-app-heading font-bold">No Users Found</p>
+                  <p className="text-[10px] text-app-muted">Try adjusting your search query or filter selection.</p>
                 </div>
               ) : (
                 sortedUsers.map((user) => {
@@ -504,7 +513,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                     (r) => r.senderId === user.id && r.receiverId === currentUser.id && r.status === 'pending'
                   );
                   const unreadForUser = chatMessages.filter(
-                    (m) => m.senderId === user.id && m.receiverId === currentUser.id && !readMessageIds.includes(m.id)
+                    (m) =>
+                      m.senderId === user.id &&
+                      m.receiverId === currentUser.id &&
+                      m.isRead !== true &&
+                      !readMessageIds.includes(m.id)
                   ).length;
 
                   return (
@@ -513,10 +526,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                       onClick={() => setActiveChatUserId(user.id)}
                       className={`border rounded-2xl p-3 flex items-center justify-between transition-all shadow-md cursor-pointer group ${
                         hasIncomingReq
-                          ? 'bg-gradient-to-r from-pink-950/40 via-slate-900/80 to-purple-950/40 border-pink-500/60 ring-1 ring-pink-500/30'
+                          ? 'bg-gradient-to-r from-pink-500/10 via-app-card to-purple-500/10 border-pink-500/60 ring-1 ring-pink-500/30'
                           : unreadForUser > 0
-                          ? 'bg-slate-900/90 border-pink-500/40 hover:border-pink-500'
-                          : 'bg-[#0A0C10] border-slate-800/80 hover:border-pink-500/50 hover:bg-slate-900/60'
+                          ? 'bg-app-card-subtle border-pink-500/40 hover:border-pink-500'
+                          : 'bg-app-card-subtle border-hairline hover:border-pink-500/50 hover:bg-app-card'
                       }`}
                     >
                       <div className="flex items-center space-x-3 min-w-0 flex-1">
@@ -526,16 +539,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                             src={user.avatarUrl}
                             alt={user.name}
                             className={`w-12 h-12 rounded-full object-cover ring-2 transition-all ${
-                              hasIncomingReq ? 'ring-pink-500' : unreadForUser > 0 ? 'ring-rose-500' : 'ring-slate-800 group-hover:ring-pink-500/50'
+                              hasIncomingReq ? 'ring-pink-500' : unreadForUser > 0 ? 'ring-rose-500' : 'ring-[var(--app-hairline)] group-hover:ring-pink-500/50'
                             }`}
                           />
                           <span
-                            className={`absolute -top-0.5 -left-0.5 w-3.5 h-3.5 rounded-full border-2 border-[#0A0C10] ${getStatusDot(
+                            className={`absolute -top-0.5 -left-0.5 w-3.5 h-3.5 rounded-full border-2 border-[var(--app-card)] ${getStatusDot(
                               user.onlineStatus
                             )}`}
                           />
                           {unreadForUser > 0 && (
-                            <span className="absolute -bottom-1 -right-1 px-1 min-w-[15px] h-[15px] rounded-full bg-rose-500 text-white font-black text-[9px] flex items-center justify-center border border-[#0A0C10] shadow animate-pulse">
+                            <span className="absolute -bottom-1 -right-1 px-1 min-w-[15px] h-[15px] rounded-full bg-rose-500 text-white font-black text-[9px] flex items-center justify-center border border-[var(--app-card)] shadow animate-pulse">
                               {unreadForUser}
                             </span>
                           )}
@@ -544,44 +557,44 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                         {/* User Details & Last Message */}
                         <div className="min-w-0 flex-1 pr-2">
                           <div className="flex items-center justify-between">
-                            <div className="font-extrabold text-white text-xs flex items-center space-x-1.5 truncate">
+                            <div className="font-extrabold text-app-heading text-xs flex items-center space-x-1.5 truncate">
                               <span className="truncate">{user.name}</span>
                               <span className="text-xs shrink-0" title={user.nationality}>
                                 {getCountryFlag(user.countryCode, user.nationality)}
                               </span>
                               {hasIncomingReq && (
-                                <span className="px-1.5 py-0.5 rounded bg-pink-500/20 text-pink-300 text-[9px] font-bold border border-pink-500/40 shrink-0">
+                                <span className="px-1.5 py-0.5 rounded bg-pink-500/20 text-pink-400 text-[9px] font-bold border border-pink-500/40 shrink-0">
                                   Request 🌸
                                 </span>
                               )}
                               {unreadForUser > 0 && !hasIncomingReq && (
-                                <span className="px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[9px] font-bold shrink-0">
+                                <span className="px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/40 text-[9px] font-bold shrink-0">
                                   {unreadForUser} new
                                 </span>
                               )}
                             </div>
                             {latestMsg && (
-                              <span className="text-[10px] text-slate-500 font-mono shrink-0 ml-1">
-                                {latestMsg.timestamp}
+                              <span className="text-[10px] text-app-muted font-mono shrink-0 ml-1">
+                                {formatChatTime(latestMsg.createdAt || latestMsg.timestamp)}
                               </span>
                             )}
                           </div>
 
                           {/* Message Preview */}
-                          <p className={`text-xs truncate mt-1 transition-colors ${unreadForUser > 0 ? 'text-slate-200 font-semibold' : 'text-slate-400 group-hover:text-slate-200'}`}>
+                          <p className={`text-xs truncate mt-1 transition-colors ${unreadForUser > 0 ? 'text-app-heading font-semibold' : 'text-app-muted group-hover:text-app-heading'}`}>
                             {hasIncomingReq ? (
-                              <span className="text-pink-300 font-semibold flex items-center space-x-1">
+                              <span className="text-pink-400 font-semibold flex items-center space-x-1">
                                 <span>🌸 Sent you a Friend Request! Tap to accept</span>
                               </span>
                             ) : latestMsg ? (
                               <span>
-                                <span className="font-semibold text-slate-300">
+                                <span className="font-semibold text-app-heading/80">
                                   {latestMsg.senderId === currentUser.id ? 'You: ' : ''}
                                 </span>
-                                {(latestMsg.translatedText || latestMsg.text).replace(/^\[Translated to [^\]]+\]:\s*/i, '')}
+                                {(latestMsg.text || '').replace(/^\[Translated to [^\]]+\]:\s*/i, '')}
                               </span>
                             ) : (
-                              <span className="italic text-slate-500">Tap to start chatting with {user.name}...</span>
+                              <span className="italic text-app-muted">Tap to start chatting with {user.name}...</span>
                             )}
                           </p>
                         </div>
@@ -594,7 +607,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                             ? 'bg-pink-600 text-white shadow-md'
                             : unreadForUser > 0
                             ? 'bg-rose-600 text-white shadow-md'
-                            : 'bg-slate-900 group-hover:bg-pink-600 group-hover:text-white text-slate-400'
+                            : 'bg-app-input group-hover:bg-pink-600 group-hover:text-white text-app-muted'
                         }`}>
                           <MessageCircle className="w-4 h-4" />
                         </button>
@@ -611,12 +624,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
           /* ========================================================= */
           <div className="flex-1 flex flex-col justify-between overflow-hidden">
             {/* Header Top Navigation */}
-            <div className="p-3 bg-[#0A0C10] border-b border-slate-800/80 flex items-center justify-between relative z-20">
+            <div className="p-3 bg-app-card border-b border-hairline flex items-center justify-between relative z-20">
               <div className="flex items-center space-x-2.5 min-w-0">
                 {/* Back to All Chats Inbox Button */}
                 <button
                   onClick={() => setActiveChatUserId(null)}
-                  className="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-white rounded-xl text-xs font-bold flex items-center space-x-1 shrink-0 transition-colors cursor-pointer"
+                  className="p-2 bg-app-input hover:bg-brand-soft border border-hairline text-app-muted hover:text-app-heading rounded-xl text-xs font-bold flex items-center space-x-1 shrink-0 transition-colors cursor-pointer"
                   title="Return to All Chats Inbox"
                 >
                   <ArrowLeft className="w-4 h-4 text-pink-400" />
@@ -628,10 +641,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   <img
                     src={currentChatUser.avatarUrl}
                     alt={currentChatUser.name}
-                    className="w-10 h-10 rounded-full object-cover ring-2 ring-slate-800"
+                    className="w-10 h-10 rounded-full object-cover ring-2 ring-[var(--app-hairline)]"
                   />
                   <span
-                    className={`absolute -top-0.5 -left-0.5 w-3.5 h-3.5 rounded-full border-2 border-[#0A0C10] ${getStatusDot(
+                    className={`absolute -top-0.5 -left-0.5 w-3.5 h-3.5 rounded-full border-2 border-[var(--app-card)] ${getStatusDot(
                       currentChatUser.onlineStatus
                     )}`}
                   />
@@ -640,7 +653,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                 {/* User Details */}
                 <div className="min-w-0">
                   <div className="flex items-center space-x-1.5">
-                    <h3 className="font-extrabold text-sm text-white truncate">{currentChatUser.name}</h3>
+                    <h3 className="font-extrabold text-sm text-app-heading truncate">{currentChatUser.name}</h3>
                     <span className="text-xs shrink-0" title={currentChatUser.nationality}>
                       {getCountryFlag(currentChatUser.countryCode, currentChatUser.nationality)}
                     </span>
@@ -676,7 +689,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                       className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center justify-center ${
                         showGearMenu
                           ? 'bg-pink-600/20 border-pink-500/60 text-pink-300'
-                          : 'bg-slate-900 hover:bg-slate-800 border-slate-700/80 text-slate-300 hover:text-white'
+                          : 'bg-app-input hover:bg-brand-soft border-hairline text-app-muted hover:text-app-heading'
                       }`}
                       title="More Options"
                     >
@@ -684,22 +697,22 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                     </button>
 
                     {showGearMenu && (
-                      <div className="absolute right-0 mt-2 w-56 bg-[#11141C] border border-slate-800 rounded-2xl shadow-2xl p-1.5 z-40 text-xs font-medium space-y-1 animate-in fade-in zoom-in-95 duration-150">
+                      <div className="absolute right-0 mt-2 w-56 bg-app-card border border-hairline rounded-2xl shadow-2xl p-1.5 z-40 text-xs font-medium space-y-1 animate-in fade-in zoom-in-95 duration-150">
                         {/* 1. Female Host Action: Ask For Rating */}
                         {isFemaleUser && (
                           <button
                             onClick={() => {
                               setShowGearMenu(false);
-                              sendRatingRequest(currentUser.id, currentChatUser.id);
+                              void sendRatingRequest(currentUser.id, currentChatUser.id);
                             }}
-                            className="w-full text-left px-3 py-2 rounded-xl text-yellow-300 hover:bg-yellow-500/10 flex items-center space-x-2.5 transition-colors cursor-pointer"
+                            className="w-full text-left px-3 py-2 rounded-xl text-yellow-500 hover:bg-yellow-500/10 flex items-center space-x-2.5 transition-colors cursor-pointer"
                           >
                             <div className="w-6 h-6 rounded-lg bg-yellow-500/20 flex items-center justify-center shrink-0">
                               <Star className="w-3.5 h-3.5 text-yellow-400 fill-yellow-400" />
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="font-bold text-xs text-white">Ask for Rating ⭐</div>
-                              <div className="text-[10px] text-slate-400">Request review card</div>
+                              <div className="font-bold text-xs text-app-heading">Ask for a rating</div>
+                              <div className="text-[10px] text-app-muted">Send review request in chat</div>
                             </div>
                           </button>
                         )}
@@ -729,8 +742,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                                   <UserPlus className="w-3.5 h-3.5 text-pink-400" />
                                 </div>
                                 <div className="min-w-0 flex-1">
-                                  <div className="font-bold text-xs text-white">Add Friend 👥</div>
-                                  <div className="text-[10px] text-slate-400">Grant {friendBurnRate} 🪙/m rate</div>
+                                  <div className="font-bold text-xs text-app-heading">Add Friend 👥</div>
+                                  <div className="text-[10px] text-app-muted">Grant {friendBurnRate} 🪙/m rate</div>
                                 </div>
                               </button>
                             )
@@ -746,8 +759,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                                 <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
                               </div>
                               <div className="min-w-0 flex-1">
-                                <div className="font-bold text-xs text-white">Add to Friends</div>
-                                <div className="text-[10px] text-slate-400">Save to friend circle</div>
+                                <div className="font-bold text-xs text-app-heading">Add to Friends</div>
+                                <div className="text-[10px] text-app-muted">Save to friend circle</div>
                               </div>
                             </button>
                           )
@@ -769,7 +782,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                           </button>
                         )}
 
-                        <div className="my-1 border-t border-slate-800/80" />
+                        <div className="my-1 border-t border-hairline" />
 
                         {/* 3. View Full Profile */}
                         {onOpenProfile && (
@@ -797,7 +810,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                           <span className="text-xs font-semibold">Clear Chat History</span>
                         </button>
 
-                        <div className="my-1 border-t border-slate-800/80" />
+                        <div className="my-1 border-t border-hairline" />
 
                         {/* 5. Block / Unblock User */}
                         {blockedUserIds.includes(currentChatUser.id) ? (
@@ -815,9 +828,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                           <button
                             onClick={() => {
                               setShowGearMenu(false);
-                              blockUser(currentChatUser.id, 'Blocked via Chat');
+                              openBlockReportModal(currentChatUser.id, 'block');
                             }}
-                            className="w-full text-left px-3 py-2 rounded-xl text-slate-400 hover:bg-slate-800/90 hover:text-white flex items-center space-x-2.5 transition-colors cursor-pointer"
+                            className="w-full text-left px-3 py-2 rounded-xl text-app-muted hover:bg-app-input hover:text-app-heading flex items-center space-x-2.5 transition-colors cursor-pointer"
                           >
                             <UserX className="w-4 h-4 text-slate-500 shrink-0" />
                             <span className="text-xs font-semibold">Block User</span>
@@ -828,7 +841,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                         <button
                           onClick={() => {
                             setShowGearMenu(false);
-                            reportUser(currentChatUser.id, 'Inappropriate behavior');
+                            openBlockReportModal(currentChatUser.id, 'report');
                           }}
                           className="w-full text-left px-3 py-2 rounded-xl text-amber-400 hover:bg-amber-500/10 flex items-center space-x-2.5 transition-colors cursor-pointer"
                         >
@@ -843,7 +856,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                 {/* Close Drawer Button */}
                 <button
                   onClick={handleClose}
-                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-full transition-colors shrink-0 cursor-pointer ml-0.5"
+                  className="p-1.5 text-app-muted hover:text-app-heading hover:bg-app-input rounded-full transition-colors shrink-0 cursor-pointer ml-0.5"
                   title="Close Chat"
                 >
                   <X className="w-5 h-5" />
@@ -851,25 +864,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
               </div>
             </div>
 
-            {/* Auto-Translate Sub-Bar */}
-            <div className="bg-[#0B0D12] px-3.5 py-1.5 border-b border-slate-800/80 flex items-center justify-between text-xs gap-2">
+            {/* Conversation info bar */}
+            <div className="bg-app-card-subtle px-3.5 py-1.5 border-b border-hairline flex items-center justify-between text-xs gap-2">
               <div className="flex items-center space-x-1.5 text-slate-400 text-[11px] shrink-0">
-                <Languages className="w-3.5 h-3.5 text-pink-400 shrink-0" />
-                <span>Auto-Translate:</span>
-              </div>
-              <div className="w-48">
-                <SearchableFilterDropdown
-                  value={targetLang}
-                  onChange={(val) => setTargetLang(val)}
-                  placeholder="Search language..."
-                  autoSort={true}
-                  options={ALL_LANGUAGES.map((l) => ({
-                    value: l.name,
-                    label: l.name,
-                    subLabel: l.nativeName,
-                    badge: l.popular ? 'TOP' : undefined,
-                  }))}
-                />
+                <MessageCircle className="w-3.5 h-3.5 text-pink-400 shrink-0" />
+                <span>Messages sync securely across your devices.</span>
               </div>
             </div>
 
@@ -958,12 +957,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                 <div className="text-center py-12 text-slate-500 font-mono text-xs space-y-2">
                   <Sparkles className="w-8 h-8 text-slate-600 mx-auto" />
                   <p className="text-slate-300 font-bold">Start a conversation with {currentChatUser.name}!</p>
-                  <p className="text-[10px] text-slate-500">Messages are auto-translated in real-time.</p>
+                  <p className="text-[10px] text-slate-500">Your messages are saved securely and sync in real time.</p>
                 </div>
               ) : (
                 conversation.map((m) => {
                   const isMine = m.senderId === currentUser.id;
-                  const showingOriginal = showOriginalMap[m.id];
                   const isFriendReq = m.type === 'friend_request' || !!m.friendRequestInfo;
                   const reqInfo =
                     m.friendRequestInfo ||
@@ -997,9 +995,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                               </div>
                               <div>
                                 <div className="text-xs font-black text-white font-mono flex items-center space-x-1">
-                                  <span>{ratingInfo?.creatorName ? `${ratingInfo.creatorName}'s Rating` : 'Session Feedback'}</span>
+                                  <span>
+                                    {ratingInfo?.creatorName
+                                      ? `Rating requested by ${ratingInfo.creatorName}`
+                                      : 'Rating request'}
+                                  </span>
                                 </div>
-                                <div className="text-[10px] text-slate-400 font-mono">{m.timestamp}</div>
+                                <div className="text-[10px] text-slate-400 font-mono">
+                                  {formatChatTime(m.createdAt || m.timestamp)}
+                                </div>
                               </div>
                             </div>
 
@@ -1055,19 +1059,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
 
                               <div className="text-[10px] text-emerald-400 font-mono pt-1 flex items-center space-x-1">
                                 <CheckCircle2 className="w-3 h-3" />
-                                <span>Verified & Synced to Creator Scorecard</span>
+                                <span>Saved to host reviews</span>
                               </div>
                             </div>
                           ) : isCaller ? (
                             <div className="space-y-3">
                               <p className="text-xs text-slate-300 leading-relaxed font-mono">
-                                {m.text || `How was your live 1-on-1 video call with ${ratingInfo?.creatorName || 'this creator'}?`}
+                                {m.text ||
+                                  `Rating requested by ${ratingInfo?.creatorName || 'the host'}. Share feedback when you are ready — optional.`}
                               </p>
 
                               {/* Interactive 1-tap star buttons */}
                               <div className="p-2 rounded-xl bg-slate-950/80 border border-slate-800/80 flex flex-col items-center justify-center space-y-1">
                                 <span className="text-[10px] text-slate-400 uppercase font-mono tracking-wider font-bold">
-                                  Tap Stars to Rate Instantly
+                                  Tap stars to rate
                                 </span>
                                 <div className="flex items-center space-x-2 py-1">
                                   {[1, 2, 3, 4, 5].map((starVal) => (
@@ -1075,13 +1080,17 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                                       key={starVal}
                                       type="button"
                                       onClick={() =>
-                                        submitCreatorReview({
+                                        void submitCreatorReview({
                                           creatorId: ratingInfo?.creatorId || currentChatUser.id,
+                                          creatorName: ratingInfo?.creatorName || currentChatUser.name,
+                                          creatorAvatar:
+                                            ratingInfo?.creatorAvatar || currentChatUser.avatarUrl,
                                           callerId: currentUser.id,
                                           callerName: currentUser.name,
                                           callerAvatar: currentUser.avatarUrl,
                                           callerCountry: currentUser.nationality,
                                           callLogId: ratingInfo?.callLogId,
+                                          ratingRequestMessageId: m.id,
                                           stars: starVal,
                                           communication: starVal,
                                           friendliness: starVal,
@@ -1106,8 +1115,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                                     creatorId: ratingInfo?.creatorId || currentChatUser.id,
                                     creatorName: ratingInfo?.creatorName || currentChatUser.name,
                                     creatorAvatar: ratingInfo?.creatorAvatar || currentChatUser.avatarUrl,
-                                    callLogId: ratingInfo?.callLogId || 'log_' + Date.now(),
+                                    callLogId: ratingInfo?.callLogId || '',
                                     durationSeconds: ratingInfo?.callDurationSeconds || 60,
+                                    ratingRequestMessageId: m.id,
                                   })
                                 }
                                 className="w-full py-2 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-yellow-300 border border-yellow-500/30 text-xs font-mono font-bold transition-all cursor-pointer text-center flex items-center justify-center space-x-1.5"
@@ -1120,10 +1130,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                             <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-1">
                               <div className="text-xs text-yellow-400 font-mono font-bold flex items-center space-x-1">
                                 <Clock className="w-3.5 h-3.5 animate-pulse" />
-                                <span>Rating Request Sent</span>
+                                <span>Ask for a rating — sent</span>
                               </div>
                               <p className="text-[11px] text-slate-400 font-mono">
-                                Waiting for {currentChatUser.name} to submit their feedback.
+                                Waiting for {currentChatUser.name} to respond. Ratings are optional.
                               </p>
                             </div>
                           )}
@@ -1137,8 +1147,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                       <div
                         className={`p-3 rounded-2xl max-w-[85%] text-xs space-y-1.5 shadow-md ${
                           isMine
-                            ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white rounded-tr-none'
-                            : 'bg-slate-800 text-slate-200 rounded-tl-none border border-slate-700'
+                            ? 'bg-flirt text-white rounded-tr-none'
+                            : 'bg-app-input text-app-heading rounded-tl-none border border-hairline'
                         }`}
                       >
                         {m.mediaUrl && (
@@ -1161,18 +1171,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                         )}
 
                         <p className="leading-relaxed">
-                          {(showingOriginal ? m.text : m.translatedText || m.text).replace(/^\[Translated to [^\]]+\]:\s*/i, '')}
+                          {(m.text || '').replace(/^\[Translated to [^\]]+\]:\s*/i, '')}
                         </p>
 
                         <div className="flex items-center justify-between pt-1 text-[9px] text-slate-300/80 border-t border-white/10">
-                          <button onClick={() => toggleShowOriginal(m.id)} className="underline hover:text-white cursor-pointer">
-                            {showingOriginal
-                              ? 'View Translation'
-                              : `Translated from ${getLanguageFlag(m.originalLanguage)} ${m.originalLanguage}`}
-                          </button>
+                          <span className="text-slate-400/90">
+                            {m.originalLanguage ? m.originalLanguage : 'Message'}
+                          </span>
                           <span className="flex items-center space-x-1">
-                            <span>{m.timestamp}</span>
-                            <CheckCheck className="w-3 h-3 text-emerald-300" />
+                            <span>{formatChatTime(m.createdAt || m.timestamp)}</span>
+                            <CheckCheck className={`w-3 h-3 ${m.isRead || isMine ? 'text-emerald-300' : 'text-slate-500'}`} />
                           </span>
                         </div>
                       </div>
@@ -1184,7 +1192,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
 
             {/* Inline Attachment Preview Bar (Above Input Box) */}
             {pendingAttachment && (
-              <div className="mx-3 mb-2 p-2.5 bg-slate-900/95 border border-pink-500/50 rounded-2xl flex items-center justify-between gap-3 shadow-xl animate-in fade-in slide-in-from-bottom-2">
+              <div className="mx-3 mb-2 p-2.5 bg-app-card border border-pink-500/50 rounded-2xl flex items-center justify-between gap-3 shadow-xl animate-in fade-in slide-in-from-bottom-2">
                 <div className="flex items-center space-x-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
                     <img
@@ -1199,7 +1207,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="text-white font-bold text-xs truncate flex items-center space-x-1.5">
+                    <div className="text-app-heading font-bold text-xs truncate flex items-center space-x-1.5">
                       <span>Photo Attachment</span>
                       {pendingAttachment.isUploading ? (
                         <span className="text-[10px] text-cyan-400 font-mono">({pendingAttachment.progress}%)</span>
@@ -1207,7 +1215,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                         <span className="text-[10px] text-emerald-400 font-mono">✓ Ready to send</span>
                       )}
                     </div>
-                    <div className="text-[10px] text-slate-400 font-mono truncate">
+                    <div className="text-[10px] text-app-muted font-mono truncate">
                       {pendingAttachment.file.name} • {(pendingAttachment.file.size / 1024).toFixed(0)} KB
                     </div>
                   </div>
@@ -1216,7 +1224,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                 <button
                   type="button"
                   onClick={() => setPendingAttachment(null)}
-                  className="p-1.5 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
+                  className="p-1.5 rounded-full bg-app-input hover:bg-brand-soft text-app-muted hover:text-app-heading border border-hairline transition-colors cursor-pointer shrink-0"
                   title="Remove Attachment"
                 >
                   <X className="w-4 h-4" />
@@ -1225,7 +1233,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
             )}
 
             {/* Input Form */}
-            <form onSubmit={handleSend} className="p-3 bg-[#0A0C10] border-t border-slate-800 space-y-2">
+            <form onSubmit={handleSend} className="p-3 bg-app-card border-t border-hairline space-y-2">
               <div className="flex items-center space-x-2">
                 <input
                   type="file"
@@ -1240,8 +1248,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   title="Attach Photo (Cloudflare R2 Direct)"
                   className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
                     pendingAttachment
-                      ? 'bg-pink-500/20 border-pink-500 text-pink-300'
-                      : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-pink-400 border-slate-800'
+                      ? 'bg-pink-500/20 border-pink-500 text-pink-400'
+                      : 'bg-app-input hover:bg-brand-soft text-app-muted hover:text-pink-400 border-hairline'
                   }`}
                 >
                   <Image className="w-4 h-4" />
@@ -1252,12 +1260,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   placeholder={pendingAttachment ? 'Add a caption to your photo...' : `Message ${currentChatUser.name}...`}
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                  className="flex-1 px-3.5 py-2.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500"
+                  className="flex-1 px-3.5 py-2.5 bg-app-input border border-hairline rounded-app text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-brand"
                 />
                 <button
                   type="submit"
-                  disabled={!inputText.trim() && !pendingAttachment}
-                  className="p-2.5 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white rounded-xl shadow-md cursor-pointer disabled:opacity-50"
+                  disabled={
+                    (!inputText.trim() && !pendingAttachment?.publicUrl) ||
+                    Boolean(pendingAttachment?.isUploading)
+                  }
+                  className="p-2.5 bg-flirt hover:brightness-110 text-white rounded-app shadow-brand cursor-pointer disabled:opacity-50"
                 >
                   <Send className="w-4 h-4" />
                 </button>

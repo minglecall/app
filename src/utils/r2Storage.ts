@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase';
+import { getAccessToken } from './apiClient';
 
 export interface DirectUploadOptions {
   file: File;
@@ -30,8 +30,7 @@ export function isPersistableMediaUrl(url?: string | null): boolean {
 async function getAuthJsonHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   try {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
+    const token = await getAccessToken();
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
@@ -39,6 +38,22 @@ async function getAuthJsonHeaders(): Promise<Record<string, string>> {
     console.warn('[R2 Storage] Unable to read Supabase session for Authorization header:', err);
   }
   return headers;
+}
+
+function extractStorageErrorMessage(payload: any, fallback: string): string {
+  if (!payload) return fallback;
+  if (typeof payload.error === 'string') return payload.error;
+  if (payload.error?.message) return String(payload.error.message);
+  if (payload.message) return String(payload.message);
+  return fallback;
+}
+
+function isStorageNotConfiguredResponse(status: number, payload: any): boolean {
+  return (
+    status === 503 ||
+    payload?.configured === false ||
+    payload?.code === 'STORAGE_NOT_CONFIGURED'
+  );
 }
 
 // Normalize any media URL to ensure raw authenticated S3 endpoints are routed via proxy
@@ -83,17 +98,20 @@ async function uploadMediaViaServerFallback(
       filename: file.name,
       contentType: file.type || 'image/jpeg',
       base64Data,
-      userId: userId || 'user_client',
+      // Informational only — server derives owner from the auth session
+      userId: userId || undefined,
       category,
     }),
   });
 
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Server upload failed' }));
-    throw new Error(err.error || 'Server storage upload failed');
+    if (isStorageNotConfiguredResponse(res.status, data)) {
+      throw new Error('Storage not configured');
+    }
+    throw new Error(extractStorageErrorMessage(data, 'Server storage upload failed'));
   }
 
-  const data = await res.json();
   if (onProgress) onProgress(100);
 
   const safePublicUrl = normalizeMediaUrl(data.publicUrl, data.storageKey);
@@ -105,6 +123,52 @@ async function uploadMediaViaServerFallback(
     contentType: data.contentType || file.type,
     durationMs: Math.round(performance.now() - startTime),
   };
+}
+
+async function putFileWithProgress(
+  url: string,
+  file: File,
+  headers: Record<string, string> | undefined,
+  onProgress?: (percent: number) => void,
+  extraHeaders?: Record<string, string>
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+
+    if (headers) {
+      Object.entries(headers).forEach(([key, val]) => {
+        xhr.setRequestHeader(key, val as string);
+      });
+    }
+    if (extraHeaders) {
+      Object.entries(extraHeaders).forEach(([key, val]) => {
+        xhr.setRequestHeader(key, val);
+      });
+    }
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        const percent = Math.round((e.loaded / e.total) * 100);
+        onProgress(percent);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (onProgress) onProgress(100);
+        resolve();
+      } else {
+        reject(new Error(`Storage PUT status ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new Error('Direct upload network/CORS error'));
+    };
+
+    xhr.send(file);
+  });
 }
 
 export async function uploadMediaDirectlyToR2(
@@ -120,61 +184,57 @@ export async function uploadMediaDirectlyToR2(
       headers: await getAuthJsonHeaders(),
       body: JSON.stringify({
         filename: file.name,
-        contentType: file.type || 'application/octet-stream',
+        contentType: file.type || 'image/jpeg',
         fileSize: file.size,
+        // Informational only — server always overrides with auth profile id
         userId,
         category,
       }),
     });
 
+    const signData = await presignRes.json().catch(() => ({}));
+
     if (!presignRes.ok) {
-      const presignError = await presignRes.json().catch(() => ({}));
-      const authMessage =
-        presignError?.error?.message ||
-        presignError?.error ||
-        presignError?.message ||
-        `Presigned URL request failed (${presignRes.status})`;
+      if (isStorageNotConfiguredResponse(presignRes.status, signData)) {
+        throw new Error('Storage not configured');
+      }
+      const authMessage = extractStorageErrorMessage(
+        signData,
+        `Presigned URL request failed (${presignRes.status})`
+      );
+      // Auth / validation failures: do not silently fall through to mock
+      if (presignRes.status === 401 || presignRes.status === 403 || presignRes.status === 400) {
+        throw new Error(authMessage);
+      }
       console.warn('[R2 Storage] Presigned URL request failed, using server upload fallback:', authMessage);
       return await uploadMediaViaServerFallback(file, userId, category, onProgress);
     }
 
-    const signData = await presignRes.json();
-    const { presignedUrl, publicUrl, storageKey, headers } = signData;
+    if (isStorageNotConfiguredResponse(presignRes.status, signData) && !signData?.presignedUrl) {
+      throw new Error('Storage not configured');
+    }
 
-    // 2. Direct PUT upload to Cloudflare R2 (or local mock upload) with progress tracking
+    const { presignedUrl, publicUrl, storageKey, headers, isMock } = signData;
+    if (!presignedUrl) {
+      throw new Error('Storage not configured');
+    }
+
+    // Mock uploads require Bearer auth on PUT /mock-upload
+    const extraHeaders: Record<string, string> = {};
+    const needsAuthOnPut =
+      Boolean(isMock) ||
+      (typeof presignedUrl === 'string' &&
+        (presignedUrl.startsWith('/') || presignedUrl.includes('/api/storage/mock-upload')));
+    if (needsAuthOnPut) {
+      const token = await getAccessToken();
+      if (token) {
+        extraHeaders.Authorization = `Bearer ${token}`;
+      }
+    }
+
+    // 2. Direct PUT upload to Cloudflare R2 (or auth-gated local mock) with progress tracking
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', presignedUrl, true);
-
-        if (headers) {
-          Object.entries(headers).forEach(([key, val]) => {
-            xhr.setRequestHeader(key, val as string);
-          });
-        }
-
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable && onProgress) {
-            const percent = Math.round((e.loaded / e.total) * 100);
-            onProgress(percent);
-          }
-        };
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            if (onProgress) onProgress(100);
-            resolve();
-          } else {
-            reject(new Error(`Storage PUT status ${xhr.status}`));
-          }
-        };
-
-        xhr.onerror = () => {
-          reject(new Error('Direct upload network/CORS error'));
-        };
-
-        xhr.send(file);
-      });
+      await putFileWithProgress(presignedUrl, file, headers, onProgress, extraHeaders);
 
       const durationMs = Math.round(performance.now() - startTime);
 
@@ -190,6 +250,9 @@ export async function uploadMediaDirectlyToR2(
       return await uploadMediaViaServerFallback(file, userId, category, onProgress);
     }
   } catch (err: any) {
+    if (String(err?.message || '').includes('Storage not configured')) {
+      throw err;
+    }
     console.warn('Direct presign flow failed, fallback to server upload:', err.message);
     return await uploadMediaViaServerFallback(file, userId, category, onProgress);
   }

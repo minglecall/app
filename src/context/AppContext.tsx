@@ -24,6 +24,19 @@ import {
   CreatorMetrics,
   CreatorTier,
 } from '../types';
+import { getCoinUsdPeg, coinsToUsd } from '../../shared/finance/fx';
+import {
+  DEFAULT_COIN_BURN_RATE_PER_MIN,
+  DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN,
+  DEFAULT_FEMALE_HOST_SHARE_PERCENT,
+  DEFAULT_FEMALE_HOST_TARGET_SHARE_PERCENT,
+  DEFAULT_TEAM_LEADER_SHARE_PERCENT,
+} from '../../shared/finance/economyBurn';
+import {
+  DEFAULT_GIFT_FEMALE_HOST_SHARE_PERCENT,
+  DEFAULT_GIFT_TEAM_LEADER_SHARE_PERCENT,
+  computeGiftCoinSplit,
+} from '../../shared/finance/economyGift';
 import {
   INITIAL_SYSTEM_SETTINGS,
   INITIAL_COIN_PACKAGES,
@@ -41,7 +54,6 @@ import {
   upsertProfileToSupabase,
   updateUserProfileInSupabase,
   bulkUpsertProfilesToSupabase,
-  deleteProfileFromSupabase,
   updateUserStatusInSupabase,
   fetchUserStatusesFromSupabase,
   purgeMockProfilesFromSupabase,
@@ -58,39 +70,24 @@ import {
   purgeModerationReportsFromSupabase,
   purgeAllProfilesFromSupabase,
   subscribeToRealtimeProfiles,
-  saveMessageToSupabase,
   subscribeToRealtimeChat,
   fetchRecentMessagesForUser,
   fetchPayoutRequestsFromSupabase,
   upsertPayoutRequestToSupabase,
   fetchCallLogsFromSupabase,
-  insertCallLogToSupabase,
-  fetchFriendRequestsFromSupabase,
-  upsertFriendRequestToSupabase,
-  removeFriendInSupabase,
   fetchSystemConfigsFromSupabase,
   updateSystemConfigsInSupabase,
   fetchHomeBannersFromSupabase,
-  upsertHomeBannerToSupabase,
-  deleteHomeBannerFromSupabase,
   fetchCmsPoliciesFromSupabase,
-  upsertCmsPolicy,
-  deleteCmsPolicyFromSupabase,
   fetchHomeQuickLinksFromSupabase,
-  upsertHomeQuickLinkToSupabase,
-  deleteHomeQuickLinkFromSupabase,
   fetchFeedPostsFromSupabase,
   upsertFeedPostToSupabase,
   deleteFeedPostFromSupabase,
   fetchCoinPackagesFromSupabase,
   upsertCoinPackageToSupabase,
   deleteCoinPackageFromSupabase,
-  fetchFavoritesFromSupabase,
-  addFavoriteToSupabase,
-  removeFavoriteFromSupabase,
-  fetchBlockedUsersFromSupabase,
-  addBlockedUserToSupabase,
-  removeBlockedUserFromSupabase,
+  fetchCurrencyConfigsFromSupabase,
+  upsertCurrencyConfigsToSupabase,
   upsertMatchToSupabase,
   fetchMatchesForUser,
   deleteMatchFromSupabase,
@@ -99,7 +96,6 @@ import {
   isValidUuid,
   pushAllTaxonomiesAndSettingsToSupabase,
   fetchUserDailyRewardsFromSupabase,
-  upsertUserDailyRewardsInSupabase,
   mapDbProfileToUserProfile,
 } from '../services/supabaseService';
 import { updateUserPassword, signOutSupabase } from '../services/supabaseAuthService';
@@ -107,6 +103,7 @@ import { getUserEffectiveLocation } from '../utils/location';
 import { supabase } from '../lib/supabase';
 import type { Session, User as SupabaseAuthUser } from '@supabase/supabase-js';
 import { getPasswordPolicyError } from '../../shared/passwordPolicy';
+import { DEFAULT_CURRENCIES, type CurrencyItem } from '../utils/taxonomies';
 
 
 const DEFAULT_FALLBACK_USER: UserProfile = {
@@ -151,6 +148,7 @@ interface AppContextType {
   isLoggedIn: boolean;
   systemSettings: SystemSettings;
   coinPackages: CoinPackage[];
+  currencyConfigs: CurrencyItem[];
   virtualGifts: VirtualGift[];
   payoutRequests: PayoutRequest[];
   activeCall: CallSession | null;
@@ -164,7 +162,6 @@ interface AppContextType {
   callLogs: CallLogItem[];
   friendRequests: FriendRequest[];
   toast: ToastNotification | null;
-  fastTestMode: boolean; // Fast 3-second coin burn timer for instant test
   theme: 'dark' | 'light';
   setTheme: (theme: 'dark' | 'light') => void;
   toggleTheme: () => void;
@@ -176,13 +173,14 @@ interface AppContextType {
   activePolicyDoc: PolicyDocument | null;
   openPolicyModal: (policyIdOrSlug: string) => void;
   closePolicyModal: () => void;
-  saveHomeBanner: (banner: Partial<HomeBanner> & { id?: string }) => void;
-  deleteHomeBanner: (bannerId: string) => void;
-  toggleBannerActive: (bannerId: string) => void;
-  savePolicyDocument: (policy: Partial<PolicyDocument> & { id?: string }) => void;
-  deletePolicyDocument: (policyId: string) => void;
-  saveHomeQuickLink: (link: Partial<HomeQuickLink> & { id?: string }) => void;
-  deleteHomeQuickLink: (linkId: string) => void;
+  saveHomeBanner: (banner: Partial<HomeBanner> & { id?: string }) => Promise<{ success: boolean; error?: string }>;
+  deleteHomeBanner: (bannerId: string) => Promise<{ success: boolean; error?: string }>;
+  toggleBannerActive: (bannerId: string) => Promise<{ success: boolean; error?: string }>;
+  savePolicyDocument: (policy: Partial<PolicyDocument> & { id?: string }) => Promise<{ success: boolean; error?: string }>;
+  deletePolicyDocument: (policyId: string) => Promise<{ success: boolean; error?: string }>;
+  saveHomeQuickLink: (link: Partial<HomeQuickLink> & { id?: string }) => Promise<{ success: boolean; error?: string }>;
+  deleteHomeQuickLink: (linkId: string) => Promise<{ success: boolean; error?: string }>;
+  seedHomeCmsDefaults: () => Promise<{ success: boolean; error?: string }>;
 
   // Handlers
   showToast: (title: string, message: string, type?: 'success' | 'error' | 'info' | 'warning') => void;
@@ -199,7 +197,6 @@ interface AppContextType {
 
   // Economy & Store
   buyCoinPackage: (packageId: string) => void;
-  purchaseVip: (tier: 'bronze' | 'silver' | 'gold' | 'diamond') => void;
   claimDailyBonus: () => void;
   dailyBonusClaimed: boolean;
 
@@ -224,7 +221,6 @@ interface AppContextType {
   rejectCall: () => void;
   endCall: () => void;
   sendGiftInCall: (giftId: string) => boolean;
-  toggleFastTestMode: () => void;
   getEffectiveCallRate: (hostId?: string, callerId?: string) => number;
 
   // Chat & Social
@@ -233,36 +229,74 @@ interface AppContextType {
     text: string,
     targetLang?: string,
     mediaUrl?: string,
-    type?: 'text' | 'gift' | 'system' | 'friend_request'
-  ) => void;
-  clearChatHistory: (otherUserId: string) => void;
+    type?: 'text' | 'gift' | 'system' | 'friend_request' | 'image',
+    /** Shared optimistic id so in-call overlay can paint before HTTP returns */
+    clientTempId?: string
+  ) => Promise<{ ok: boolean; clientTempId?: string }>;
+  /** Peer fast-path: upsert temp in-call chat from LiveKit data / WS preview (deduped). */
+  ingestInCallChatPreview: (payload: {
+    clientTempId: string;
+    text: string;
+    senderId: string;
+    receiverId: string;
+    messageType?: string;
+  }) => void;
+  /** WS-mediated in-call preview to peer (no DB wait). Used when LiveKit data channel unavailable. */
+  notifyInCallChatPreview: (payload: {
+    clientTempId: string;
+    text: string;
+    receiverId: string;
+    messageType?: string;
+  }) => void;
+  clearChatHistory: (otherUserId: string) => Promise<boolean>;
   favorites: string[];
   friends: string[];
   blockedUserIds: string[];
+  /** Users who blocked the current user (for discovery exclusion). */
+  blockedByUserIds: string[];
   creatorGoals: Record<string, { title: string; currentCoins: number; targetCoins: number }>;
-  toggleFavorite: (userId: string) => void;
+  toggleFavorite: (userId: string) => Promise<boolean>;
+  /** Persist swipe like via Express (pending unless reciprocal → matched). */
+  likeUser: (targetUserId: string, options?: { superLike?: boolean }) => Promise<boolean>;
+  /** Persist swipe pass via Express (status=rejected). */
+  passUser: (targetUserId: string) => Promise<boolean>;
+  /** Match rows for swipe exclusion / mutual status (from /api/v1/matches/me). */
+  userMatchRecords: Array<{
+    id: string;
+    otherUserId: string;
+    status: 'pending' | 'matched' | 'rejected' | 'unmatched';
+    initiatedBy: string;
+  }>;
   toggleFriend: (userId: string) => void;
   addFriend: (userId: string) => void;
-  removeFriend: (userId: string) => void;
+  removeFriend: (userId: string) => Promise<boolean>;
   isFriend: (userId: string) => boolean;
-  sendFriendRequest: (femaleId: string, maleId: string, callLogId?: string) => void;
-  acceptFriendRequest: (requestId: string) => void;
-  declineFriendRequest: (requestId: string) => void;
-  blockUser: (userId: string, reason?: string) => void;
-  unblockUser: (userId: string) => void;
-  reportUser: (userId: string, reason: string) => void;
+  sendFriendRequest: (femaleId: string, maleId: string, callLogId?: string) => Promise<boolean>;
+  acceptFriendRequest: (requestId: string) => Promise<boolean>;
+  declineFriendRequest: (requestId: string) => Promise<boolean>;
+  blockUser: (userId: string, reason?: string) => Promise<boolean>;
+  unblockUser: (userId: string) => Promise<boolean>;
+  reportUser: (userId: string, reason: string, details?: string) => Promise<boolean>;
+  /** Opens BlockReportModal for report/block against a user. */
+  openBlockReportModal: (userId: string, action?: 'report' | 'block') => void;
+  closeBlockReportModal: () => void;
+  blockReportModal: { userId: string; action: 'report' | 'block' } | null;
   contributeToGoal: (creatorId: string, coins: number) => boolean;
 
-  // Creator Reviews & Ratings
+  // Creator Reviews & Ratings (DB-backed via Express — not localStorage)
   creatorReviews: CreatorReview[];
-  submitCreatorReview: (reviewData: Omit<CreatorReview, 'id' | 'createdAt'>) => void;
-  sendRatingRequest: (creatorId: string, callerId: string) => void;
+  refreshCreatorReviews: (creatorId?: string) => Promise<void>;
+  submitCreatorReview: (
+    reviewData: Omit<CreatorReview, 'id' | 'createdAt'> & { ratingRequestMessageId?: string }
+  ) => Promise<boolean>;
+  sendRatingRequest: (creatorId: string, callerId: string, callLogId?: string) => Promise<boolean>;
   pendingRatingCall: {
     creatorId: string;
     creatorName: string;
     creatorAvatar: string;
     callLogId: string;
     durationSeconds: number;
+    ratingRequestMessageId?: string;
   } | null;
   setPendingRatingCall: (call: {
     creatorId: string;
@@ -270,6 +304,7 @@ interface AppContextType {
     creatorAvatar: string;
     callLogId: string;
     durationSeconds: number;
+    ratingRequestMessageId?: string;
   } | null) => void;
 
   // Female Creator Performance Metrics & Intelligence
@@ -292,21 +327,22 @@ interface AppContextType {
   toggleGoLiveQuickMatch: (targetUserId?: string, forceState?: boolean) => boolean;
   isHostLive: (userId: string) => boolean;
   quickMatches: QuickMatchItem[];
-  recordQuickMatch: (matchedUser: UserProfile, giftsCoins?: number) => void;
-  sendQuickMatchGift: (targetUserId: string, giftKey: string, giftCost: number, giftName: string) => boolean;
+  recordQuickMatch: (matchedUser: UserProfile, giftsCoins?: number) => Promise<boolean>;
+  sendQuickMatchGift: (targetUserId: string, giftKey: string, giftCost: number, giftName: string) => Promise<boolean>;
 
   // Admin Operations
   updateSystemSettings: (newSettings: Partial<SystemSettings>) => void;
   updateLiveKitConfig: (config: { apiKey: string; apiSecret: string; wsUrl: string }) => Promise<boolean>;
   saveCoinPackage: (pkg: Partial<CoinPackage> & { id?: string }) => void;
   deleteCoinPackage: (packageId: string) => void;
+  saveCurrencyConfigs: (configs: CurrencyItem[]) => void;
   saveVirtualGift: (gift: Partial<VirtualGift> & { id?: string }) => void;
   deleteVirtualGift: (giftId: string) => void;
   resetVirtualGifts: () => void;
   adminApprovePayout: (requestId: string, note?: string) => void;
   adminRejectPayout: (requestId: string, note?: string) => void;
   adminUpdateUser: (userId: string, updates: Partial<UserProfile>) => void;
-  adminDeleteUser: (userId: string) => void;
+  adminDeleteUser: (userId: string) => Promise<boolean> | boolean | void;
   toggleVerifyUser: (userId: string) => void;
   toggleUserStatus: (userId: string, newStatus: 'online' | 'busy' | 'offline' | 'in_call') => void;
   manualGrantCoins: (userId: string, amount: number, reason?: string) => void;
@@ -314,18 +350,26 @@ interface AppContextType {
   syncUsersFromSupabase: (showNotification?: boolean) => Promise<{ success: boolean; count: number; users?: UserProfile[] }>;
   purgeAllMockData: () => Promise<{ success: boolean; deletedCount: number; message: string }>;
   resetMockDataGranular: (options: ResetDataOptions) => Promise<ResetResult>;
-  likePost: (postId: string) => void;
-  likeUserMoment: (userId: string, momentId: string) => boolean;
-  tipMomentCreator: (creatorId: string, coinAmount?: number) => boolean;
-  addFeedPost: (post: Omit<FeedPost, 'id' | 'createdAt' | 'likes' | 'commentsCount'>) => void;
+  likePost: (postId: string) => Promise<{ liked: boolean; likes: number } | null>;
+  likeUserMoment: (
+    userId: string,
+    momentId: string
+  ) => Promise<{ liked: boolean; likes: number } | null>;
+  tipMomentCreator: (creatorId: string, coinAmount?: number, postId?: string) => Promise<boolean>;
+  addFeedPost: (
+    post: Omit<FeedPost, 'id' | 'createdAt' | 'likes' | 'commentsCount'>
+  ) => Promise<boolean>;
+  refreshFeedPosts: () => Promise<void>;
+  fetchUserMoments: (userId: string) => Promise<FeedPost[]>;
 
   // Team Leader Operations
   createTeamLeader: (leaderData: Partial<UserProfile>) => UserProfile;
-  createCreatorByTeamLeader: (creatorData: Partial<UserProfile>, leaderId?: string) => UserProfile;
+  createCreatorByTeamLeader: (creatorData: Partial<UserProfile>, leaderId?: string) => Promise<UserProfile | null>;
   updateCreatorCoinEarnOverride: (creatorId: string, overrideRate: number | null) => void;
   banCreatorByTeamLeader: (creatorId: string, days: number, reason: string) => Promise<boolean>;
   unbanCreatorByTeamLeader: (creatorId: string) => Promise<boolean>;
   deleteCreatorByTeamLeader: (creatorId: string) => Promise<boolean>;
+  refreshTeamLeaderCreators: () => Promise<UserProfile[]>;
 
   // Silent Admin Video Call Monitoring
   adminActiveCalls: AdminActiveCall[];
@@ -334,7 +378,6 @@ interface AppContextType {
   adminTerminateCall: (callId: string, reason?: string) => Promise<boolean>;
   adminIssueCallWarning: (callId: string, warningText: string) => Promise<boolean>;
   adminCaptureEvidence: (callId: string, note?: string, snapshotUrl?: string) => void;
-  adminSpawnDemoCall: (hostId?: string, callerId?: string) => string;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -343,12 +386,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Load state — authoritative social data starts empty and is hydrated from Supabase/server
   const [users, setUsers] = useState<UserProfile[]>(() => []);
 
+  // When Supabase Auth is configured, do not restore identity from localStorage before
+  // session+profile hydrate — that briefly shows DEFAULT_FALLBACK_USER ("New Member").
   const [currentUserId, setCurrentUserId] = useState<string>(() => {
+    if (isSupabaseConfigured()) return '';
     const saved = localStorage.getItem('livecall_current_user_id');
     return saved || '';
   });
 
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
+    if (isSupabaseConfigured()) return false;
     const saved = localStorage.getItem('livecall_logged_in');
     if (saved === 'false') return false;
     if (saved === 'true') return true;
@@ -363,7 +410,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // Migrate legacy 1080p test defaults to system default 720p
         const resolution = parsed.livekitCaptureResolution === '1080p' && !parsed.livekitExplicitlySet ? '720p' : (parsed.livekitCaptureResolution || '720p');
         const profile = resolution === '4k' ? 'ultra_4k' : resolution === '1080p' ? 'hd_1080p' : resolution === '480p' ? 'standard_480p' : 'high_720p';
-        const bitrate = resolution === '4k' ? 8500 : resolution === '1080p' ? 5500 : resolution === '480p' ? 1500 : 3500;
+        // Align with smooth-call bands: 480≈1200, 720≈2200, 1080≈4000, 4k≈8500
+        const bitrate = resolution === '4k' ? 8500 : resolution === '1080p' ? 4000 : resolution === '480p' ? 1200 : 2200;
+        // Legacy 60fps defaults → 30 unless admin explicitly configured LiveKit
+        const framerate =
+          !parsed.livekitExplicitlySet && (!parsed.livekitMaxFramerate || parsed.livekitMaxFramerate > 30)
+            ? 30
+            : (parsed.livekitMaxFramerate || 30);
 
         return {
           ...INITIAL_SYSTEM_SETTINGS,
@@ -376,6 +429,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           livekitCaptureResolution: resolution,
           videoQualityProfile: profile,
           livekitMaxBitrateKbps: parsed.livekitMaxBitrateKbps && parsed.livekitCaptureResolution !== '1080p' ? parsed.livekitMaxBitrateKbps : bitrate,
+          livekitMaxFramerate: framerate,
         };
       } catch (e) {}
     }
@@ -386,6 +440,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const saved = localStorage.getItem('livecall_packages');
     return saved ? JSON.parse(saved) : INITIAL_COIN_PACKAGES;
   });
+  const [currencyConfigs, setCurrencyConfigs] = useState<CurrencyItem[]>(() =>
+    DEFAULT_CURRENCIES.map((c) => ({ ...c }))
+  );
 
   const [virtualGifts, setVirtualGifts] = useState<VirtualGift[]>(() => {
     try {
@@ -408,26 +465,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(() => []);
 
-  const [creatorReviews, setCreatorReviews] = useState<CreatorReview[]>(() => {
-    try {
-      const saved = localStorage.getItem('livecall_creator_reviews');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.filter(
-            (r: any) =>
-              r &&
-              r.creatorId !== 'u1' &&
-              r.creatorId !== 'u2' &&
-              r.creatorId !== 'u3' &&
-              r.callerId !== 'u5' &&
-              r.callerId !== 'u6'
-          );
-        }
-      }
-    } catch { }
-    return [];
-  });
+  const [creatorReviews, setCreatorReviews] = useState<CreatorReview[]>([]);
 
   const [pendingRatingCall, setPendingRatingCall] = useState<{
     creatorId: string;
@@ -435,16 +473,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     creatorAvatar: string;
     callLogId: string;
     durationSeconds: number;
+    ratingRequestMessageId?: string;
   } | null>(null);
 
-  const [readMessageIds, setReadMessageIds] = useState<string[]>(() => {
-    const saved = localStorage.getItem('livecall_read_message_ids');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [readMessageIds, setReadMessageIds] = useState<string[]>([]);
 
   const [activeCall, setActiveCall] = useState<CallSession | null>(null);
   const [toast, setToast] = useState<ToastNotification | null>(null);
-  const [fastTestMode, setFastTestMode] = useState<boolean>(false);
   // Reset barrier: prevents realtime/pollers from repopulating cleared state during a reset.
   const [isResetting, setIsResetting] = useState<boolean>(false);
   const isResettingRef = useRef<boolean>(false);
@@ -497,22 +532,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
   };
 
-  // Social & Goals State (Live from Database)
-  const [favorites, setFavorites] = useState<string[]>(() => {
-    const saved = localStorage.getItem('livecall_favorites');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // Social & Goals State — favorites/blocks hydrate from Express/Supabase (not localStorage-as-DB)
+  const [favorites, setFavorites] = useState<string[]>([]);
 
   const [friends, setFriends] = useState<string[]>(() => []);
 
-  const [blockedUserIds, setBlockedUserIds] = useState<string[]>(() => {
-    const saved = localStorage.getItem('livecall_blocked');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [blockedUserIds, setBlockedUserIds] = useState<string[]>([]);
+  const [blockedByUserIds, setBlockedByUserIds] = useState<string[]>([]);
+  const [userMatchRecords, setUserMatchRecords] = useState<
+    Array<{
+      id: string;
+      otherUserId: string;
+      status: 'pending' | 'matched' | 'rejected' | 'unmatched';
+      initiatedBy: string;
+    }>
+  >([]);
 
   const [dailyBonusClaimed, setDailyBonusClaimed] = useState<boolean>(false);
   const [dailyRewardRecord, setDailyRewardRecord] = useState<DailyRewardRecord | null>(null);
   const [isDailyRewardsModalOpen, setIsDailyRewardsModalOpen] = useState<boolean>(false);
+  const [blockReportModal, setBlockReportModal] = useState<{
+    userId: string;
+    action: 'report' | 'block';
+  } | null>(null);
 
   const [creatorGoals, setCreatorGoals] = useState<Record<string, { title: string; currentCoins: number; targetCoins: number }>>({});
 
@@ -526,21 +568,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     localStorage.setItem('livecall_live_host_ids_v2', JSON.stringify(liveHostIds));
   }, [liveHostIds]);
 
-  // Home Banners, Policies & Quick Links CMS State
-  const [homeBanners, setHomeBanners] = useState<HomeBanner[]>(() => {
-    const saved = localStorage.getItem('livecall_home_banners');
-    return saved ? JSON.parse(saved) : INITIAL_HOME_BANNERS;
-  });
-
-  const [policyDocuments, setPolicyDocuments] = useState<PolicyDocument[]>(() => {
-    const saved = localStorage.getItem('livecall_policy_documents');
-    return saved ? JSON.parse(saved) : INITIAL_POLICY_DOCUMENTS;
-  });
-
-  const [homeQuickLinks, setHomeQuickLinks] = useState<HomeQuickLink[]>(() => {
-    const saved = localStorage.getItem('livecall_home_quick_links');
-    return saved ? JSON.parse(saved) : INITIAL_HOME_QUICK_LINKS;
-  });
+  // Home Banners, Policies & Quick Links — authoritative source is Supabase (not localStorage)
+  const [homeBanners, setHomeBanners] = useState<HomeBanner[]>([]);
+  const [policyDocuments, setPolicyDocuments] = useState<PolicyDocument[]>([]);
+  const [homeQuickLinks, setHomeQuickLinks] = useState<HomeQuickLink[]>([]);
 
   const [activePolicyDoc, setActivePolicyDoc] = useState<PolicyDocument | null>(null);
 
@@ -578,7 +609,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     localStorage.setItem('livecall_incident_logs', JSON.stringify(incidentEvidenceLogs));
   }, [incidentEvidenceLogs]);
 
-  // Live Timer & Decibel Pulse for Admin Active Call Monitoring
+  // Live timer for Admin Active Call Monitoring (real duration/coin fields only — no fake audio levels)
   useEffect(() => {
     if (adminActiveCalls.length === 0) return;
 
@@ -591,17 +622,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const totalSpent = Math.max(0, Math.floor((newDuration / 60) * coinsPerMin));
           const totalEarned = Math.floor(totalSpent * 0.6); // 60% creator share
 
-          // Realistic audio decibel fluctuations for spectator HUD
-          const randomHostDecibel = Math.floor(40 + Math.random() * 45);
-          const randomCallerDecibel = Math.floor(25 + Math.random() * 50);
-
           return {
             ...call,
             durationSeconds: newDuration,
             coinsSpent: totalSpent,
             coinsEarned: totalEarned,
-            hostAudioLevel: randomHostDecibel,
-            callerAudioLevel: randomCallerDecibel,
           };
         })
       );
@@ -620,38 +645,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [systemSettings]);
 
   useEffect(() => {
-    localStorage.setItem('livecall_home_banners', JSON.stringify(homeBanners));
-  }, [homeBanners]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_creator_reviews', JSON.stringify(creatorReviews));
-  }, [creatorReviews]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_policy_documents', JSON.stringify(policyDocuments));
-  }, [policyDocuments]);
-
-  useEffect(() => {
-    localStorage.setItem('livecall_home_quick_links', JSON.stringify(homeQuickLinks));
-  }, [homeQuickLinks]);
-
-  useEffect(() => {
     localStorage.setItem('livecall_packages', JSON.stringify(coinPackages));
   }, [coinPackages]);
 
-  useEffect(() => {
-    localStorage.setItem('livecall_read_message_ids', JSON.stringify(readMessageIds));
-  }, [readMessageIds]);
+  // readMessageIds mirrors DB is_read — do not persist as authoritative localStorage state
 
   // Real-time cross-tab synchronization listener (UI preferences / ephemeral match signals only)
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'livecall_read_message_ids' && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
-          if (Array.isArray(parsed)) setReadMessageIds(parsed);
-        } catch {}
-      }
       if (e.key === 'livecall_quick_matches_sync' && e.newValue) {
         try {
           const syncData = JSON.parse(e.newValue);
@@ -713,9 +714,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       : undefined) ||
     DEFAULT_FALLBACK_USER;
 
-  // Unread messages count for current user
+  // Unread messages count for current user (DB is_read wins; readMessageIds is mirror cache)
   const unreadMessagesCount = chatMessages.filter(
-    (m) => m.receiverId === currentUser.id && !readMessageIds.includes(m.id)
+    (m) => m.receiverId === currentUser.id && m.isRead !== true && !readMessageIds.includes(m.id)
   ).length;
 
   // Pending incoming friend requests count for current user
@@ -725,7 +726,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Real-time WebSockets Engine for Multi-Device Signaling & Presence
   const wsRef = useRef<WebSocket | null>(null);
+  const wsAuthenticatedRef = useRef(false);
+  const wsConnectRef = useRef<() => void>(() => {});
+  const pendingCallReceiverRef = useRef<string | null>(null);
+  const showToastRef = useRef<(title: string, message: string, type?: 'success' | 'error' | 'info' | 'warning') => void>(
+    () => {}
+  );
   const usersRef = useRef<UserProfile[]>(users);
+  /** IDs hard-deleted this session — blocks sync/upsert resurrection. */
+  const deletedUserIdsRef = useRef<Set<string>>(new Set());
   const prevUserIdRef = useRef<string | null>(null);
   const isLoggedInRef = useRef<boolean>(isLoggedIn);
   const currentUserIdRef = useRef<string>(currentUserId);
@@ -808,15 +817,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     try {
       const email = (authUser.email || '').trim().toLowerCase();
       const meta = authUser.user_metadata || {};
-      let profile =
-        usersRef.current.find((u) => u.id === authUserId) ||
-        usersRef.current.find((u) => u.authId === authUserId) ||
-        (email
-          ? usersRef.current.find((u) => u.email && u.email.toLowerCase().trim() === email)
-          : undefined);
+      const emailLocal = email ? email.split('@')[0] : '';
+      const metaName = String(meta.full_name || meta.display_name || meta.name || '').trim();
 
-      // Fetch authoritative profile from Supabase when not already in memory
-      if (!profile && isSupabaseConfigured()) {
+      // Always prefer DB profile on hydrate so we never flash a stub "Member" name
+      // from an empty in-memory users list or incomplete auth metadata.
+      let profile: UserProfile | undefined;
+
+      if (isSupabaseConfigured()) {
         try {
           let dbProfile: any = null;
           const { data: byAuth } = await supabase
@@ -852,15 +860,35 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       }
 
-      // Minimal safe stub so UI never crashes while profile sync catches up
       if (!profile) {
-        const metaRole = (meta.role as UserRole) || 'male_user';
-        const isFemale = metaRole === 'female_user' || metaRole === 'female_creator';
+        profile =
+          usersRef.current.find((u) => u.id === authUserId) ||
+          usersRef.current.find((u) => u.authId === authUserId) ||
+          (email
+            ? usersRef.current.find((u) => u.email && u.email.toLowerCase().trim() === email)
+            : undefined);
+      }
+
+      // Minimal safe stub only when DB/profile are unavailable (e.g. brand-new session)
+      // Never accept privileged roles from Auth metadata on public rehydrate.
+      if (!profile) {
+        const PUBLIC_ROLES = new Set([
+          'male_user',
+          'female_user',
+          'female_creator',
+          'female_host',
+          'other_user',
+        ]);
+        const rawMetaRole = String(meta.role || 'male_user');
+        const metaRole = (PUBLIC_ROLES.has(rawMetaRole) ? rawMetaRole : 'male_user') as UserRole;
+        const isFemale =
+          metaRole === 'female_user' || metaRole === 'female_creator' || metaRole === 'female_host';
+        const stubName = metaName || emailLocal || 'User';
         profile = {
           ...DEFAULT_FALLBACK_USER,
           id: authUserId,
           authId: authUserId,
-          name: meta.full_name || meta.display_name || meta.name || (email ? email.split('@')[0] : 'Member'),
+          name: stubName,
           email: email || '',
           gender: isFemale ? 'female' : metaRole === 'other_user' ? 'other' : 'male',
           role: metaRole,
@@ -868,6 +896,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           onlineStatus: 'online',
           coinBalance: isFemale ? 0 : 50,
         };
+      } else {
+        // Upgrade placeholder names if auth metadata / email local-part is better
+        const placeholder =
+          !profile.name ||
+          profile.name === 'Member' ||
+          profile.name === 'New Member' ||
+          profile.name === 'User';
+        if (placeholder && (metaName || emailLocal)) {
+          profile = { ...profile, name: metaName || emailLocal };
+        }
       }
 
       // Prefer the persistent profile id when present; keep authId linked
@@ -878,6 +916,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         authId: profile.authId || authUserId,
         onlineStatus: 'online',
       };
+
+      // Ensure token is cached before flipping login flags so the WS effect can authenticate immediately
+      try {
+        const token = await getAccessToken();
+        if (token) accessTokenRef.current = token;
+      } catch {
+        // WS connect will retry token fetch
+      }
 
       isLoggedInRef.current = true;
       currentUserIdRef.current = activeId;
@@ -896,8 +942,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         });
         const next = [profile!, ...remaining];
         usersRef.current = next;
-        try {
-        } catch {}
         return next;
       });
     } finally {
@@ -987,8 +1031,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Unified helper to calculate effective coin burn rate per minute for any host/caller pair
   const getEffectiveCallRate = (hostId?: string, callerId?: string): number => {
-    if (!hostId) return systemSettings.coinBurnRatePerMin ?? 120;
-    
+    if (!hostId) {
+      return systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN;
+    }
+
     // Determine if the caller and host have an active, accepted friendship
     let isFriendPair = false;
     if (callerId && hostId) {
@@ -1006,9 +1052,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     if (isFriendPair) {
-      return systemSettings.coinBurnRateFriendPerMin ?? 80;
+      return systemSettings.coinBurnRateFriendPerMin ?? DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN;
     }
-    return systemSettings.coinBurnRatePerMin ?? 120;
+    return systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN;
   };
 
   // Live Supabase User Synchronization function (callable from DiscoveryGrid, Admin, and on mount)
@@ -1028,6 +1074,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
           // Add Supabase profiles first (strictly preserving live in-memory presence and active user edits)
           supabaseProfiles.forEach((p) => {
+            if (deletedUserIdsRef.current.has(p.id)) {
+              return;
+            }
             const localUser = localUsers.find(
               (u) =>
                 u.id === p.id ||
@@ -1075,13 +1124,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           // Check if there is already an admin profile from Supabase
           const hasSupabaseAdmin = Array.from(mergedMap.values()).some((u) => u.role === 'admin');
 
-          // Preserve any custom newly registered local profiles not yet in Supabase
+            // Preserve any custom newly registered local profiles not yet in Supabase
+          // NEVER re-upsert deleted users (that resurrected deleted Discovery profiles).
           localUsers.forEach((lu) => {
+            if (deletedUserIdsRef.current.has(lu.id)) {
+              return;
+            }
+
             const cleanEmail = lu.email ? lu.email.toLowerCase().trim() : null;
 
             // If a profile with the same email already exists, merge fields without creating duplicate
             if (cleanEmail && emailMap.has(cleanEmail)) {
               const existingId = emailMap.get(cleanEmail)!;
+              if (deletedUserIdsRef.current.has(existingId)) {
+                return;
+              }
               const existing = mergedMap.get(existingId);
               if (existing) {
                 mergedMap.set(existingId, {
@@ -1106,16 +1163,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               return;
             }
 
+            // Local-only profiles missing from Supabase: keep in memory for the current
+            // session user only. Do NOT upsert — that recreates admin-deleted accounts.
             if (!mergedMap.has(lu.id)) {
-              mergedMap.set(lu.id, lu);
-              if (cleanEmail) {
-                emailMap.set(cleanEmail, lu.id);
+              const isCurrent =
+                lu.id === currentUserIdRef.current ||
+                (cleanEmail &&
+                  usersRef.current
+                    .find((u) => u.id === currentUserIdRef.current)
+                    ?.email?.toLowerCase()
+                    .trim() === cleanEmail);
+              if (isCurrent) {
+                mergedMap.set(lu.id, lu);
+                if (cleanEmail) {
+                  emailMap.set(cleanEmail, lu.id);
+                }
               }
-              // Asynchronously push to Supabase to ensure cloud persistence
-              upsertProfileToSupabase(lu).catch(() => { });
             }
           });
 
+          // Drop any previously deleted IDs that somehow lingered in merge
+          for (const deletedId of deletedUserIdsRef.current) {
+            mergedMap.delete(deletedId);
+          }
 
           const finalProfiles = mergedMap.size > 0 ? Array.from(mergedMap.values()) : supabaseProfiles;
 
@@ -1186,25 +1256,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const categoriesCleared: string[] = [];
       let currentUsersList = [...users];
 
-      // 1. Users & Accounts
-      const mockFemaleIds = currentUsersList.filter((u) => u.gender === 'female' || u.role === 'female_creator').map((u) => u.id);
-      const mockMaleIds = currentUsersList.filter((u) => u.gender === 'male' && u.role === 'male_user').map((u) => u.id);
+      // 1. Users & Accounts — never treat "all female/male" as mock demo roster.
+      // User deletion is clearAllUsers (all non-admin) only, enforced server-side behind ALLOW_FACTORY_RESET.
       const adminDefault = currentUsersList.find((u) => u.role === 'admin') || DEFAULT_ADMIN_USER;
 
       const idsToRemove: string[] = [];
 
-      if (options.mockFemaleCreators) {
-        idsToRemove.push(...mockFemaleIds);
-        categoriesCleared.push('Female Creators');
-      }
-      if (options.mockMaleCallers) {
-        idsToRemove.push(...mockMaleIds);
-        categoriesCleared.push('Male Callers');
-      }
       if (options.customUsers) {
         const nonAdminIds = currentUsersList.filter((u) => u.role !== 'admin').map((u) => u.id);
         idsToRemove.push(...nonAdminIds);
-        categoriesCleared.push('Users');
+        categoriesCleared.push('All Non-Admin Users');
       }
 
       if (options.teamLeaderAgencies) {
@@ -1235,12 +1296,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             Authorization: `Bearer ${accessToken}`,
           },
           body: JSON.stringify({
-            clearMockUsers: Boolean(options.mockFemaleCreators || options.mockMaleCallers),
-            clearAllUsers: Boolean(options.customUsers && (options.mockFemaleCreators || options.mockMaleCallers)),
+            clearMockUsers: false,
+            clearAllUsers: Boolean(options.customUsers),
             clearAdmin: Boolean(options.adminAccount),
-            clearActiveCalls: Boolean(options.surveillanceLogs || options.callLogs),
+            clearActiveCalls: Boolean(options.surveillanceLogs || options.callLogs || options.customUsers),
             clearPresence: true,
-            mockIds: idsToRemove,
+            mockIds: options.customUsers ? [] : idsToRemove,
             chatMessages: Boolean(options.chatMessages),
             callLogs: Boolean(options.callLogs || options.quickMatchQueues),
             friendRequests: Boolean(options.friendRequests || options.friendsList),
@@ -1257,14 +1318,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             virtualGiftsCatalog: Boolean(options.virtualGiftsCatalog),
             creatorGoals: Boolean(options.creatorGoals),
             creatorAnalytics: Boolean(options.creatorAnalytics),
+            creatorReviews: Boolean(options.creatorReviews),
             dailyRewardsAndQuests: Boolean(options.dailyRewardsAndQuests),
             taxonomiesAndFlags: Boolean(options.taxonomiesAndFlags),
+            walletLedger: Boolean(
+              options.walletLedger ||
+                options.userCoins ||
+                options.creatorEarnings ||
+                options.callLogs ||
+                options.customUsers
+            ),
             purgeR2MediaStorage: Boolean(options.profilesMedia || options.r2PurgeAllUploads),
             purgeAllR2Uploads: Boolean(options.r2PurgeAllUploads),
             resetBalances: {
               callerCoins: Boolean(options.userCoins),
               creatorEarnings: Boolean(options.creatorEarnings),
-              vipTiers: Boolean(options.vipTiers),
             },
           }),
         });
@@ -1272,11 +1340,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const resetJson = await resetRes.json().catch(() => ({} as any));
         if (!resetRes.ok || resetJson?.success === false) {
           const rawError = resetJson?.error;
+          const code = typeof rawError === 'object' ? rawError?.code : undefined;
+          if (code === 'FACTORY_RESET_DISABLED' || resetRes.status === 403) {
+            throw new Error(
+              'Factory / destructive data reset is disabled on the server. Set ALLOW_FACTORY_RESET=true in the server .env, restart Node, run the wipe, then set ALLOW_FACTORY_RESET=false again.'
+            );
+          }
           const message =
             (typeof rawError === 'string' && rawError) ||
             rawError?.message ||
             `Reset API failed (${resetRes.status}).`;
           throw new Error(message);
+        }
+
+        // Tombstone wiped users so Discovery sync cannot resurrect them this session
+        if (options.customUsers) {
+          for (const id of idsToRemove) deletedUserIdsRef.current.add(id);
+          for (const u of usersRef.current) {
+            if (u.role !== 'admin') deletedUserIdsRef.current.add(u.id);
+          }
+        } else {
+          for (const id of idsToRemove) deletedUserIdsRef.current.add(id);
         }
       }
 
@@ -1296,11 +1380,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (options.adminAccount) {
         const adminIndex = currentUsersList.findIndex((u) => u.role === 'admin' || u.id === 'admin_user');
         if (adminIndex >= 0) {
-          currentUsersList[adminIndex] = { ...adminDefault, password: adminDefault.password || 'admin123' };
-        } else {
-          currentUsersList.push({ ...adminDefault, password: 'admin123' });
+          const existing = currentUsersList[adminIndex];
+          // Profile fields only — never restore a weak password or inflate coin balance
+          const { password: _discardPassword, ...adminSafe } = { ...adminDefault } as UserProfile & { password?: string };
+          currentUsersList[adminIndex] = {
+            ...existing,
+            ...adminSafe,
+            id: existing.id,
+            email: existing.email,
+            coinBalance: existing.coinBalance,
+            password: undefined,
+          };
         }
-        categoriesCleared.push('Admin Account');
+        categoriesCleared.push('Admin Profile Fields (password unchanged)');
       }
 
       // 2. Profiles & Media
@@ -1335,14 +1427,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         );
         categoriesCleared.push('Creator Earnings');
       }
-      if (options.vipTiers) {
-        currentUsersList = currentUsersList.map((u) => ({ ...u, vipTier: 'none' as const }));
-        categoriesCleared.push('VIP Memberships');
-      }
 
-      // Ensure at least admin exists if all users were wiped
+      // Ensure at least admin exists if all users were wiped (no password backdoor)
       if (currentUsersList.length === 0) {
-        currentUsersList = [{ ...adminDefault, password: 'admin123' }];
+        const { password: _discard, ...adminSafe } = { ...adminDefault } as UserProfile & { password?: string };
+        currentUsersList = [{ ...adminSafe, coinBalance: adminSafe.coinBalance ?? 0 }];
       }
 
       // If current user was removed, switch to admin or next available user
@@ -1402,6 +1491,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       if (options.blockedList) {
         setBlockedUserIds([]);
+        setBlockedByUserIds([]);
         localStorage.removeItem('livecall_blocked');
         categoriesCleared.push('Blocked Users');
       }
@@ -1474,20 +1564,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           categoriesCleared.push('Taxonomies, Tags & Moderation Flags');
         }
       }
-      if (options.homeBanners) {
-        setHomeBanners(INITIAL_HOME_BANNERS);
-        localStorage.setItem('livecall_home_banners', JSON.stringify(INITIAL_HOME_BANNERS));
-        categoriesCleared.push('Home Banners');
-      }
-      if (options.policyDocuments) {
-        setPolicyDocuments(INITIAL_POLICY_DOCUMENTS);
-        localStorage.setItem('livecall_policy_documents', JSON.stringify(INITIAL_POLICY_DOCUMENTS));
-        categoriesCleared.push('Policy Documents');
-      }
-      if (options.quickLinks) {
-        setHomeQuickLinks(INITIAL_HOME_QUICK_LINKS);
-        localStorage.setItem('livecall_home_quick_links', JSON.stringify(INITIAL_HOME_QUICK_LINKS));
-        categoriesCleared.push('Quick Links');
+      if (options.homeBanners || options.policyDocuments || options.quickLinks) {
+        try {
+          const payload: Record<string, unknown> = {};
+          if (options.homeBanners) payload.banners = INITIAL_HOME_BANNERS;
+          if (options.policyDocuments) payload.policies = INITIAL_POLICY_DOCUMENTS;
+          if (options.quickLinks) payload.quickLinks = INITIAL_HOME_QUICK_LINKS;
+          const seedRes = await authFetch('/api/admin/cms/seed-defaults', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const seedData = await seedRes.json().catch(() => ({}));
+          if (seedRes.ok && seedData.success && seedData.data) {
+            if (options.homeBanners && seedData.data.banners) {
+              setHomeBanners(seedData.data.banners);
+              categoriesCleared.push('Home Banners');
+            }
+            if (options.policyDocuments && seedData.data.policies) {
+              setPolicyDocuments(seedData.data.policies);
+              categoriesCleared.push('Policy Documents');
+            }
+            if (options.quickLinks && seedData.data.quickLinks) {
+              setHomeQuickLinks(seedData.data.quickLinks);
+              categoriesCleared.push('Quick Links');
+            }
+            localStorage.removeItem('livecall_home_banners');
+            localStorage.removeItem('livecall_policy_documents');
+            localStorage.removeItem('livecall_home_quick_links');
+          } else {
+            console.warn('CMS seed during reset failed:', seedData.error);
+          }
+        } catch (e) {
+          console.warn('CMS seed during reset exception:', e);
+        }
       }
       if (options.systemSettings) {
         setSystemSettings(INITIAL_SYSTEM_SETTINGS);
@@ -1549,16 +1659,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           if (options.creatorEarnings) {
             promises.push(resetFinancialBalancesInSupabase('creator_earnings'));
           }
-          if (options.vipTiers) {
-            promises.push(resetFinancialBalancesInSupabase('vip'));
-          }
 
           // Await relation table purges first before deleting profiles to prevent FK constraint violations
           await Promise.allSettled(promises);
 
           if (idsToRemove.length > 0) {
             await purgeMockProfilesFromSupabase(idsToRemove);
-          } else if (options.customUsers && (options.mockFemaleCreators || options.mockMaleCallers)) {
+          } else if (options.customUsers) {
             await purgeAllProfilesFromSupabase(true);
           }
         } catch (e) {
@@ -1624,14 +1731,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     message: string;
   }> => {
     const result = await resetMockDataGranular({
-      mockFemaleCreators: true,
-      mockMaleCallers: true,
-      adminAccount: true,
+      mockFemaleCreators: false,
+      mockMaleCallers: false,
+      adminAccount: false,
       customUsers: true,
       profilesMedia: true,
       userCoins: true,
       creatorEarnings: true,
-      vipTiers: true,
       payoutRequests: true,
       coinPackages: true,
       chatMessages: true,
@@ -1733,8 +1839,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     let cancelled = false;
     fetchRecentMessagesForUser(currentUserId)
       .then((msgs) => {
-        if (!cancelled && msgs && msgs.length > 0) {
+        if (!cancelled && msgs) {
           setChatMessages(msgs);
+          setReadMessageIds(
+            msgs.filter((m) => m.isRead || m.senderId === currentUserId).map((m) => m.id)
+          );
         }
       })
       .catch((e) => console.warn('Supabase messages hydrate note:', e));
@@ -1758,33 +1867,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       fetchCallLogsFromSupabase()
         .then((data) => {
-          if (data && data.length > 0) {
+          if (Array.isArray(data)) {
             setCallLogs(data);
           }
         })
         .catch((e) => console.warn('Supabase initial call logs fetch note:', e));
 
-      fetchFriendRequestsFromSupabase()
-        .then((data) => {
-          if (data && data.length > 0) {
-            setFriendRequests(data);
-            const uid = currentUserIdRef.current;
-            if (uid) {
-              const friendIds = data
-                .filter((r: any) => r.status === 'accepted' && (r.senderId === uid || r.receiverId === uid))
-                .map((r: any) => (r.senderId === uid ? r.receiverId : r.senderId));
-              setFriends(Array.from(new Set(friendIds)));
-            }
-          }
-        })
-        .catch((e) => console.warn('Supabase initial friend requests fetch note:', e));
-
       const msgUid = currentUserIdRef.current;
       if (msgUid) {
         fetchRecentMessagesForUser(msgUid)
           .then((msgs) => {
-            if (msgs && msgs.length > 0) {
+            if (msgs) {
               setChatMessages(msgs);
+              setReadMessageIds(
+                msgs.filter((m) => m.isRead || m.senderId === msgUid).map((m) => m.id)
+              );
             }
           })
           .catch((e) => console.warn('Supabase initial messages fetch note:', e));
@@ -1797,13 +1894,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               ...prev,
               coinBurnRatePerMin: data.coin_burn_rate_per_min ?? prev.coinBurnRatePerMin,
               coinBurnRateFriendPerMin: data.coin_burn_rate_friend_per_min ?? prev.coinBurnRateFriendPerMin,
-              femaleHostSharePercent: data.female_host_share_percent ?? prev.femaleHostSharePercent ?? 40,
-              teamLeaderSharePercent: data.team_leader_share_percent ?? prev.teamLeaderSharePercent ?? 10,
-              giftFemaleHostSharePercent: data.gift_female_host_share_percent ?? prev.giftFemaleHostSharePercent ?? 70,
-              giftTeamLeaderSharePercent: data.gift_team_leader_share_percent ?? prev.giftTeamLeaderSharePercent ?? 10,
+              femaleHostSharePercent:
+                data.female_host_share_percent ??
+                prev.femaleHostSharePercent ??
+                DEFAULT_FEMALE_HOST_SHARE_PERCENT,
+              femaleHostTargetSharePercent:
+                (data as any).female_host_target_share_percent ??
+                prev.femaleHostTargetSharePercent ??
+                DEFAULT_FEMALE_HOST_TARGET_SHARE_PERCENT,
+              teamLeaderSharePercent:
+                data.team_leader_share_percent ??
+                prev.teamLeaderSharePercent ??
+                DEFAULT_TEAM_LEADER_SHARE_PERCENT,
+              giftFemaleHostSharePercent:
+                data.gift_female_host_share_percent ??
+                prev.giftFemaleHostSharePercent ??
+                DEFAULT_GIFT_FEMALE_HOST_SHARE_PERCENT,
+              giftTeamLeaderSharePercent:
+                data.gift_team_leader_share_percent ??
+                prev.giftTeamLeaderSharePercent ??
+                DEFAULT_GIFT_TEAM_LEADER_SHARE_PERCENT,
               enableVirtualGifts: data.enable_virtual_gifts !== undefined ? data.enable_virtual_gifts : (prev.enableVirtualGifts ?? true),
               femaleEarningRatePerMin: data.female_earning_rate_per_min ?? prev.femaleEarningRatePerMin,
-              femalePayoutRatioUSD: data.female_payout_ratio_usd ?? prev.femalePayoutRatioUSD,
+              coinUsdPeg:
+                (data as any).coin_usd_peg ??
+                data.female_payout_ratio_usd ??
+                data.coin_to_usd_ratio ??
+                prev.coinUsdPeg,
+              coinToUSDRatio:
+                (data as any).coin_usd_peg ??
+                data.coin_to_usd_ratio ??
+                prev.coinToUSDRatio,
+              femalePayoutRatioUSD:
+                (data as any).coin_usd_peg ??
+                data.female_payout_ratio_usd ??
+                prev.femalePayoutRatioUSD,
               minPayoutThresholdUSD: data.min_payout_threshold_usd ?? prev.minPayoutThresholdUSD,
               aiNudityShieldEnabled: data.ai_nudity_shield_enabled !== undefined ? data.ai_nudity_shield_enabled : prev.aiNudityShieldEnabled,
               screenRecordingProtection: data.screen_recording_protection !== undefined ? data.screen_recording_protection : prev.screenRecordingProtection,
@@ -1818,6 +1943,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     : (data as any).flag_sizes_json)
                 : prev.flagSizes,
               creatorTargetCycle: (data as any).creator_target_cycle ?? prev.creatorTargetCycle,
+              periodCloseUtcTime: (data as any).period_close_utc_time ?? prev.periodCloseUtcTime,
+              settlementEnabled: (data as any).settlement_enabled !== undefined ? (data as any).settlement_enabled : prev.settlementEnabled,
               creatorTargetBronzeHours: (data as any).creator_target_bronze_hours ?? prev.creatorTargetBronzeHours,
               creatorTargetBronzeCoins: (data as any).creator_target_bronze_coins ?? prev.creatorTargetBronzeCoins,
               creatorTargetBronzeBonusUSD: (data as any).creator_target_bronze_bonus_usd ?? prev.creatorTargetBronzeBonusUSD,
@@ -1856,37 +1983,39 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       fetchHomeBannersFromSupabase()
         .then((banners) => {
-          if (banners && banners.length > 0) {
+          if (banners !== null) {
             setHomeBanners(banners);
-            localStorage.setItem('livecall_home_banners', JSON.stringify(banners));
+            localStorage.removeItem('livecall_home_banners');
           }
         })
-        .catch(() => { });
+        .catch((e) => console.warn('Home banners hydrate failed:', e));
 
       fetchCmsPoliciesFromSupabase()
         .then((policies) => {
-          if (policies && policies.length > 0) {
+          if (policies !== null) {
             setPolicyDocuments(policies);
-            localStorage.setItem('livecall_policy_documents', JSON.stringify(policies));
+            localStorage.removeItem('livecall_policy_documents');
           }
         })
-        .catch(() => { });
+        .catch((e) => console.warn('CMS policies hydrate failed:', e));
 
       fetchHomeQuickLinksFromSupabase()
         .then((links) => {
-          if (links && links.length > 0) {
-            setHomeQuickLinks(links);
-            localStorage.setItem('livecall_home_quick_links', JSON.stringify(links));
+          if (links !== null) {
+            // Drop retired VIP Pass shortcut if a stale DB/CMS row still exists
+            setHomeQuickLinks(
+              links.filter((l: any) => {
+                const title = String(l?.title || '').trim().toLowerCase();
+                const target = String(l?.actionTarget || '').trim().toLowerCase();
+                return title !== 'vip pass' && target !== 'vip' && l?.id !== 'link_vip_club';
+              })
+            );
+            localStorage.removeItem('livecall_home_quick_links');
           }
         })
-        .catch(() => { });
+        .catch((e) => console.warn('Home quick links hydrate failed:', e));
 
-      fetchFeedPostsFromSupabase()
-        .then((posts) => {
-          if (posts && posts.length > 0) {
-            setFeedPosts(posts);
-          }
-        })
+      refreshFeedPosts()
         .catch(() => { });
 
       fetchCoinPackagesFromSupabase()
@@ -1894,6 +2023,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           if (pkgs && pkgs.length > 0) {
             setCoinPackages(pkgs);
             localStorage.setItem('livecall_packages', JSON.stringify(pkgs));
+          }
+        })
+        .catch(() => { });
+
+      fetchCurrencyConfigsFromSupabase()
+        .then((rows) => {
+          if (rows && rows.length > 0) {
+            setCurrencyConfigs(rows);
           }
         })
         .catch(() => { });
@@ -1966,7 +2103,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         avatarUrl: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&q=80&w=400',
         nationality: 'United States',
         countryCode: 'US',
-        vipTier: 'gold',
         coinBalance: 350,
         gender: 'male',
         role: 'male_user',
@@ -1998,7 +2134,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       callerAvatar: caller.avatarUrl,
       callerCountry: caller.nationality || 'United States',
       callerCountryCode: caller.countryCode || 'US',
-      callerVipTier: caller.vipTier || 'gold',
       callerCoinBalance: caller.coinBalance || 350,
       startTime: sc.startTime || Date.now(),
       durationSeconds: durationSec,
@@ -2014,8 +2149,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       safetyScore: 99.9,
       safetyFlag: 'clean',
       aiShieldActive: false,
-      hostAudioLevel: 55,
-      callerAudioLevel: 40,
     };
   };
 
@@ -2080,13 +2213,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       accessTokenRef.current = token;
       try {
         const activeUid = currentUserIdRef.current;
-        const currentProfile = activeUid ? usersRef.current.find((u) => u.id === activeUid) : null;
-        const myStatus = (isLoggedInRef.current && activeUid) ? (currentProfile?.onlineStatus || 'online') : 'offline';
+        // Never invent busy from client — server derives busy from activeCalls
+        const myStatus: 'online' | 'offline' = isLoggedInRef.current && activeUid ? 'online' : 'offline';
 
         const res = await authFetch('/api/presence/heartbeat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: activeUid, status: myStatus }),
+          body: JSON.stringify({ status: myStatus }),
         });
 
         if (res.ok && !isCancelled) {
@@ -2097,7 +2230,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               let hasChanged = false;
               const next = prev.map((u) => {
                 if (u.id === currentUserIdRef.current && isLoggedInRef.current) {
-                  const liveCallStatus = getUserCallStatus(u.id, myStatus);
+                  const liveCallStatus = getUserCallStatus(u.id, data.status || presence[u.id] || myStatus);
                   if (u.onlineStatus !== liveCallStatus) {
                     hasChanged = true;
                     return { ...u, onlineStatus: liveCallStatus };
@@ -2128,23 +2261,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!token) return;
       accessTokenRef.current = token;
       try {
-        // 1. Push current user's active status to Supabase for persistence
-        if (isLoggedInRef.current && currentUserIdRef.current) {
-          const currentProfile = usersRef.current.find((u) => u.id === currentUserIdRef.current);
-          const myStatus = currentProfile?.onlineStatus || 'online';
-          updateUserStatusInSupabase(currentUserIdRef.current, myStatus).catch(() => { });
-        }
+        // Status/last_seen persistence is server-owned via presence heartbeat.
+        // Do not push client online_status here — it can overwrite authoritative busy.
 
-        // 2. Sync friend requests from Supabase database
-        const dbRequests = await fetchFriendRequestsFromSupabase();
-        if (dbRequests && Array.isArray(dbRequests) && !isCancelled) {
-          setFriendRequests(dbRequests);
-          const uid = currentUserIdRef.current;
-          if (uid) {
-            const friendIds = dbRequests
-              .filter((r: any) => r.status === 'accepted' && (r.senderId === uid || r.receiverId === uid))
-              .map((r: any) => (r.senderId === uid ? r.receiverId : r.senderId));
-            setFriends(Array.from(new Set(friendIds)));
+        // 2. Sync friend requests from Express (JWT-derived actor; not client Supabase)
+        const frRes = await authFetch('/api/v1/friends/requests');
+        if (frRes.ok && !isCancelled) {
+          const frJson = await frRes.json().catch(() => null);
+          if (frJson?.success) {
+            if (Array.isArray(frJson.data?.requests)) {
+              setFriendRequests(frJson.data.requests as FriendRequest[]);
+            }
+            if (Array.isArray(frJson.data?.friendIds)) {
+              setFriends(frJson.data.friendIds.map(String));
+            }
           }
         }
       } catch (e) {
@@ -2165,8 +2295,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const data = await res.json();
           if (data.success && Array.isArray(data.users)) {
             setUsers((prev) => {
-              const serverUsersMap = new Map<string, UserProfile>(data.users.map((u: UserProfile) => [u.id, u]));
-              const updated = prev.map((u) => {
+              const serverUsersMap = new Map<string, UserProfile>(
+                data.users
+                  .filter((u: UserProfile) => u?.id && !deletedUserIdsRef.current.has(u.id))
+                  .map((u: UserProfile) => [u.id, u])
+              );
+              const updated = prev
+                .filter((u) => !deletedUserIdsRef.current.has(u.id))
+                .map((u) => {
                 // NEVER overwrite current logged-in user profile details with stale server data
                 if (u.id === currentUserIdRef.current && isLoggedInRef.current) {
                   return u;
@@ -2179,6 +2315,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 return u;
               });
               data.users.forEach((su: UserProfile) => {
+                if (!su?.id || deletedUserIdsRef.current.has(su.id)) return;
                 if (!updated.some((u) => u.id === su.id)) {
                   updated.push({ ...su, onlineStatus: getUserCallStatus(su.id, 'offline') });
                 }
@@ -2192,16 +2329,32 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     };
 
-    function connect() {
+    function connect(retryAttempt = 0) {
       if (isCancelled) return;
       // Do not open a socket until we have a real session — unauthenticated open/close spam is noisy in DevTools
       if (!isLoggedInRef.current || !currentUserIdRef.current) return;
+
+      // Avoid stacking duplicate sockets while one is already connecting/open
+      if (
+        wsRef.current &&
+        (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+
       const cachedToken = accessTokenRef.current;
       if (!cachedToken) {
         void getAccessToken().then((token) => {
-          if (isCancelled || !token) return;
+          if (isCancelled) return;
+          if (!token) {
+            // Session may still be settling after login — retry briefly
+            if (retryAttempt < 8) {
+              setTimeout(() => connect(retryAttempt + 1), 250 * (retryAttempt + 1));
+            }
+            return;
+          }
           accessTokenRef.current = token;
-          connect();
+          connect(0);
         });
         return;
       }
@@ -2211,13 +2364,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       ws = new WebSocket(wsUrl);
       wsRef.current = ws;
+      wsAuthenticatedRef.current = false;
 
       ws.onopen = () => {
         if (isCancelled) return;
         void (async () => {
           const accessToken = accessTokenRef.current || (await getAccessToken());
           if (!accessToken) {
+            wsAuthenticatedRef.current = false;
             ws?.close();
+            if (!isCancelled && retryAttempt < 8) {
+              setTimeout(() => connect(retryAttempt + 1), 400);
+            }
             return;
           }
           accessTokenRef.current = accessToken;
@@ -2227,21 +2385,59 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               accessToken,
             })
           );
-          prevUserIdRef.current = currentUserId;
-          const me = usersRef.current.find((u) => u.id === currentUserIdRef.current);
-          if (me?.role === 'admin') {
-            ws?.send(JSON.stringify({ type: 'admin:get_active_calls' }));
-          }
+          prevUserIdRef.current = currentUserIdRef.current;
         })();
-
-        // Send instant heartbeat
-        ws?.send(JSON.stringify({ type: 'heartbeat', userId: currentUserId }));
       };
 
       ws.onmessage = (event) => {
         if (isCancelled || isResettingRef.current) return;
         try {
           const data = JSON.parse(event.data);
+
+          if (data.type === 'auth:ok') {
+            wsAuthenticatedRef.current = true;
+            const me = usersRef.current.find((u) => u.id === currentUserIdRef.current);
+            if (me?.role === 'admin') {
+              ws?.send(JSON.stringify({ type: 'admin:get_active_calls' }));
+            }
+            ws?.send(JSON.stringify({ type: 'heartbeat', userId: currentUserIdRef.current }));
+
+            // Flush a call that was waiting for signaling to come online
+            const pendingReceiver = pendingCallReceiverRef.current;
+            if (pendingReceiver && wsRef.current?.readyState === WebSocket.OPEN) {
+              pendingCallReceiverRef.current = null;
+              wsRef.current.send(
+                JSON.stringify({
+                  type: 'call:initiate',
+                  callerId: currentUserIdRef.current,
+                  receiverId: pendingReceiver,
+                })
+              );
+              const receiver = usersRef.current.find((u) => u.id === pendingReceiver);
+              showToastRef.current(
+                'Calling... 📞',
+                `Ringing ${receiver?.name || 'user'}. Waiting for call acceptance...`,
+                'info'
+              );
+            }
+            return;
+          }
+
+          if (data.type === 'auth:error') {
+            wsAuthenticatedRef.current = false;
+            console.warn('[WS] Auth failed:', data.error);
+            // Refresh token and reconnect
+            accessTokenRef.current = null;
+            void getAccessToken().then((token) => {
+              if (token) accessTokenRef.current = token;
+              try {
+                ws?.close();
+              } catch {
+                // ignore
+              }
+            });
+            return;
+          }
 
           if (data.type === 'presence:all') {
             const presence: Record<string, 'online' | 'busy' | 'offline'> = data.presence || {};
@@ -2260,11 +2456,39 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               });
               return changed ? next : prev;
             });
+          } else if (data.type === 'heartbeat:ack') {
+            if (data.status && currentUserIdRef.current) {
+              const live = getUserCallStatus(currentUserIdRef.current, data.status);
+              setUsers((prev) => {
+                const idx = prev.findIndex((u) => u.id === currentUserIdRef.current);
+                if (idx === -1 || prev[idx].onlineStatus === live) return prev;
+                const next = [...prev];
+                next[idx] = { ...next[idx], onlineStatus: live };
+                return next;
+              });
+            }
+          } else if (data.type === 'creator_metrics:all') {
+            if (data.metrics && typeof data.metrics === 'object') {
+              setCreatorMetricsMap(data.metrics as Record<string, CreatorMetrics>);
+            }
+          } else if (data.type === 'creator_metrics:update') {
+            if (data.creatorId && data.metrics) {
+              setCreatorMetricsMap((prev) => ({
+                ...prev,
+                [data.creatorId]: data.metrics as CreatorMetrics,
+              }));
+            }
           } else if (data.type === 'users:all') {
             if (Array.isArray(data.users) && data.users.length > 0) {
               setUsers((prev) => {
-                const serverMap = new Map<string, UserProfile>(data.users.map((u: UserProfile) => [u.id, u]));
-                const merged = prev.map((u) => {
+                const serverMap = new Map<string, UserProfile>(
+                  data.users
+                    .filter((u: UserProfile) => u?.id && !deletedUserIdsRef.current.has(u.id))
+                    .map((u: UserProfile) => [u.id, u])
+                );
+                const merged = prev
+                  .filter((u) => !deletedUserIdsRef.current.has(u.id))
+                  .map((u) => {
                   const serverUser =
                     serverMap.get(u.id) ||
                     (u.authId
@@ -2292,6 +2516,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   return { ...u, ...serverUser, onlineStatus: callStatus };
                 });
                 data.users.forEach((su: UserProfile) => {
+                  if (!su?.id || deletedUserIdsRef.current.has(su.id)) return;
                   const suEmail = su.email ? su.email.toLowerCase().trim() : null;
                   const alreadyPresent = merged.some(
                     (u) =>
@@ -2306,10 +2531,47 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 return merged;
               });
             }
+          } else if (data.type === 'users:deleted') {
+            const deletedId = data.userId ? String(data.userId) : '';
+            if (deletedId) {
+              deletedUserIdsRef.current.add(deletedId);
+            }
+            setUsers((prev) => {
+              let next = prev.filter((u) => !deletedUserIdsRef.current.has(u.id));
+              if (deletedId) {
+                next = next.filter((u) => u.id !== deletedId);
+              }
+              if (Array.isArray(data.users) && data.users.length > 0) {
+                const map = new Map<string, UserProfile>();
+                for (const u of next) {
+                  if (!deletedUserIdsRef.current.has(u.id)) map.set(u.id, u);
+                }
+                for (const su of data.users as UserProfile[]) {
+                  if (!su?.id || deletedUserIdsRef.current.has(su.id)) continue;
+                  const prior = map.get(su.id);
+                  map.set(su.id, prior ? { ...prior, ...su, onlineStatus: getUserCallStatus(su.id, su.onlineStatus || prior.onlineStatus) } : { ...su, onlineStatus: getUserCallStatus(su.id, su.onlineStatus || 'offline') });
+                }
+                if (deletedId) map.delete(deletedId);
+                next = Array.from(map.values());
+              }
+              usersRef.current = next;
+              return next;
+            });
+            if (deletedId) {
+              setCreatorMetricsMap((prev) => {
+                if (!prev[deletedId]) return prev;
+                const next = { ...prev };
+                delete next[deletedId];
+                return next;
+              });
+            }
           } else if (data.type === 'users:updated') {
             if (data.user) {
               setUsers((prev) => {
                 const incoming = data.user as UserProfile;
+                if (incoming?.id && deletedUserIdsRef.current.has(incoming.id)) {
+                  return prev;
+                }
                 const cleanEmail = incoming.email ? incoming.email.toLowerCase().trim() : null;
                 const authId = incoming.authId || null;
                 const remaining = prev.filter((u) => {
@@ -2407,11 +2669,61 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           } else if (data.type === 'call:ended') {
             billedMinutesRef.current.clear();
             burnInFlightRef.current.clear();
+            const endedCallSnapshot = activeCallRef.current;
             setActiveCall(null);
             if (data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE') {
               showToast('Call Ended', 'Call ended due to insufficient coin balance.', 'error');
+            } else if (data.outcome === 'declined' || data.status === 'declined') {
+              showToast('Call Declined 🚫', 'The call was declined.', 'info');
+            } else if (data.outcome === 'missed' || data.status === 'missed' || data.reason === 'Ring timeout') {
+              showToast('Call Missed', data.reason === 'Ring timeout' ? 'No answer — ring timed out.' : 'Call was not answered.', 'info');
             } else {
               showToast('Call Ended', 'The call was ended or declined.', 'info');
+            }
+
+            // Merge ringing outcome into local call logs immediately (authoritative refresh follows)
+            const outcomeStatus = String(data.outcome || data.status || '');
+            if (
+              endedCallSnapshot &&
+              (outcomeStatus === 'missed' ||
+                outcomeStatus === 'declined' ||
+                outcomeStatus === 'failed' ||
+                data.reason === 'Ring timeout')
+            ) {
+              const caller = usersRef.current.find((u) => u.id === endedCallSnapshot.callerId);
+              const receiver = usersRef.current.find((u) => u.id === endedCallSnapshot.receiverId);
+              if (caller && receiver) {
+                const optimistic: CallLogItem = {
+                  id: endedCallSnapshot.id,
+                  callerId: caller.id,
+                  callerName: caller.name,
+                  callerAvatar: caller.avatarUrl,
+                  callerCountry: caller.nationality,
+                  receiverId: receiver.id,
+                  receiverName: receiver.name,
+                  receiverAvatar: receiver.avatarUrl,
+                  startTime: endedCallSnapshot.startTime || Date.now(),
+                  endTime: Date.now(),
+                  durationSeconds: 0,
+                  coinsSpent: 0,
+                  coinsEarned: 0,
+                  timestamp: 'Just now',
+                  wasFriendCall: false,
+                  status: outcomeStatus === 'failed' ? 'failed' : outcomeStatus === 'declined' ? 'declined' : 'missed',
+                };
+                setCallLogs((prev) => {
+                  const withoutDup = prev.filter((l) => l.id !== optimistic.id);
+                  return [optimistic, ...withoutDup];
+                });
+              }
+            }
+
+            if (isSupabaseConfigured()) {
+              fetchCallLogsFromSupabase()
+                .then((logs) => {
+                  if (Array.isArray(logs)) setCallLogs(logs);
+                })
+                .catch((e) => console.warn('[WS] call:ended call_logs refresh note:', e));
             }
           } else if (data.type === 'wallet:burn_result') {
             // Authoritative balances from server billing — update HUD immediately
@@ -2441,6 +2753,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           } else if (data.type === 'call:failed') {
             setActiveCall(null);
             showToast('Call Unavailable 🚫', data.reason || 'User is offline or unavailable.', 'error');
+          } else if (data.type === 'call_logs:updated') {
+            // Refresh platform/admin financial KPIs from authoritative DB call_logs
+            if (isSupabaseConfigured()) {
+              fetchCallLogsFromSupabase()
+                .then((logs) => {
+                  if (Array.isArray(logs)) {
+                    setCallLogs(logs);
+                  }
+                })
+                .catch((e) => console.warn('[WS] call_logs refresh note:', e));
+            }
           } else if (data.type === 'admin:active_calls_update') {
             const serverCalls: Array<{ id: string; callerId: string; receiverId: string; status: 'active' | 'ringing'; startTime: number; durationSeconds: number }> = data.activeCalls || [];
             if (serverCalls.length === 0) {
@@ -2450,10 +2773,83 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               setAdminActiveCalls(mappedCalls);
             }
           } else if (data.type === 'chat:message') {
-            if (data.message) {
+            // Fast WS notify after POST /api/messages (server-authored). Dedupe vs Realtime / optimistic.
+            const incoming = data.message;
+            if (incoming?.id && typeof incoming.id === 'string') {
               setChatMessages((prev) => {
-                if (prev.some((m) => m.id === data.message.id)) return prev;
-                return [...prev, data.message];
+                if (prev.some((m) => m.id === incoming.id)) {
+                  // Ensure clientTempId sticks on an existing durable row (helps overlay reconcile)
+                  const tempId =
+                    typeof incoming.clientTempId === 'string' ? incoming.clientTempId : null;
+                  if (!tempId) return prev;
+                  return prev.map((m) =>
+                    m.id === incoming.id && !m.clientTempId ? { ...m, clientTempId: tempId } : m
+                  );
+                }
+                const tempId =
+                  typeof incoming.clientTempId === 'string' ? incoming.clientTempId : null;
+                const withoutTemp = tempId
+                  ? prev.filter((m) => m.id !== tempId && m.clientTempId !== tempId)
+                  : prev;
+                return [
+                  ...withoutTemp,
+                  {
+                    ...incoming,
+                    isRead: Boolean(incoming.isRead),
+                    createdAt: incoming.createdAt || incoming.timestamp,
+                    timestamp: incoming.createdAt || incoming.timestamp || new Date().toISOString(),
+                    clientTempId: tempId || incoming.clientTempId,
+                  },
+                ];
+              });
+            }
+          } else if (data.type === 'chat:incall_preview') {
+            // Pre-DB peer notify for in-call chat (WS path). Durable chat:message reconciles later.
+            const p = data.payload || data;
+            const tempId = typeof p.clientTempId === 'string' ? p.clientTempId.trim() : '';
+            const senderId = typeof p.senderId === 'string' ? p.senderId : '';
+            const receiverId = typeof p.receiverId === 'string' ? p.receiverId : '';
+            const text = typeof p.text === 'string' ? p.text : '';
+            const myUid = currentUserIdRef.current;
+            if (
+              tempId &&
+              senderId &&
+              receiverId &&
+              myUid &&
+              (myUid === receiverId || myUid === senderId) &&
+              text
+            ) {
+              setChatMessages((prev) => {
+                if (prev.some((m) => m.id === tempId || m.clientTempId === tempId)) return prev;
+                // Already have durable copy for this logical message
+                if (
+                  prev.some(
+                    (m) =>
+                      !m.id.startsWith('temp_') &&
+                      m.senderId === senderId &&
+                      m.receiverId === receiverId &&
+                      m.text === text
+                  )
+                ) {
+                  return prev;
+                }
+                const msgType = p.messageType === 'gift' ? 'gift' : 'text';
+                const nowIso = new Date().toISOString();
+                return [
+                  ...prev,
+                  {
+                    id: tempId,
+                    clientTempId: tempId,
+                    senderId,
+                    receiverId,
+                    text,
+                    originalLanguage: 'English',
+                    type: msgType as ChatMessage['type'],
+                    isRead: myUid === senderId,
+                    createdAt: nowIso,
+                    timestamp: nowIso,
+                  },
+                ];
               });
             }
           } else if (data.type === 'match:created') {
@@ -2611,8 +3007,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
 
       ws.onclose = () => {
+        wsAuthenticatedRef.current = false;
         if (!isCancelled && !isResettingRef.current && isLoggedInRef.current) {
-          setTimeout(connect, 3000);
+          setTimeout(() => connect(0), 1500);
         }
       };
 
@@ -2621,8 +3018,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
     }
 
+    wsConnectRef.current = () => connect(0);
+
     // Connect WebSocket only when authenticated (effect re-runs on currentUserId / login)
-    connect();
+    connect(0);
 
     // Initial presence + Supabase status push (authoritative DB sync; not a tight poll loop)
     if (isLoggedInRef.current) {
@@ -2728,16 +3127,57 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Supabase Realtime channel subscription for multi-device broadcast redundancy
     let unsubscribeSupabaseChat = () => { };
     if (isSupabaseConfigured()) {
-      unsubscribeSupabaseChat = subscribeToRealtimeChat(currentUserId, (incomingMsg) => {
-        setChatMessages((prev) => {
-          if (prev.some((m) => m.id === incomingMsg.id)) return prev;
-          return [...prev, incomingMsg];
-        });
-      });
+      unsubscribeSupabaseChat = subscribeToRealtimeChat(
+        currentUserId,
+        (incomingMsg) => {
+          setChatMessages((prev) => {
+            // Dedupe by server id; also replace optimistic temp rows and keep clientTempId
+            if (prev.some((m) => m.id === incomingMsg.id)) return prev;
+            const matchedTemp = prev.find(
+              (m) =>
+                m.id.startsWith('temp_') &&
+                m.senderId === incomingMsg.senderId &&
+                m.receiverId === incomingMsg.receiverId &&
+                m.text === incomingMsg.text &&
+                (m.mediaUrl || '') === (incomingMsg.mediaUrl || '')
+            );
+            const withoutTempDup = matchedTemp
+              ? prev.filter((m) => m.id !== matchedTemp.id && m.clientTempId !== matchedTemp.id)
+              : prev.filter(
+                  (m) =>
+                    !(
+                      m.id.startsWith('temp_') &&
+                      m.senderId === incomingMsg.senderId &&
+                      m.receiverId === incomingMsg.receiverId &&
+                      m.text === incomingMsg.text &&
+                      (m.mediaUrl || '') === (incomingMsg.mediaUrl || '')
+                    )
+                );
+            return [
+              ...withoutTempDup,
+              {
+                ...incomingMsg,
+                clientTempId:
+                  incomingMsg.clientTempId ||
+                  matchedTemp?.clientTempId ||
+                  matchedTemp?.id ||
+                  undefined,
+              },
+            ];
+          });
+        },
+        (updatedMsg) => {
+          setChatMessages((prev) =>
+            prev.map((m) => (m.id === updatedMsg.id ? { ...m, ...updatedMsg } : m))
+          );
+        }
+      );
     }
 
     return () => {
       isCancelled = true;
+      wsAuthenticatedRef.current = false;
+      wsConnectRef.current = () => {};
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (presenceSyncTimer) clearInterval(presenceSyncTimer);
       if (userDirectoryTimer) clearInterval(userDirectoryTimer);
@@ -2773,6 +3213,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       toastTimerRef.current = null;
     }, 3000);
   };
+  showToastRef.current = showToast;
 
   const switchUser = (_userOrId: string | UserProfile) => {
     showToast('Sign in required', 'Account switching without a password is disabled. Use email and password.', 'error');
@@ -2783,44 +3224,56 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       showToast('Sign in failed', 'Missing authenticated profile.', 'error');
       return;
     }
+    // Prefer persisted onboarding flags from the profile payload (DB), never invent them locally
     const activeId = profile.id;
     const oldId = currentUserIdRef.current;
-    isLoggedInRef.current = true;
-    currentUserIdRef.current = activeId;
-    setCurrentUserId(activeId);
-    setIsLoggedIn(true);
-    localStorage.setItem('livecall_logged_in', 'true');
-    localStorage.setItem('livecall_current_user_id', activeId);
-    void getAccessToken().then((token) => {
-      accessTokenRef.current = token;
-    });
 
-    const activeProfile: UserProfile = { ...profile, id: activeId, onlineStatus: 'online' };
-    setUsers((prev) => {
-      const cleanEmail = activeProfile.email ? activeProfile.email.toLowerCase().trim() : null;
-      const remaining = prev.filter((u) => {
-        if (u.id === activeId) return false;
-        if (activeProfile.authId && (u.id === activeProfile.authId || u.authId === activeProfile.authId)) return false;
-        if (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail) return false;
-        return true;
+    const finishLogin = (token: string | null) => {
+      if (token) accessTokenRef.current = token;
+      isLoggedInRef.current = true;
+      currentUserIdRef.current = activeId;
+      setCurrentUserId(activeId);
+      setIsLoggedIn(true);
+      localStorage.setItem('livecall_logged_in', 'true');
+      localStorage.setItem('livecall_current_user_id', activeId);
+
+      const activeProfile: UserProfile = {
+        ...profile,
+        id: activeId,
+        onlineStatus: 'online',
+        isOnboarded: Boolean(profile.isOnboarded),
+      };
+      setUsers((prev) => {
+        const cleanEmail = activeProfile.email ? activeProfile.email.toLowerCase().trim() : null;
+        const remaining = prev.filter((u) => {
+          if (u.id === activeId) return false;
+          if (activeProfile.authId && (u.id === activeProfile.authId || u.authId === activeProfile.authId)) return false;
+          if (cleanEmail && u.email && u.email.toLowerCase().trim() === cleanEmail) return false;
+          return true;
+        });
+        const next = [activeProfile, ...remaining];
+        usersRef.current = next;
+        return next;
       });
-      const next = [activeProfile, ...remaining];
-      usersRef.current = next;
-      return next;
-    });
 
-    updateUserStatusInSupabase(activeId, 'online').catch(() => {});
-    authFetch('/api/supabase/update-status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'online' }),
-    }).catch(() => {});
+      updateUserStatusInSupabase(activeId, 'online').catch(() => {});
+      authFetch('/api/supabase/update-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'online' }),
+      }).catch(() => {});
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      void getAccessToken().then((accessToken) => {
-        wsRef.current?.send(JSON.stringify({ type: 'auth', accessToken, prevUserId: oldId }));
-      });
-    }
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && token) {
+        wsRef.current.send(JSON.stringify({ type: 'auth', accessToken: token, prevUserId: oldId }));
+      } else {
+        // Kick WS connect once login flags + token are ready
+        setTimeout(() => wsConnectRef.current(), 0);
+      }
+    };
+
+    void getAccessToken()
+      .then((token) => finishLogin(token))
+      .catch(() => finishLogin(accessTokenRef.current));
   };
 
   const switchRolePersona = (_role: UserRole) => {
@@ -2843,6 +3296,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Mark local session offline immediately (stops heartbeats from pushing "online")
     isLoggedInRef.current = false;
     currentUserIdRef.current = '';
+    wsAuthenticatedRef.current = false;
+    pendingCallReceiverRef.current = null;
 
     setUsers((prev) =>
       prev.map((u) =>
@@ -3211,7 +3666,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const pkg = coinPackages.find((p) => p.id === packageId);
     if (!pkg) return;
 
-    const totalToAdd = pkg.coins + pkg.bonusCoins;
+    const totalToAdd = (Number(pkg.coins) || 0) + (Number(pkg.bonusCoins) || 0);
     const target = usersRef.current.find((u) => u.id === currentUser.id) || currentUser;
     const updatedBal = (Number(target.coinBalance) || 0) + totalToAdd;
     const updatedUserObj: UserProfile = { ...target, coinBalance: updatedBal };
@@ -3241,19 +3696,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       `Successfully added ${totalToAdd} coins (${pkg.coins} + ${pkg.bonusCoins} bonus) to your wallet!`,
       'success'
     );
-  };
-
-  // Purchase VIP
-  const purchaseVip = (tier: 'bronze' | 'silver' | 'gold' | 'diamond') => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return { ...u, vipTier: tier, coinBalance: u.coinBalance + 100 };
-        }
-        return u;
-      })
-    );
-    showToast('VIP Upgrade!', `Congratulations, you are now a ${(tier || 'gold').toUpperCase()} VIP member!`, 'success');
   };
 
   // Call System & Coin Burn Ticker
@@ -3307,7 +3749,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return false;
     }
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && wsAuthenticatedRef.current) {
       wsRef.current.send(
         JSON.stringify({
           type: 'call:initiate',
@@ -3315,16 +3757,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           receiverId: receiverId,
         })
       );
-    } else {
-      showToast('Reconnecting...', 'Connecting to signaling server. Please try again in 2 seconds.', 'warning');
-      return false;
+      showToast(
+        'Calling... 📞',
+        `Ringing ${receiver.name}. Waiting for call acceptance...`,
+        'info'
+      );
+      return true;
     }
 
+    // Signaling not ready yet — queue the call and force a reconnect
+    pendingCallReceiverRef.current = receiverId;
+    wsConnectRef.current();
     showToast(
-      'Calling... 📞',
-      `Ringing ${receiver.name}. Waiting for call acceptance...`,
+      'Connecting...',
+      'Securing the call channel. Your call will start automatically in a moment.',
       'info'
     );
+    window.setTimeout(() => {
+      if (pendingCallReceiverRef.current !== receiverId) return;
+      pendingCallReceiverRef.current = null;
+      showToast(
+        'Call Failed',
+        'Could not reach the signaling server. Please refresh the page and try again.',
+        'error'
+      );
+    }, 8000);
     return true;
   };
 
@@ -3369,18 +3826,54 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const rejectCall = () => {
     if (!activeCall) return;
     const rejectedCall = activeCall;
+    const isCaller = currentUser.id === rejectedCall.callerId;
+    const outcome = isCaller ? 'missed' : 'declined';
+    const wsType = isCaller ? 'call:cancel' : 'call:reject';
+    const reason = isCaller ? 'Caller hangup' : 'Receiver reject';
+    const endNow = Date.now();
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
-          type: 'call:reject',
+          type: wsType,
           callId: rejectedCall.id,
           userId: currentUser.id,
+          outcome,
+          reason,
         })
       );
     }
 
-    // Sync call end to backend signaling server
+    const caller = users.find((u) => u.id === rejectedCall.callerId);
+    const receiver = users.find((u) => u.id === rejectedCall.receiverId);
+    const isFriendCall = isFriend(rejectedCall.receiverId) || isFriend(rejectedCall.callerId);
+
+    if (caller && receiver) {
+      const newLog: CallLogItem = {
+        id: rejectedCall.id,
+        callerId: caller.id,
+        callerName: caller.name,
+        callerAvatar: caller.avatarUrl,
+        callerCountry: caller.nationality,
+        receiverId: receiver.id,
+        receiverName: receiver.name,
+        receiverAvatar: receiver.avatarUrl,
+        startTime: rejectedCall.startTime || endNow,
+        endTime: endNow,
+        durationSeconds: 0,
+        coinsSpent: 0,
+        coinsEarned: 0,
+        timestamp: 'Just now',
+        wasFriendCall: isFriendCall,
+        status: outcome,
+      };
+      setCallLogs((prev) => {
+        const withoutDup = prev.filter((l) => l.id !== newLog.id);
+        return [newLog, ...withoutDup];
+      });
+    }
+
+    // Sync call end to backend — persist missed/declined even at 0 duration
     authFetch('/api/calls/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3389,6 +3882,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         callerId: rejectedCall.callerId,
         receiverId: rejectedCall.receiverId,
         status: 'ended',
+        outcome,
+        endedBy: currentUser.id,
+        reason,
+        durationSeconds: 0,
+        coinsSpent: 0,
+        coinsEarned: 0,
+        wasFriendCall: isFriendCall,
+        callerName: caller?.name,
+        receiverName: receiver?.name,
+        startTime: rejectedCall.startTime || endNow,
+        endTime: endNow,
       }),
     }).catch(() => {});
 
@@ -3409,34 +3913,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     setActiveCall(null);
-    showToast('Call Declined 🚫', 'The call was declined or cancelled.', 'info');
+    showToast(
+      outcome === 'declined' ? 'Call Declined 🚫' : 'Call Cancelled',
+      outcome === 'declined' ? 'The call was declined.' : 'You cancelled the call before it was answered.',
+      'info'
+    );
   };
 
   const endCall = () => {
     if (!activeCall) return;
     const endedCall = activeCall;
+    const wasRinging = endedCall.status === 'ringing';
+    const isCaller = currentUser.id === endedCall.callerId;
+    const endNow = Date.now();
+
+    // Ringing hangup should classify like cancel/decline (not completed)
+    const ringingOutcome = wasRinging ? (isCaller ? 'missed' : 'declined') : null;
+    const wsType = wasRinging ? (isCaller ? 'call:cancel' : 'call:reject') : 'call:end';
+    const reason = wasRinging
+      ? isCaller
+        ? 'Caller hangup'
+        : 'Receiver reject'
+      : undefined;
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
-          type: 'call:end',
+          type: wsType,
           callId: endedCall.id,
           userId: currentUser.id,
+          outcome: ringingOutcome || 'completed',
+          reason,
         })
       );
     }
-
-    // Sync call end to backend signaling server
-    authFetch('/api/calls/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        callId: endedCall.id,
-        callerId: endedCall.callerId,
-        receiverId: endedCall.receiverId,
-        status: 'ended',
-      }),
-    }).catch(() => {});
 
     // Reset caller and receiver status back to online in memory
     setUsers((prev) =>
@@ -3454,7 +3964,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       updateUserStatusInSupabase(endedCall.receiverId, 'online').catch(() => {});
     }
 
-    if (endedCall.durationSeconds > 0) {
+    if (!wasRinging && endedCall.durationSeconds > 0) {
       recordVideoCallDuration(endedCall.durationSeconds);
     }
 
@@ -3463,8 +3973,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const isFriendCall = isFriend(endedCall.receiverId) || isFriend(endedCall.callerId);
 
     if (caller && receiver) {
+      const tlId = receiver.teamLeaderId || receiver.createdById || null;
+      const tlSharePct = systemSettings.teamLeaderSharePercent ?? 10;
+      const estimatedTlEarned =
+        !wasRinging && tlId && endedCall.coinsSpent > 0
+          ? Math.max(0, Math.round(endedCall.coinsSpent * (tlSharePct / 100)))
+          : 0;
+
+      const logStatus = ringingOutcome || 'completed';
       const newLog: CallLogItem = {
-        id: 'log_' + Date.now(),
+        id: endedCall.id,
         callerId: caller.id,
         callerName: caller.name,
         callerAvatar: caller.avatarUrl,
@@ -3472,55 +3990,77 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         receiverId: receiver.id,
         receiverName: receiver.name,
         receiverAvatar: receiver.avatarUrl,
-        startTime: endedCall.startTime,
-        endTime: Date.now(),
-        durationSeconds: endedCall.durationSeconds,
-        coinsSpent: endedCall.coinsSpent,
-        coinsEarned: endedCall.coinsEarned,
+        startTime: endedCall.startTime || endNow,
+        endTime: endNow,
+        durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
+        coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
+        coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
+        teamLeaderId: tlId || undefined,
+        teamLeaderEarnedCoins: estimatedTlEarned,
         timestamp: 'Just now',
         wasFriendCall: isFriendCall,
+        status: logStatus,
       };
-      setCallLogs((prev) => [newLog, ...prev]);
-      if (isSupabaseConfigured()) {
-        insertCallLogToSupabase(newLog).catch((e) => console.warn('Supabase call log insert error:', e));
-      }
+      setCallLogs((prev) => {
+        const withoutDup = prev.filter((l) => l.id !== newLog.id);
+        return [newLog, ...withoutDup];
+      });
 
-      // Automatically send an interactive call rating message to the 1-on-1 chat
-      const ratingMsg: ChatMessage = {
-        id: 'msg_rating_' + Date.now(),
-        senderId: receiver.id,
-        receiverId: caller.id,
-        text: `📞 Live Video Call Ended (${Math.max(1, Math.round(endedCall.durationSeconds / 60))}m) • How was your session with ${receiver.name}?`,
-        originalLanguage: receiver.spokenLanguages[0] || 'English',
-        type: 'call_rating',
-        ratingInfo: {
-          callLogId: newLog.id,
-          callDurationSeconds: endedCall.durationSeconds,
-          creatorId: receiver.id,
-          creatorName: receiver.name,
-          creatorAvatar: receiver.avatarUrl,
-          callerId: caller.id,
-          isSubmitted: false,
-        },
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-      setChatMessages((prev) => [...prev, ratingMsg]);
+      // Persist via backend (service role) — client RLS blocks non-admin inserts into call_logs
+      authFetch('/api/calls/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callId: endedCall.id,
+          callerId: endedCall.callerId,
+          receiverId: endedCall.receiverId,
+          status: 'ended',
+          outcome: logStatus,
+          endedBy: currentUser.id,
+          reason,
+          durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
+          coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
+          coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
+          teamLeaderEarnedCoins: estimatedTlEarned,
+          teamLeaderId: tlId,
+          wasFriendCall: isFriendCall,
+          callerName: caller.name,
+          receiverName: receiver.name,
+          startTime: endedCall.startTime || endNow,
+          endTime: endNow,
+        }),
+      }).catch(() => {});
 
-      // If logged in user was the caller, open the post-call rating modal immediately
-      if (currentUser.id === caller.id) {
-        setPendingRatingCall({
-          creatorId: receiver.id,
-          creatorName: receiver.name,
-          creatorAvatar: receiver.avatarUrl,
-          callLogId: newLog.id,
-          durationSeconds: endedCall.durationSeconds,
-        });
-      }
+      // Post-call rating is creator-requested only — do not auto-open modal or inject rating cards.
+    } else {
+      // Still persist economics even if local directory is missing a profile row
+      authFetch('/api/calls/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callId: endedCall.id,
+          callerId: endedCall.callerId,
+          receiverId: endedCall.receiverId,
+          status: 'ended',
+          outcome: ringingOutcome || 'completed',
+          endedBy: currentUser.id,
+          reason,
+          durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
+          coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
+          coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
+          startTime: endedCall.startTime || endNow,
+          endTime: endNow,
+        }),
+      }).catch(() => {});
     }
 
     showToast(
-      'Call Ended',
-      `Session duration: ${endedCall.durationSeconds}s. Total coins processed: ${endedCall.coinsSpent} 🪙. Logged to creator call history.`,
+      wasRinging ? (ringingOutcome === 'declined' ? 'Call Declined 🚫' : 'Call Cancelled') : 'Call Ended',
+      wasRinging
+        ? ringingOutcome === 'declined'
+          ? 'The call was declined.'
+          : 'You cancelled the call before it was answered.'
+        : `Session duration: ${endedCall.durationSeconds}s. Total coins processed: ${endedCall.coinsSpent} 🪙. Logged to creator call history.`,
       'info'
     );
 
@@ -3534,16 +4074,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Keep endCallRef fresh for the billing interval (avoids stale closures)
   endCallRef.current = endCall;
-
-  const toggleFastTestMode = () => {
-    const next = !fastTestMode;
-    setFastTestMode(next);
-    showToast(
-      'Test Timer Toggle',
-      next ? 'Fast Test Mode ON: Coin burn ticks every 3 seconds!' : 'Normal Mode: Coin burn ticks every 60 seconds.',
-      'warning'
-    );
-  };
 
   // Apply authoritative burn balances from server response / WS broadcast
   const applyBurnBalances = useCallback((payload: {
@@ -3584,14 +4114,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             return {
               ...u,
               earningsCoins: newHostEarnings,
-              totalLifetimeEarnedUSD: newHostEarnings * (systemSettings.femalePayoutRatioUSD ?? 0.008),
+              totalLifetimeEarnedUSD: coinsToUsd(newHostEarnings, getCoinUsdPeg(systemSettings)),
             };
           }
           if (tlId && u.id === tlId && typeof newTlEarnings === 'number') {
             return {
               ...u,
               earningsCoins: newTlEarnings,
-              totalLifetimeEarnedUSD: newTlEarnings * (systemSettings.femalePayoutRatioUSD ?? 0.008),
+              totalLifetimeEarnedUSD: coinsToUsd(newTlEarnings, getCoinUsdPeg(systemSettings)),
             };
           }
           return u;
@@ -3613,7 +4143,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         coinsEarned: typeof callCoinsEarned === 'number' ? callCoinsEarned : prev.coinsEarned,
       };
     });
-  }, [systemSettings.femalePayoutRatioUSD]);
+  }, [systemSettings.coinUsdPeg, systemSettings.femalePayoutRatioUSD]);
 
   applyBurnBalancesRef.current = applyBurnBalances;
 
@@ -3665,7 +4195,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     const callId = activeCall.id;
-    const tickCheckSeconds = fastTestMode ? 3 : 60;
+    const tickCheckSeconds = 60;
 
     const requestBurn = async (billingMinute: number) => {
       if (billedMinutesRef.current.has(billingMinute) || burnInFlightRef.current.has(billingMinute)) {
@@ -3762,7 +4292,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [activeCall?.id, activeCall?.status, activeCall?.callerId, currentUser.id, fastTestMode, applyBurnBalances]);
+  }, [activeCall?.id, activeCall?.status, activeCall?.callerId, currentUser.id, applyBurnBalances]);
 
   // Real-time synchronization of current activeCall with adminActiveCalls
   useEffect(() => {
@@ -3798,7 +4328,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         callerAvatar: caller.avatarUrl,
         callerCountry: caller.nationality || 'United States',
         callerCountryCode: caller.countryCode || 'US',
-        callerVipTier: caller.vipTier || 'gold',
         callerCoinBalance: caller.coinBalance,
         startTime: activeCall.startTime,
         durationSeconds: activeCall.durationSeconds,
@@ -3814,8 +4343,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         safetyScore: 100.0,
         safetyFlag: 'clean',
         aiShieldActive: false,
-        hostAudioLevel: 62,
-        callerAudioLevel: 44,
         warningMessage: activeCall.warningMessage,
       };
 
@@ -3842,17 +4369,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Deduct coins from caller, credit female receiver (if eligible)
     const receiverUser = users.find((u) => u.id === activeCall.receiverId);
-    const isReceiverTlCreated = Boolean(receiverUser?.teamLeaderId);
+    const tlId = receiverUser?.teamLeaderId || receiverUser?.createdById || null;
     // Strict Earning Policy: only female creators or Team Leader managed hosts earn coins
-    const isEligibleFemaleCreator = receiverUser?.role === 'female_creator' || receiverUser?.role === 'female_host' || isReceiverTlCreated;
+    const isEligibleFemaleCreator =
+      receiverUser?.role === 'female_creator' ||
+      receiverUser?.role === 'female_host' ||
+      Boolean(tlId);
     const canReceiverEarn = isEligibleFemaleCreator;
-    const hostGiftSharePercent = systemSettings.giftFemaleHostSharePercent ?? 70;
-    const tlGiftSharePercent = systemSettings.giftTeamLeaderSharePercent ?? 10;
-
-    const addedEarnedCoins = canReceiverEarn ? Math.max(1, Math.round(gift.coinCost * (hostGiftSharePercent / 100))) : 0;
-    const addedTlCoins = (isReceiverTlCreated && receiverUser?.teamLeaderId)
-      ? Math.max(1, Math.round(gift.coinCost * (tlGiftSharePercent / 100)))
-      : 0;
+    const giftSplit = computeGiftCoinSplit({
+      giftCost: gift.coinCost,
+      hostSharePercent:
+        systemSettings.giftFemaleHostSharePercent ?? DEFAULT_GIFT_FEMALE_HOST_SHARE_PERCENT,
+      tlSharePercent:
+        systemSettings.giftTeamLeaderSharePercent ?? DEFAULT_GIFT_TEAM_LEADER_SHARE_PERCENT,
+      hasTeamLeader: Boolean(tlId),
+      hostEligible: canReceiverEarn,
+    });
+    const addedEarnedCoins = giftSplit.hostCoins;
+    const addedTlCoins = giftSplit.tlCoins;
 
     setUsers((prev) =>
       prev.map((u) => {
@@ -3864,16 +4398,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           return {
             ...u,
             earningsCoins: newCoins,
-            totalLifetimeEarnedUSD: newCoins * systemSettings.femalePayoutRatioUSD,
+            totalLifetimeEarnedUSD: coinsToUsd(newCoins, getCoinUsdPeg(systemSettings)),
             totalGiftsReceivedCount: (u.totalGiftsReceivedCount || 0) + 1,
           };
         }
-        if (addedTlCoins > 0 && receiverUser?.teamLeaderId && (u.id === receiverUser.teamLeaderId || u.id === receiverUser.createdById)) {
+        if (addedTlCoins > 0 && tlId && u.id === tlId) {
           const newTlCoins = (u.earningsCoins || 0) + addedTlCoins;
           return {
             ...u,
             earningsCoins: newTlCoins,
-            totalLifetimeEarnedUSD: newTlCoins * systemSettings.femalePayoutRatioUSD,
+            totalLifetimeEarnedUSD: coinsToUsd(newTlCoins, getCoinUsdPeg(systemSettings)),
           };
         }
         return u;
@@ -3885,13 +4419,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        senderId: currentUser.id,
         receiverId: activeCall.receiverId,
         giftId: gift.id,
-        giftCost: gift.coinCost,
-        hostCoinsEarned: addedEarnedCoins,
-        tlCoinsEarned: addedTlCoins,
-        tlId: receiverUser?.teamLeaderId || receiverUser?.createdById,
       }),
     }).catch(() => {});
 
@@ -3911,255 +4440,532 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     recordGiftSentInteraction();
 
-    showToast('Mega Gift Sent! 🎁', `You sent a ${gift.name} (${gift.coinCost} 🪙)!`, 'success');
+    // Prefer MegaGiftOverlay FX + chat bubble over a sticky toast during calls
     return true;
   };
 
-  // Send Chat Message
-  const sendMessage = (
+  // Peer / multi-device: upsert optimistic in-call preview (LiveKit data or WS). Durable id reconciles later.
+  const ingestInCallChatPreview = (payload: {
+    clientTempId: string;
+    text: string;
+    senderId: string;
+    receiverId: string;
+    messageType?: string;
+  }) => {
+    const tempId = String(payload.clientTempId || '').trim().slice(0, 80);
+    const senderId = String(payload.senderId || '');
+    const receiverId = String(payload.receiverId || '');
+    const text = String(payload.text || '').trim();
+    if (!tempId || !senderId || !receiverId || !text) return;
+
+    setChatMessages((prev) => {
+      if (prev.some((m) => m.id === tempId || m.clientTempId === tempId)) return prev;
+      // Durable already arrived (Realtime/WS) — attach clientTempId for overlay reconcile, don't add temp
+      const durableIdx = prev.findIndex(
+        (m) =>
+          !m.id.startsWith('temp_') &&
+          m.senderId === senderId &&
+          m.receiverId === receiverId &&
+          m.text === text
+      );
+      if (durableIdx >= 0) {
+        const existing = prev[durableIdx];
+        if (existing.clientTempId === tempId) return prev;
+        const next = [...prev];
+        next[durableIdx] = { ...existing, clientTempId: existing.clientTempId || tempId };
+        return next;
+      }
+      const msgType = payload.messageType === 'gift' ? 'gift' : 'text';
+      const nowIso = new Date().toISOString();
+      return [
+        ...prev,
+        {
+          id: tempId,
+          clientTempId: tempId,
+          senderId,
+          receiverId,
+          text,
+          originalLanguage: 'English',
+          type: msgType as ChatMessage['type'],
+          isRead: currentUserIdRef.current === senderId,
+          createdAt: nowIso,
+          timestamp: nowIso,
+        },
+      ];
+    });
+  };
+
+  /** Fire-and-forget WS preview to peer (server relays without DB). */
+  const notifyInCallChatPreview = (payload: {
+    clientTempId: string;
+    text: string;
+    receiverId: string;
+    messageType?: string;
+  }) => {
+    if (!currentUser?.id || !payload.receiverId || !payload.clientTempId) return;
+    if (wsRef.current?.readyState === WebSocket.OPEN && wsAuthenticatedRef.current) {
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'chat:incall_preview',
+            clientTempId: payload.clientTempId,
+            text: payload.text,
+            receiverId: payload.receiverId,
+            senderId: currentUser.id,
+            messageType: payload.messageType === 'gift' ? 'gift' : 'text',
+          })
+        );
+      } catch (e) {
+        console.warn('[notifyInCallChatPreview] WS send failed:', e);
+      }
+    }
+  };
+
+  // Send Chat Message — Express → Supabase → Realtime (optimistic temp id reconciled)
+  const sendMessage = async (
     receiverId: string,
     text: string,
-    targetLang: string = 'English',
+    _targetLang: string = 'English',
     mediaUrl?: string,
-    type: 'text' | 'gift' | 'system' | 'friend_request' = mediaUrl ? 'text' : 'text'
-  ) => {
-    const receiver = users.find((u) => u.id === receiverId);
-    const receiverLang = receiver ? receiver.spokenLanguages[0] : 'English';
+    type: 'text' | 'gift' | 'system' | 'friend_request' | 'image' = mediaUrl ? 'image' : 'text',
+    sharedClientTempId?: string
+  ): Promise<{ ok: boolean; clientTempId?: string }> => {
+    if (!currentUser?.id || !receiverId) return { ok: false };
 
-    // Auto-translation simulation
-    const translations: Record<string, string> = {
-      '¡Hola guapo, te estaba esperando!': 'Hello handsome, I was waiting for you!',
-      '¿De dónde eres?': 'Where are you from?',
-      'Me encanta tu perfil': 'I love your profile',
-      'Hello handsome!': '¡Hola guapo!',
-      'Can we video call?': '¿Podemos hacer videollamada?',
-    };
+    if (blockedUserIds.includes(receiverId) || blockedByUserIds.includes(receiverId)) {
+      showToast('Blocked', 'You cannot message this user.', 'error');
+      return { ok: false };
+    }
 
-    const translated = translations[text] || text;
+    const trimmed = (text || '').trim();
+    const durableMedia =
+      mediaUrl && !mediaUrl.startsWith('blob:') && !mediaUrl.startsWith('data:') ? mediaUrl : undefined;
 
-    const newMsg: ChatMessage = {
-      id: 'msg_' + Date.now(),
+    if (!trimmed && !durableMedia) {
+      showToast('Empty message', 'Add text or wait for the image upload to finish.', 'warning');
+      return { ok: false };
+    }
+
+    // Local-only system/rating types are not inserted into messages CHECK constraint via API
+    if (type === 'system') {
+      const localMsg: ChatMessage = {
+        id: 'temp_sys_' + Date.now(),
+        senderId: currentUser.id,
+        receiverId,
+        text: trimmed,
+        originalLanguage: currentUser.spokenLanguages?.[0] || 'English',
+        type: 'system',
+        isRead: true,
+        createdAt: new Date().toISOString(),
+        timestamp: new Date().toISOString(),
+      };
+      setChatMessages((prev) => [...prev, localMsg]);
+      return { ok: true, clientTempId: localMsg.id };
+    }
+
+    const clientTempId =
+      (typeof sharedClientTempId === 'string' && sharedClientTempId.startsWith('temp_')
+        ? sharedClientTempId.trim().slice(0, 80)
+        : '') || `temp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const optimisticType: ChatMessage['type'] =
+      type === 'image' || durableMedia ? 'image' : type === 'gift' || type === 'friend_request' ? type : 'text';
+
+    const optimistic: ChatMessage = {
+      id: clientTempId,
+      clientTempId,
       senderId: currentUser.id,
-      receiverId: receiverId,
-      text: text,
-      originalLanguage: currentUser.spokenLanguages[0] || 'English',
-      translatedText: translated,
-      targetLanguage: targetLang,
-      mediaUrl: mediaUrl || undefined,
-      type: type,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      receiverId,
+      text: trimmed || (durableMedia ? '📷 Photo' : ''),
+      originalLanguage: currentUser.spokenLanguages?.[0] || 'English',
+      mediaUrl: durableMedia,
+      type: optimisticType,
+      isRead: true,
+      createdAt: new Date().toISOString(),
+      timestamp: new Date().toISOString(),
     };
 
-    setChatMessages((prev) => [...prev, newMsg]);
+    setChatMessages((prev) => {
+      if (prev.some((m) => m.id === clientTempId || m.clientTempId === clientTempId)) return prev;
+      return [...prev, optimistic];
+    });
 
-    // Track Daily Quests: Chat with friends / creators & Gift sending
-    if (receiverId && receiverId !== currentUser.id) {
+    if (receiverId !== currentUser.id) {
       recordChatFriendInteraction(receiverId);
     }
     if (type === 'gift') {
       recordGiftSentInteraction();
     }
 
-    // Send real-time message via WebSocket to other devices
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'chat:send',
-          senderId: currentUser.id,
-          receiverId: receiverId,
-          message: newMsg,
-        })
-      );
-    }
+    try {
+      const res = await authFetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverId,
+          text: trimmed || undefined,
+          mediaUrl: durableMedia,
+          mediaType: durableMedia ? 'image' : undefined,
+          type: optimisticType === 'image' || optimisticType === 'text' || optimisticType === 'gift' || optimisticType === 'friend_request'
+            ? optimisticType
+            : 'text',
+          clientTempId,
+          originalLanguage: currentUser.spokenLanguages?.[0] || 'English',
+        }),
+      });
 
-    // Persist asynchronously to Supabase if configured
-    saveMessageToSupabase(newMsg).catch((err) => {
-      console.warn('Asynchronous Supabase saveMessage notice:', err);
-    });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success || !json?.data?.message) {
+        const msg = json?.error?.message || 'Failed to send message';
+        setChatMessages((prev) => prev.filter((m) => m.id !== clientTempId && m.clientTempId !== clientTempId));
+        showToast('Message failed', msg, 'error');
+        return { ok: false, clientTempId };
+      }
+
+      const serverMsg = json.data.message as ChatMessage;
+      setChatMessages((prev) => {
+        const withoutTemp = prev.filter((m) => m.id !== clientTempId && m.id !== serverMsg.id);
+        return [
+          ...withoutTemp,
+          {
+            ...serverMsg,
+            isRead: Boolean(serverMsg.isRead),
+            createdAt: serverMsg.createdAt || serverMsg.timestamp,
+            timestamp: serverMsg.createdAt || serverMsg.timestamp,
+            clientTempId,
+          },
+        ];
+      });
+      return { ok: true, clientTempId };
+    } catch (err: any) {
+      console.warn('[sendMessage] failed:', err);
+      setChatMessages((prev) => prev.filter((m) => m.id !== clientTempId && m.clientTempId !== clientTempId));
+      showToast('Message failed', err?.message || 'Network error sending message', 'error');
+      return { ok: false, clientTempId };
+    }
   };
 
-  // Clear Chat History for a specific conversation
-  const clearChatHistory = (otherUserId: string) => {
-    setChatMessages((prev) =>
-      prev.filter(
-        (m) =>
-          !(
-            (m.senderId === currentUser.id && m.receiverId === otherUserId) ||
-            (m.senderId === otherUserId && m.receiverId === currentUser.id)
+  // Clear Chat History — soft-hide for acting user (message_conversation_clears)
+  const clearChatHistory = async (otherUserId: string): Promise<boolean> => {
+    if (!otherUserId || !currentUser?.id) return false;
+
+    try {
+      const res = await authFetch(`/api/messages/conversation/${encodeURIComponent(otherUserId)}`, {
+        method: 'DELETE',
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Clear failed', json?.error?.message || 'Could not clear conversation', 'error');
+        return false;
+      }
+
+      setChatMessages((prev) =>
+        prev.filter(
+          (m) =>
+            !(
+              (m.senderId === currentUser.id && m.receiverId === otherUserId) ||
+              (m.senderId === otherUserId && m.receiverId === currentUser.id)
+            )
+        )
+      );
+      showToast('Chat Cleared', 'Conversation history has been cleared for you.', 'info');
+      return true;
+    } catch (err: any) {
+      showToast('Clear failed', err?.message || 'Network error', 'error');
+      return false;
+    }
+  };
+
+  const refreshCreatorReviews = async (creatorId?: string) => {
+    const targetId = creatorId || currentUser?.id;
+    if (!targetId || targetId === 'guest_user') {
+      setCreatorReviews([]);
+      return;
+    }
+    try {
+      const res = await authFetch(`/api/v1/reviews/creator/${encodeURIComponent(targetId)}`);
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        console.warn('refreshCreatorReviews failed:', json?.error?.message);
+        return;
+      }
+      const list = Array.isArray(json.data?.reviews) ? json.data.reviews : [];
+      setCreatorReviews(
+        list.map((r: any) => ({
+          id: String(r.id),
+          creatorId: String(r.creatorId),
+          callerId: String(r.callerId),
+          callerName: r.callerName || 'Caller',
+          callerAvatar: r.callerAvatar || '',
+          callLogId: r.callLogId,
+          stars: Number(r.stars) || 5,
+          communication: r.communication,
+          friendliness: r.friendliness,
+          clarity: r.clarity,
+          energy: r.energy,
+          comment: r.comment,
+          tags: Array.isArray(r.tags) ? r.tags : [],
+          createdAt: r.createdAt || '',
+          callDurationSeconds: r.callDurationSeconds,
+        }))
+      );
+    } catch (err) {
+      console.warn('refreshCreatorReviews exception:', err);
+    }
+  };
+
+  // Submit Creator Review (Express → creator_reviews)
+  const submitCreatorReview = async (
+    reviewData: Omit<CreatorReview, 'id' | 'createdAt'> & { ratingRequestMessageId?: string }
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to submit a rating.', 'warning');
+      return false;
+    }
+    if (currentUser.id !== reviewData.callerId) {
+      showToast('Rating failed', 'Only the caller can submit this rating.', 'error');
+      return false;
+    }
+
+    try {
+      const res = await authFetch('/api/v1/reviews', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          creatorId: reviewData.creatorId,
+          callLogId: reviewData.callLogId,
+          ratingRequestMessageId: reviewData.ratingRequestMessageId,
+          stars: reviewData.stars,
+          communication: reviewData.communication,
+          friendliness: reviewData.friendliness,
+          clarity: reviewData.clarity,
+          energy: reviewData.energy,
+          comment: reviewData.comment,
+          tags: reviewData.tags,
+          callDurationSeconds: reviewData.callDurationSeconds,
+          callerName: reviewData.callerName,
+          callerAvatar: reviewData.callerAvatar,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Rating failed', json?.error?.message || 'Could not save rating.', 'error');
+        return false;
+      }
+
+      const saved = json.data?.review;
+      if (saved) {
+        setCreatorReviews((prev) => {
+          const mapped: CreatorReview = {
+            id: String(saved.id),
+            creatorId: String(saved.creatorId),
+            callerId: String(saved.callerId),
+            callerName: saved.callerName || reviewData.callerName,
+            callerAvatar: saved.callerAvatar || reviewData.callerAvatar,
+            callLogId: saved.callLogId,
+            stars: Number(saved.stars) || reviewData.stars,
+            communication: saved.communication,
+            friendliness: saved.friendliness,
+            clarity: saved.clarity,
+            energy: saved.energy,
+            comment: saved.comment,
+            tags: Array.isArray(saved.tags) ? saved.tags : reviewData.tags,
+            createdAt: saved.createdAt || new Date().toISOString(),
+            callDurationSeconds: saved.callDurationSeconds,
+          };
+          return [mapped, ...prev.filter((r) => r.id !== mapped.id)];
+        });
+      }
+
+      // Update matching in-chat rating message locally (Realtime UPDATE also syncs)
+      setChatMessages((prev) =>
+        prev.map((msg) => {
+          if (
+            msg.type === 'call_rating' &&
+            msg.ratingInfo &&
+            ((reviewData.ratingRequestMessageId && msg.id === reviewData.ratingRequestMessageId) ||
+              (msg.ratingInfo.callLogId &&
+                reviewData.callLogId &&
+                msg.ratingInfo.callLogId === reviewData.callLogId) ||
+              (msg.ratingInfo.creatorId === reviewData.creatorId &&
+                msg.ratingInfo.callerId === reviewData.callerId &&
+                !msg.ratingInfo.isSubmitted))
+          ) {
+            return {
+              ...msg,
+              ratingInfo: {
+                ...msg.ratingInfo,
+                stars: reviewData.stars,
+                communication: reviewData.communication,
+                friendliness: reviewData.friendliness,
+                clarity: reviewData.clarity,
+                energy: reviewData.energy,
+                comment: reviewData.comment,
+                tags: reviewData.tags,
+                isSubmitted: true,
+              },
+            };
+          }
+          return msg;
+        })
+      );
+
+      if (json.data?.creatorRating) {
+        setUsers((prev) =>
+          prev.map((u) =>
+            u.id === reviewData.creatorId
+              ? {
+                  ...u,
+                  ratingScore: json.data.creatorRating.ratingScore,
+                  totalReviewsCount: json.data.creatorRating.totalReviewsCount,
+                }
+              : u
           )
+        );
+      }
+
+      setPendingRatingCall(null);
+      showToast(
+        'Rating submitted',
+        `Thanks for rating ${reviewData.creatorName || 'the host'} (${reviewData.stars}★).`,
+        'success'
+      );
+      return true;
+    } catch (err: any) {
+      console.warn('submitCreatorReview error:', err);
+      showToast('Rating failed', err?.message || 'Network error saving rating.', 'error');
+      return false;
+    }
+  };
+
+  // Send Rating Request (durable call_rating message via Express)
+  const sendRatingRequest = async (
+    creatorId: string,
+    callerId: string,
+    callLogId?: string
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to ask for a rating.', 'warning');
+      return false;
+    }
+    if (currentUser.id !== creatorId) {
+      showToast('Request failed', 'Only the host can ask for a rating.', 'error');
+      return false;
+    }
+
+    try {
+      const res = await authFetch('/api/v1/reviews/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callerId,
+          ...(callLogId ? { callLogId } : {}),
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast(
+          'Request failed',
+          json?.error?.message || 'Could not send rating request.',
+          'error'
+        );
+        return false;
+      }
+
+      const message = json.data?.message;
+      if (message?.id) {
+        setChatMessages((prev) => {
+          if (prev.some((m) => m.id === message.id)) return prev;
+          return [...prev, message as ChatMessage];
+        });
+      }
+
+      const caller = users.find((u) => u.id === callerId);
+      if (json.data?.alreadyRequested) {
+        showToast(
+          'Already requested',
+          'An open rating request is already waiting for this caller.',
+          'info'
+        );
+      } else {
+        showToast(
+          'Rating request sent',
+          `Asked ${caller?.name || 'caller'} for feedback.`,
+          'success'
+        );
+      }
+      return true;
+    } catch (err: any) {
+      console.warn('sendRatingRequest error:', err);
+      showToast('Request failed', err?.message || 'Network error sending request.', 'error');
+      return false;
+    }
+  };
+
+  // Mark chat messages from a user as read (DB is_read via Express)
+  const markChatAsRead = (otherUserId: string) => {
+    if (!otherUserId || !currentUser?.id) return;
+
+    const idsToMark = chatMessages
+      .filter(
+        (m) =>
+          m.senderId === otherUserId &&
+          m.receiverId === currentUser.id &&
+          m.isRead !== true &&
+          !readMessageIds.includes(m.id)
+      )
+      .map((m) => m.id);
+
+    if (idsToMark.length === 0) return;
+
+    // Optimistic local mirror
+    setReadMessageIds((prev) => Array.from(new Set([...prev, ...idsToMark])));
+    setChatMessages((prev) =>
+      prev.map((m) =>
+        idsToMark.includes(m.id) ? { ...m, isRead: true } : m
       )
     );
-    showToast('Chat Cleared', 'Conversation history has been cleared.', 'info');
+
+    authFetch('/api/messages/read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ otherUserId }),
+    }).catch((err) => console.warn('[markChatAsRead] API note:', err));
   };
 
-  // Submit Creator Review
-  const submitCreatorReview = (reviewData: Omit<CreatorReview, 'id' | 'createdAt'>) => {
-    const newReview: CreatorReview = {
-      ...reviewData,
-      id: 'rev_' + Date.now(),
-      createdAt: 'Just now',
-    };
-
-    setCreatorReviews((prev) => [newReview, ...prev]);
-
-    // Update matching in-chat rating message
-    setChatMessages((prev) =>
-      prev.map((msg) => {
-        if (
-          msg.type === 'call_rating' &&
-          msg.ratingInfo &&
-          ((msg.ratingInfo.callLogId && msg.ratingInfo.callLogId === reviewData.callLogId) ||
-            (msg.ratingInfo.creatorId === reviewData.creatorId && msg.ratingInfo.callerId === reviewData.callerId && !msg.ratingInfo.isSubmitted))
-        ) {
-          return {
-            ...msg,
-            ratingInfo: {
-              ...msg.ratingInfo,
-              stars: reviewData.stars,
-              communication: reviewData.communication,
-              friendliness: reviewData.friendliness,
-              clarity: reviewData.clarity,
-              energy: reviewData.energy,
-              comment: reviewData.comment,
-              tags: reviewData.tags,
-              isSubmitted: true,
-            },
-          };
-        }
-        return msg;
-      })
-    );
-
-    // Close post-call rating modal
-    setPendingRatingCall(null);
-
-    showToast(
-      'Rating Submitted ⭐',
-      `Thank you for rating ${reviewData.creatorName || 'creator'} with ${reviewData.stars} stars!`,
-      'success'
-    );
-  };
-
-  // Send Rating Request (Used by female creators in chat)
-  const sendRatingRequest = (creatorId: string, callerId: string) => {
-    const creator = users.find((u) => u.id === creatorId) || currentUser;
-    const caller = users.find((u) => u.id === callerId);
-    if (!caller) return;
-
-    const newMsg: ChatMessage = {
-      id: 'msg_rating_req_' + Date.now(),
-      senderId: creator.id,
-      receiverId: caller.id,
-      text: `⭐ Rating Request: ${creator.name} would love your feedback on your recent video call session!`,
-      originalLanguage: creator.spokenLanguages[0] || 'English',
-      type: 'call_rating',
-      ratingInfo: {
-        creatorId: creator.id,
-        creatorName: creator.name,
-        creatorAvatar: creator.avatarUrl,
-        callerId: caller.id,
-        isSubmitted: false,
-      },
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-
-    setChatMessages((prev) => [...prev, newMsg]);
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'chat:send',
-          senderId: creator.id,
-          receiverId: caller.id,
-          message: newMsg,
-        })
-      );
-    }
-
-    showToast('Rating Request Sent ⭐', `Sent a rating invitation card to ${caller.name}!`, 'success');
-  };
-
-  // Mark chat messages from a user as read
-  const markChatAsRead = (otherUserId: string) => {
-    const idsToMark = chatMessages
-      .filter((m) => m.senderId === otherUserId && m.receiverId === currentUser.id && !readMessageIds.includes(m.id))
-      .map((m) => m.id);
-    if (idsToMark.length > 0) {
-      setReadMessageIds((prev) => Array.from(new Set([...prev, ...idsToMark])));
-    }
-  };
-
-  // Mark all unread messages as read
+  // Mark all unread messages as read (per-sender API calls)
   const markAllChatsAsRead = () => {
-    const allReceivedIds = chatMessages
-      .filter((m) => m.receiverId === currentUser.id)
-      .map((m) => m.id);
+    const unread = chatMessages.filter(
+      (m) => m.receiverId === currentUser.id && m.isRead !== true
+    );
+    const allReceivedIds = unread.map((m) => m.id);
+    const senderIds = Array.from(new Set(unread.map((m) => m.senderId)));
+
     setReadMessageIds((prev) => Array.from(new Set([...prev, ...allReceivedIds])));
+    setChatMessages((prev) =>
+      prev.map((m) =>
+        m.receiverId === currentUser.id ? { ...m, isRead: true } : m
+      )
+    );
+
+    for (const otherUserId of senderIds) {
+      authFetch('/api/messages/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ otherUserId }),
+      }).catch(() => {});
+    }
+
     showToast('Chats Marked as Read', 'All new message indicators have been cleared.', 'info');
   };
 
-  // Payout Request
-  const submitPayoutRequest = (amountCoins: number, payoutMethod: string, accountDetails: string): boolean => {
-    const isTlCreated = Boolean(currentUser.teamLeaderId);
-    const canEarnAndPayout = isTlCreated || Boolean(systemSettings.enableRegularFemaleCoinEarning) || currentUser.role === 'admin';
-    if (!canEarnAndPayout && currentUser.gender === 'female') {
-      showToast(
-        'Payout Restricted',
-        'Coin earning and payouts are currently restricted to Team Leader agency-managed hosts.',
-        'error'
-      );
-      return false;
-    }
-
-    const amountUSD = amountCoins * systemSettings.femalePayoutRatioUSD;
-
-    if (amountUSD < systemSettings.minPayoutThresholdUSD) {
-      showToast(
-        'Payout Threshold Error',
-        `Minimum payout threshold is $${systemSettings.minPayoutThresholdUSD.toFixed(2)} USD (approx ${Math.ceil(systemSettings.minPayoutThresholdUSD / systemSettings.femalePayoutRatioUSD)} coins).`,
-        'error'
-      );
-      return false;
-    }
-
-    if (currentUser.earningsCoins < amountCoins) {
-      showToast('Insufficient Balance', 'You do not have enough coins in your earnings ledger.', 'error');
-      return false;
-    }
-
-    // Deduct coins from user earnings balance
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return { ...u, earningsCoins: u.earningsCoins - amountCoins };
-        }
-        return u;
-      })
+  // Payout Request — disabled (Phase 7: period-end settlement batches only)
+  const submitPayoutRequest = (_amountCoins: number, _payoutMethod: string, _accountDetails: string): boolean => {
+    showToast(
+      'Period-End Settlements Only',
+      'Manual withdrawals are disabled. Host salaries and TL commissions pay out through settlement batches at period close.',
+      'warning'
     );
-
-    const leaderObj = currentUser.teamLeaderId ? users.find((u) => u.id === currentUser.teamLeaderId) : undefined;
-
-    const newRequest: PayoutRequest = {
-      id: 'pay_' + Date.now().toString().slice(-6),
-      userId: currentUser.id,
-      userName: currentUser.name,
-      userEmail: currentUser.email,
-      amountCoins: amountCoins,
-      amountUSD: amountUSD,
-      payoutMethod: payoutMethod,
-      accountDetails: accountDetails,
-      status: 'pending',
-      requestDate: new Date().toISOString().replace('T', ' ').slice(0, 16),
-      teamLeaderId: currentUser.teamLeaderId,
-      teamLeaderName: leaderObj?.name,
-    };
-
-    setPayoutRequests((prev) => [newRequest, ...prev]);
-    if (isSupabaseConfigured()) {
-      upsertPayoutRequestToSupabase(newRequest).catch((e) => console.warn('Supabase payout request save error:', e));
-    }
-    showToast('Payout Requested! 🏦', `Submitted request for ${amountUSD.toFixed(2)} via ${payoutMethod}. Pending admin approval.`, 'success');
-    return true;
+    return false;
   };
 
   // Load initial LiveKit config from server on mount
@@ -4186,9 +4992,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ? { ...(prev.quickMatchGiftPrices || INITIAL_SYSTEM_SETTINGS.quickMatchGiftPrices), ...newSettings.quickMatchGiftPrices }
         : prev.quickMatchGiftPrices;
 
+      // Fixed Peg: when peg changes, keep legacy dual-FX fields in sync in client state.
+      const pegPatch: Partial<SystemSettings> = {};
+      if (newSettings.coinUsdPeg !== undefined) {
+        const peg = Number(newSettings.coinUsdPeg);
+        if (Number.isFinite(peg) && peg > 0) {
+          pegPatch.coinUsdPeg = peg;
+          pegPatch.femalePayoutRatioUSD = peg;
+          pegPatch.coinToUSDRatio = peg;
+        }
+      }
+
       const updated: SystemSettings = {
         ...prev,
         ...newSettings,
+        ...pegPatch,
         quickMatchGiftPrices: mergedPrices,
       };
 
@@ -4229,17 +5047,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         body: JSON.stringify(config),
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         setSystemSettings((prev) => ({
           ...prev,
-          livekitApiKey: data.apiKey,
-          livekitApiSecret: data.apiSecret,
-          livekitWsUrl: data.wsUrl,
+          // Server does not echo secrets back — keep the values we just saved
+          livekitApiKey: config.apiKey || prev.livekitApiKey || '',
+          livekitApiSecret: config.apiSecret || prev.livekitApiSecret || '',
+          livekitWsUrl: data.wsUrl || config.wsUrl || prev.livekitWsUrl || '',
         }));
         showToast('LiveKit Keys Saved 🔑', 'LiveKit WebRTC credentials updated and active on server!', 'success');
         return true;
       } else {
-        showToast('Error Saving LiveKit Keys', data.error || 'Failed to update credentials', 'error');
+        const errMsg =
+          (typeof data?.error === 'string' && data.error) ||
+          data?.error?.message ||
+          data?.message ||
+          'Failed to update credentials';
+        showToast('Error Saving LiveKit Keys', errMsg, 'error');
         return false;
       }
     } catch (err: any) {
@@ -4249,12 +5073,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const saveCoinPackage = (pkg: Partial<CoinPackage> & { id?: string }) => {
+    const normalizeNullableNumber = (value: unknown): number | null => {
+      if (value == null || value === '') return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    };
+    const discountPriceUSD = normalizeNullableNumber(pkg.discountPriceUSD);
+    const approxRaw = normalizeNullableNumber(pkg.approxCallMinutes);
+    const approxCallMinutes = approxRaw == null ? null : Math.floor(approxRaw);
+    const savingLabel = pkg.savingLabel ? String(pkg.savingLabel).trim() || null : null;
+
     if (pkg.id) {
-      const updated = coinPackages.map((p) => (p.id === pkg.id ? ({ ...p, ...pkg } as CoinPackage) : p));
+      const merged = {
+        ...pkg,
+        discountPriceUSD,
+        approxCallMinutes,
+        savingLabel,
+      };
+      const updated = coinPackages.map((p) => (p.id === pkg.id ? ({ ...p, ...merged } as CoinPackage) : p));
       setCoinPackages(updated);
       localStorage.setItem('livecall_packages', JSON.stringify(updated));
       if (isSupabaseConfigured()) {
-        upsertCoinPackageToSupabase(pkg).catch(() => { });
+        upsertCoinPackageToSupabase(updated.find((p) => p.id === pkg.id)!).catch(() => { });
       }
       showToast('Package Updated', `Updated coin SKU: ${pkg.title}`, 'success');
     } else {
@@ -4264,8 +5104,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         coins: pkg.coins || 100,
         bonusCoins: pkg.bonusCoins || 0,
         priceUSD: pkg.priceUSD || 4.99,
+        discountPriceUSD,
+        approxCallMinutes,
+        savingLabel,
         badgeTag: pkg.badgeTag,
-        popular: pkg.popular,
+        popular: Boolean(pkg.popular),
+        orderNum: pkg.orderNum,
       };
       const updated = [...coinPackages, newPkg];
       setCoinPackages(updated);
@@ -4285,6 +5129,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       deleteCoinPackageFromSupabase(packageId).catch(() => { });
     }
     showToast('Package Deleted', 'Coin bundle removed from store', 'info');
+  };
+
+  const saveCurrencyConfigs = (configs: CurrencyItem[]) => {
+    const normalized = (configs || []).map((c, idx) => ({
+      code: String(c.code || '').toUpperCase(),
+      name: c.name || c.code,
+      symbol: c.symbol || c.code,
+      rateFromUsd: Number(c.rateFromUsd) > 0 ? Number(c.rateFromUsd) : 1,
+      enabled: c.enabled !== false,
+      orderNum: c.orderNum != null ? Number(c.orderNum) : idx,
+    }));
+    setCurrencyConfigs(normalized.length > 0 ? normalized : DEFAULT_CURRENCIES.map((c) => ({ ...c })));
+    if (isSupabaseConfigured()) {
+      upsertCurrencyConfigsToSupabase(normalized).catch(() => { });
+    }
   };
 
   const saveVirtualGift = (gift: Partial<VirtualGift> & { id?: string }) => {
@@ -4342,63 +5201,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     showToast('Gifts Reset 🎁', 'Virtual gifts restored to default catalog.', 'info');
   };
 
-  const adminApprovePayout = (requestId: string, note?: string) => {
-    let approvedReq: PayoutRequest | null = null;
-    setPayoutRequests((prev) =>
-      prev.map((req) => {
-        if (req.id === requestId) {
-          const updated: PayoutRequest = {
-            ...req,
-            status: 'completed',
-            processedDate: new Date().toISOString().replace('T', ' ').slice(0, 16),
-            adminNote: note || 'Approved and dispatched by Admin',
-          };
-          approvedReq = updated;
-          return updated;
-        }
-        return req;
-      })
+  const adminApprovePayout = (_requestId: string, _note?: string) => {
+    showToast(
+      'Legacy Queue Read-Only',
+      'Approving manual payout_requests is disabled to prevent double-pay. Use Financial Module → settlement batches.',
+      'warning'
     );
-    if (approvedReq && isSupabaseConfigured()) {
-      upsertPayoutRequestToSupabase(approvedReq).catch((e) => console.warn('Supabase payout approve error:', e));
-    }
-    showToast('Payout Approved! 🟢', `Request #${requestId} marked as COMPLETED.`, 'success');
   };
 
-  const adminRejectPayout = (requestId: string, note?: string) => {
-    const target = payoutRequests.find((r) => r.id === requestId);
-    if (target) {
-      // Refund coins back to female creator
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === target.userId) {
-            return { ...u, earningsCoins: u.earningsCoins + target.amountCoins };
-          }
-          return u;
-        })
-      );
-    }
-
-    let rejectedReq: PayoutRequest | null = null;
-    setPayoutRequests((prev) =>
-      prev.map((req) => {
-        if (req.id === requestId) {
-          const updated: PayoutRequest = {
-            ...req,
-            status: 'rejected',
-            processedDate: new Date().toISOString().replace('T', ' ').slice(0, 16),
-            adminNote: note || 'Rejected by Admin. Coins refunded.',
-          };
-          rejectedReq = updated;
-          return updated;
-        }
-        return req;
-      })
+  const adminRejectPayout = (_requestId: string, _note?: string) => {
+    showToast(
+      'Legacy Queue Read-Only',
+      'Manual payout status changes are disabled. Historical payout_requests are view-only; cash-out is via settlements.',
+      'warning'
     );
-    if (rejectedReq && isSupabaseConfigured()) {
-      upsertPayoutRequestToSupabase(rejectedReq).catch((e) => console.warn('Supabase payout reject error:', e));
-    }
-    showToast('Payout Rejected 🔴', `Request #${requestId} rejected and coins refunded to creator.`, 'warning');
   };
 
   const adminUpdateUser = (userId: string, updates: Partial<UserProfile>) => {
@@ -4444,25 +5260,56 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     showToast('User Updated 🛠️', `Admin changes saved for: ${updates.name || userId}`, 'success');
   };
 
-  const adminDeleteUser = async (userId: string) => {
-    const target = users.find((u) => u.id === userId);
-    setUsers((prev) => {
-      const next = prev.filter((u) => u.id !== userId);
-      usersRef.current = next;
-      return next;
-    });
+  const adminDeleteUser = async (userId: string): Promise<boolean> => {
+    const target = users.find((u) => u.id === userId) || usersRef.current.find((u) => u.id === userId);
 
-    // Delete from Supabase
-    if (isSupabaseConfigured()) {
-      deleteProfileFromSupabase(userId).catch((e) => console.warn('Supabase delete user notice:', e));
+    try {
+      const res = await authFetch('/api/admin/delete-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        const errMsg =
+          (typeof data?.error === 'string' && data.error) ||
+          data?.error?.message ||
+          'Server rejected the deletion.';
+        showToast('Delete Failed', errMsg, 'error');
+        return false;
+      }
+
+      deletedUserIdsRef.current.add(userId);
+
+      setUsers((prev) => {
+        const next = prev.filter((u) => u.id !== userId);
+        usersRef.current = next;
+        return next;
+      });
+
+      const r2Count = data?.data?.r2DeletedCount;
+      const warnCount = Array.isArray(data?.data?.warnings) ? data.data.warnings.length : 0;
+      const authDeleted = data?.data?.authDeleted !== false;
+      if (!authDeleted) {
+        showToast(
+          'Delete Incomplete',
+          `Profile removed for ${target?.name || userId}, but Auth login may still work. Retry delete or run orphan Auth cleanup.`,
+          'error'
+        );
+        return false;
+      }
+      showToast(
+        'User Deleted',
+        `Permanently removed ${target?.name || userId}${
+          typeof r2Count === 'number' ? ` (${r2Count} media objects purged)` : ''
+        }${warnCount ? ` — ${warnCount} warning(s)` : ''}. Auth login disabled.`,
+        warnCount ? 'info' : 'success'
+      );
+      return true;
+    } catch (e: any) {
+      showToast('Delete Failed', e?.message || 'Network error during user delete.', 'error');
+      return false;
     }
-
-    // Delete from server
-    fetch(`/api/users/${userId}`, { method: 'DELETE' }).catch((e) =>
-      console.warn('Server delete user notice:', e)
-    );
-
-    showToast('User Deleted 🗑️', `User ${target?.name || userId} has been permanently deleted from Supabase database.`, 'info');
   };
 
   const toggleVerifyUser = (userId: string) => {
@@ -4535,72 +5382,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  const manualGrantCoins = (userId: string, amount: number, reason: string = 'Manual Admin Credit') => {
-    const targetUser =
-      usersRef.current.find((u) => u.id === userId) ||
-      usersRef.current.find((u) => u.authId === userId) ||
-      users.find((u) => u.id === userId) ||
-      users.find((u) => u.authId === userId);
-    if (!targetUser) return;
-
-    const currentBal = Number(targetUser.coinBalance) || 0;
-    const updatedBal = Math.max(0, currentBal + Number(amount));
-    const targetName = targetUser.name || targetUser.id;
-    const updatedUserObj: UserProfile = { ...targetUser, coinBalance: updatedBal };
-    const targetEmail = targetUser.email ? targetUser.email.toLowerCase().trim() : null;
-
-    // 1. Update every in-memory match (id / authId / email) so the live wallet HUD refreshes
-    setUsers((prev) => {
-      const next = prev.map((u) => {
-        const isMatch =
-          u.id === targetUser.id ||
-          (targetUser.authId && (u.authId === targetUser.authId || u.id === targetUser.authId)) ||
-          (targetEmail && u.email && u.email.toLowerCase().trim() === targetEmail);
-        return isMatch ? { ...u, coinBalance: updatedBal } : u;
-      });
-      usersRef.current = next;
-      return next;
-    });
-
-    applyWalletBalanceRef.current({
-      userId: targetUser.id,
-      authId: targetUser.authId,
-      email: targetUser.email,
-      coinBalance: updatedBal,
-      earningsCoins: targetUser.earningsCoins,
-    });
-
-    // 2. Persist coin_balance by id, auth_id, and email
-    if (isSupabaseConfigured()) {
-      updateUserProfileInSupabase(targetUser.id, {
-        coinBalance: updatedBal,
-        email: targetUser.email,
-      }).catch((e) => console.warn('Supabase manual coin grant save error:', e));
-      upsertProfileToSupabase(updatedUserObj).catch((e) =>
-        console.warn('Supabase manual coin grant upsert error:', e)
-      );
-    }
-
-    authFetch('/api/supabase/update-profile', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: targetUser.id,
-        updates: { coinBalance: updatedBal, email: targetUser.email },
-      }),
-    }).catch(() => {});
-
-    // 3. Server memory + realtime wallet broadcast to the user's session
-    authFetch('/api/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedUserObj),
-    }).catch(() => {});
-
+  /** @deprecated Client-only grants disabled — use POST /api/v1/finance/funding/admin-credit (ManualCoinModal). */
+  const manualGrantCoins = (_userId: string, _amount: number, _reason: string = 'Manual Admin Credit') => {
+    console.warn(
+      '[manualGrantCoins] Blocked: use Financial Module POST /api/v1/finance/funding/admin-credit (PURCHASE ledger required).'
+    );
     showToast(
-      'Coins Manual Credit 🪙',
-      `${amount >= 0 ? '+' : ''}${amount} coins ${amount >= 0 ? 'added to' : 'deducted from'} ${targetName}. New balance: ${(updatedBal ?? 0).toLocaleString()} coins. (${reason})`,
-      amount >= 0 ? 'success' : 'warning'
+      'Client grant blocked',
+      'Coin credits must post via Financial Module API (wallet_ledger PURCHASE). Use Admin → Manual Coin Credit.',
+      'error'
     );
   };
 
@@ -4631,7 +5421,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       hourlyCoinRate: 10,
       earningsCoins: 0,
       totalLifetimeEarnedUSD: 0,
-      vipTier: 'diamond',
       onlineStatus: 'online',
       hasPasswordSet: true,
       agencyName: leaderData.agencyName || 'Aurora Talent Management',
@@ -4648,6 +5437,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const leaderPayload = {
       ...newLeader,
+      gender: 'female' as const,
+      genderLocked: true,
+      role: 'team_leader' as const,
       password: (leaderData as any).password || 'leader123',
     };
 
@@ -4655,29 +5447,98 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(leaderPayload),
-    }).catch((e) => console.warn('Team leader server sync warning:', e));
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        const linkedAuthId = data?.user?.authId || data?.user?.auth_id;
+        if (res.ok && data?.success && linkedAuthId && linkedAuthId !== newLeader.authId) {
+          setUsers((prev) => {
+            const next = prev.map((u) =>
+              u.id === newLeader.id ? { ...u, authId: linkedAuthId } : u
+            );
+            usersRef.current = next;
+            return next;
+          });
+        }
+      })
+      .catch((e) => console.warn('Team leader server sync warning:', e));
 
-    if (isSupabaseConfigured()) {
-      upsertProfileToSupabase(newLeader).catch((e) =>
-        console.warn('Team leader Supabase sync warning:', e)
-      );
-    }
+    // Auth + profile persist via POST /api/users (links auth_id after Auth create).
+    // Do not client-upsert here — that raced Auth create and previously nullified auth_id.
 
     showToast('Team Leader Created! 👑', `Successfully registered Team Leader ${newLeader.name} (${newLeader.agencyName || 'Agency'}).`, 'success');
     return newLeader;
   };
 
-  const createCreatorByTeamLeader = (creatorData: Partial<UserProfile>, leaderId?: string): UserProfile => {
+  const refreshTeamLeaderCreators = async (): Promise<UserProfile[]> => {
+    try {
+      const res = await authFetch('/api/teamleader/creators');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success || !Array.isArray(data.creators)) {
+        return [];
+      }
+      const creators = data.creators as UserProfile[];
+      setUsers((prev) => {
+        const byId = new Map(prev.map((u) => [u.id, u]));
+        for (const c of creators) {
+          const existing = byId.get(c.id);
+          byId.set(
+            c.id,
+            existing ? { ...existing, ...c, onlineStatus: existing.onlineStatus || c.onlineStatus } : c
+          );
+        }
+        const next = Array.from(byId.values());
+        usersRef.current = next;
+        return next;
+      });
+      return creators;
+    } catch (e) {
+      console.warn('refreshTeamLeaderCreators failed:', e);
+      return [];
+    }
+  };
+
+  const createCreatorByTeamLeader = async (
+    creatorData: Partial<UserProfile>,
+    leaderId?: string
+  ): Promise<UserProfile | null> => {
     const activeLeaderId = leaderId || currentUser.id;
     const leader = users.find((u) => u.id === activeLeaderId);
-    const newId = (creatorData.id && isValidUuid(creatorData.id)) ? creatorData.id : generateValidUuid();
-    const creatorAvatar = creatorData.avatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400';
 
-    const newCreator: UserProfile = {
+    const name = String(creatorData.name || '').trim();
+    if (!name) {
+      showToast('Validation Error', 'Creator name is required.', 'error');
+      return null;
+    }
+
+    const email = String(creatorData.email || '').trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showToast('Validation Error', 'A valid email address is required.', 'error');
+      return null;
+    }
+    const disposableSuffixes = ['@livecall.app', '@minglecall.local', '@example.com', '@test.local'];
+    if (disposableSuffixes.some((s) => email.endsWith(s))) {
+      showToast('Validation Error', 'Placeholder emails are not allowed. Use a real email.', 'error');
+      return null;
+    }
+
+    const password = String((creatorData as any).password || '');
+    const passwordError = getPasswordPolicyError(password);
+    if (passwordError) {
+      showToast('Password Requirements', passwordError, 'error');
+      return null;
+    }
+
+    const newId = creatorData.id && isValidUuid(creatorData.id) ? creatorData.id : generateValidUuid();
+    const creatorAvatar =
+      creatorData.avatarUrl ||
+      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400';
+
+    const optimisticCreator: UserProfile = {
       id: newId,
       authId: creatorData.authId || newId,
-      name: creatorData.name || 'New Creator Host',
-      email: creatorData.email || `creator_${Date.now().toString().slice(-4)}@livecall.app`,
+      name,
+      email,
       gender: 'female',
       genderLocked: true,
       role: 'female_creator',
@@ -4691,54 +5552,83 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       interestedIn: ['male'],
       tags: creatorData.tags || ['Talent Agency', 'HD Video', 'Friendly'],
       avatarUrl: creatorAvatar,
-      gallery: (creatorData.gallery && creatorData.gallery.length > 0) ? creatorData.gallery : [creatorAvatar],
+      gallery: creatorData.gallery && creatorData.gallery.length > 0 ? creatorData.gallery : [creatorAvatar],
       isVerified: true,
       isOnboarded: true,
       coinBalance: 0,
       hourlyCoinRate: creatorData.hourlyCoinRate || 10,
-      // Earning uses system host share % unless an Admin sets an individual override
       coinEarnOverrideRate: null,
       teamLeaderId: activeLeaderId,
       createdById: activeLeaderId,
-      agencyName: leader?.agencyName || currentUser.agencyName || 'Agency Guild',
+      agencyName: leader?.agencyName || currentUser.agencyName || undefined,
       earningsCoins: 0,
       totalLifetimeEarnedUSD: 0,
       totalCallsHosted: 0,
       totalCallMinutes: 0,
-      vipTier: 'none',
       onlineStatus: 'online',
       hasPasswordSet: true,
       createdAt: new Date().toISOString(),
     };
 
     setUsers((prev) => {
-      // Keep Team Leader (and other existing users) ahead of the new host so
-      // currentUser resolution never briefly resolves to the new creator.
-      const next = [...prev.filter((u) => u.id !== newCreator.id && u.email !== newCreator.email), newCreator];
+      const next = [
+        ...prev.filter((u) => u.id !== optimisticCreator.id && u.email !== optimisticCreator.email),
+        optimisticCreator,
+      ];
       usersRef.current = next;
       return next;
     });
 
-    const creatorPayload = {
-      ...newCreator,
-      password: (creatorData as any).password || 'creator123',
-    };
+    try {
+      // Persist only via Team Leader API — do NOT call /api/users (role overwrite risk).
+      const res = await authFetch('/api/teamleader/creators', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...optimisticCreator, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success || !data?.creator) {
+        setUsers((prev) => {
+          const next = prev.filter((u) => u.id !== optimisticCreator.id);
+          usersRef.current = next;
+          return next;
+        });
+        showToast(
+          'Create Failed',
+          typeof data?.error === 'string' ? data.error : 'Could not create creator on the server.',
+          'error'
+        );
+        return null;
+      }
 
-    // Persist only via Team Leader API — do NOT call upsertProfileToSupabase here.
-    // That helper posts /api/supabase/upsert-profile + /api/users, which for non-admins
-    // force role=caller's role (team_leader) and then overwrite the new host by email.
-    authFetch('/api/teamleader/creators', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(creatorPayload),
-    }).catch((e) => console.warn('Team Leader creator sync notice:', e));
+      const serverCreator = data.creator as UserProfile;
+      setUsers((prev) => {
+        let next = prev.map((u) =>
+          u.id === optimisticCreator.id || u.id === serverCreator.id ? { ...u, ...serverCreator } : u
+        );
+        if (!next.some((u) => u.id === serverCreator.id)) next = [...next, serverCreator];
+        if (serverCreator.id !== optimisticCreator.id) {
+          next = next.filter((u) => u.id !== optimisticCreator.id);
+        }
+        usersRef.current = next;
+        return next;
+      });
 
-    showToast(
-      'Creator Host Created! ✨',
-      `Registered female host ${newCreator.name}. Coin earning uses the system-defined rate until an admin sets an override.`,
-      'success'
-    );
-    return newCreator;
+      showToast(
+        'Creator Host Created',
+        `Registered female host ${serverCreator.name}. Coin earning uses the system-defined rate until an admin sets an override.`,
+        'success'
+      );
+      return serverCreator;
+    } catch (e: any) {
+      setUsers((prev) => {
+        const next = prev.filter((u) => u.id !== optimisticCreator.id);
+        usersRef.current = next;
+        return next;
+      });
+      showToast('Create Failed', e?.message || 'Network error creating creator.', 'error');
+      return null;
+    }
   };
 
   const updateCreatorCoinEarnOverride = (creatorId: string, overrideRate: number | null) => {
@@ -4801,51 +5691,54 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const banCreatorByTeamLeader = async (creatorId: string, days: number, reason: string): Promise<boolean> => {
+    const banDays = Number(days) || 7;
+    const banReason = reason || 'Suspended by Team Leader';
+    const targetBefore = usersRef.current.find((u) => u.id === creatorId) || users.find((u) => u.id === creatorId);
+    const targetName = targetBefore?.name || 'Female Host';
+
     try {
-      const banDays = Number(days) || 7;
-      const banReason = reason || 'Suspended by Team Leader';
-      const bannedUntil = new Date(Date.now() + banDays * 24 * 60 * 60 * 1000).toISOString();
-      let targetName = '';
+      const res = await authFetch('/api/teamleader/ban-creator', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          creatorId,
+          days: banDays,
+          reason: banReason,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        showToast('Ban Failed', typeof data?.error === 'string' ? data.error : 'Server rejected the suspension.', 'error');
+        return false;
+      }
+
+      const bannedUntil =
+        data.bannedUntil || new Date(Date.now() + banDays * 24 * 60 * 60 * 1000).toISOString();
+      const serverUser = data.user as UserProfile | undefined;
 
       setUsers((prev) => {
         const next = prev.map((u) => {
-          if (u.id === creatorId) {
-            targetName = u.name;
-            const updated: UserProfile = {
-              ...u,
-              isBanned: true,
-              banReason,
-              bannedUntil,
-              bannedById: currentUser.id,
-              bannedByRole: 'team_leader',
-              onlineStatus: 'offline',
-            };
-            if (isSupabaseConfigured()) {
-              upsertProfileToSupabase(updated).catch(() => { });
-            }
-            return updated;
-          }
-          return u;
+          if (u.id !== creatorId) return u;
+          return {
+            ...u,
+            ...(serverUser || {}),
+            isBanned: true,
+            banReason: data.banReason || banReason,
+            bannedUntil,
+            bannedById: currentUser.id,
+            bannedByRole: 'team_leader' as const,
+            onlineStatus: 'offline' as const,
+          };
         });
         usersRef.current = next;
         return next;
       });
 
-      // Server sync
-      authFetch('/api/teamleader/ban-creator', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          leaderId: currentUser.id,
-          creatorId,
-          days: banDays,
-          reason: banReason,
-        }),
-      }).catch((e) => console.warn('Team leader ban server sync warning:', e));
+      await refreshTeamLeaderCreators();
 
       showToast(
-        'Host Suspended 🚫',
-        `${targetName || 'Female Host'} has been suspended for ${banDays} days until ${new Date(bannedUntil).toLocaleDateString()}. Login blocked.`,
+        'Host Suspended',
+        `${targetName} has been suspended for ${banDays} days until ${new Date(bannedUntil).toLocaleDateString()}. Login blocked.`,
         'warning'
       );
       return true;
@@ -4856,38 +5749,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const unbanCreatorByTeamLeader = async (creatorId: string): Promise<boolean> => {
+    const targetBefore = usersRef.current.find((u) => u.id === creatorId) || users.find((u) => u.id === creatorId);
+    const targetName = targetBefore?.name || 'Host';
+
     try {
-      let targetName = '';
+      const res = await authFetch('/api/teamleader/unban-creator', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ creatorId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        showToast('Unban Failed', typeof data?.error === 'string' ? data.error : 'Server rejected the unban.', 'error');
+        return false;
+      }
+
+      const serverUser = data.user as UserProfile | undefined;
       setUsers((prev) => {
         const next = prev.map((u) => {
-          if (u.id === creatorId) {
-            targetName = u.name;
-            const updated: UserProfile = {
-              ...u,
-              isBanned: false,
-              banReason: undefined,
-              bannedUntil: undefined,
-              bannedById: undefined,
-              bannedByRole: undefined,
-            };
-            if (isSupabaseConfigured()) {
-              upsertProfileToSupabase(updated).catch(() => { });
-            }
-            return updated;
-          }
-          return u;
+          if (u.id !== creatorId) return u;
+          return {
+            ...u,
+            ...(serverUser || {}),
+            isBanned: false,
+            banReason: undefined,
+            bannedUntil: undefined,
+            bannedById: undefined,
+            bannedByRole: undefined,
+          };
         });
         usersRef.current = next;
         return next;
       });
 
-      authFetch('/api/teamleader/unban-creator', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ creatorId }),
-      }).catch((e) => console.warn('Team leader unban server sync warning:', e));
-
-      showToast('Suspension Lifted ✅', `${targetName || 'Host'} has been unbanned and can now log in and host calls.`, 'success');
+      await refreshTeamLeaderCreators();
+      showToast('Suspension Lifted', `${targetName} has been unbanned and can now log in and host calls.`, 'success');
       return true;
     } catch (e: any) {
       showToast('Unban Error', e.message || 'Failed to unban creator', 'error');
@@ -4896,23 +5792,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const deleteCreatorByTeamLeader = async (creatorId: string): Promise<boolean> => {
+    const targetBefore = usersRef.current.find((u) => u.id === creatorId) || users.find((u) => u.id === creatorId);
+    const targetName = targetBefore?.name || 'Host';
+
     try {
-      let targetName = '';
+      const res = await authFetch('/api/teamleader/delete-creator', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ creatorId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        showToast('Delete Failed', typeof data?.error === 'string' ? data.error : 'Server rejected the deletion.', 'error');
+        return false;
+      }
+
       setUsers((prev) => {
-        const target = prev.find((u) => u.id === creatorId);
-        targetName = target?.name || 'Host';
         const next = prev.filter((u) => u.id !== creatorId);
         usersRef.current = next;
         return next;
       });
+      deletedUserIdsRef.current.add(creatorId);
 
-      authFetch('/api/teamleader/delete-creator', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ creatorId }),
-      }).catch((e) => console.warn('Team leader delete server sync warning:', e));
-
-      showToast('Host Deleted 🗑️', `Permanently removed ${targetName} from your agency and the database.`, 'info');
+      await refreshTeamLeaderCreators();
+      showToast('Host Deleted', `Permanently removed ${targetName} from your agency and the database.`, 'info');
       return true;
     } catch (e: any) {
       showToast('Delete Error', e.message || 'Failed to delete creator', 'error');
@@ -4920,183 +5823,367 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  const likePost = (postId: string) => {
-    setFeedPosts((prev) =>
-      prev.map((p) => {
-        if (p.id === postId) {
-          const nextIsLiked = !p.isLiked;
-          return {
-            ...p,
-            isLiked: nextIsLiked,
-            likes: nextIsLiked ? p.likes + 1 : Math.max(0, p.likes - 1),
-          };
-        }
-        return p;
-      })
-    );
-  };
-
-  const likeUserMoment = (userId: string, momentId: string): boolean => {
-    let toggledState = false;
-
-    setUsers((prevUsers) =>
-      prevUsers.map((u) => {
-        if (u.id === userId && u.moments && u.moments.length > 0) {
-          const updatedMoments = u.moments.map((m) => {
-            if (m.id === momentId) {
-              const isLiked = !m.isLiked;
-              toggledState = isLiked;
-              const nextCount = isLiked ? (m.likes || 0) + 1 : Math.max(0, (m.likes || 0) - 1);
-              return {
-                ...m,
-                isLiked,
-                likes: nextCount,
-              };
-            }
-            return m;
-          });
-          const updatedUser = { ...u, moments: updatedMoments };
-          if (isSupabaseConfigured()) {
-            upsertProfileToSupabase(updatedUser).catch(() => {});
-          }
-          return updatedUser;
-        }
-        return u;
-      })
-    );
-
-    // Also toggle in feedPosts if it exists in global feed
-    setFeedPosts((prev) =>
-      prev.map((p) => {
-        if (p.id === momentId || p.mediaUrl.includes(momentId)) {
-          const isLiked = !p.isLiked;
-          return {
-            ...p,
-            isLiked,
-            likes: isLiked ? p.likes + 1 : Math.max(0, p.likes - 1),
-          };
-        }
-        return p;
-      })
-    );
-
-    if (toggledState) {
-      recordMomentInteraction();
-    }
-
-    showToast(
-      toggledState ? 'Liked Moment! ❤️' : 'Unliked Moment',
-      toggledState ? 'Added to your liked moments.' : 'Removed from liked moments.',
-      'info'
-    );
-    return toggledState;
-  };
-
-  const tipMomentCreator = (creatorId: string, coinAmount: number = 20): boolean => {
-    if (currentUser.coinBalance < coinAmount) {
-      showToast(
-        'Insufficient Coins! 🪙',
-        `You need at least ${coinAmount} coins to tip this moment. Please refill your balance.`,
-        'error'
+  const refreshFeedPosts = async () => {
+    try {
+      const res = await authFetch('/api/v1/feed?limit=50');
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) return;
+      const posts = Array.isArray(json.data?.posts) ? json.data.posts : [];
+      setFeedPosts(
+        posts.map((p: any) => ({
+          id: String(p.id),
+          creatorId: String(p.creatorId),
+          creatorName: p.creatorName || 'Creator',
+          creatorAvatar: p.creatorAvatar || '',
+          creatorCountry: p.creatorCountry || '',
+          mediaUrl: p.mediaUrl,
+          mediaType: p.mediaType === 'video' ? 'video' : 'image',
+          caption: p.caption || '',
+          likes: Number(p.likes || 0),
+          commentsCount: Number(p.commentsCount || 0),
+          isLiked: Boolean(p.isLiked),
+          createdAt: p.createdAt
+            ? new Date(p.createdAt).toLocaleDateString()
+            : 'Just now',
+        }))
       );
+    } catch (err) {
+      console.warn('refreshFeedPosts failed:', err);
+    }
+  };
+
+  const fetchUserMoments = async (userId: string): Promise<FeedPost[]> => {
+    if (!userId) return [];
+    try {
+      const res = await authFetch(`/api/v1/feed/user/${encodeURIComponent(userId)}?limit=50`);
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) return [];
+      const posts = Array.isArray(json.data?.posts) ? json.data.posts : [];
+      return posts.map((p: any) => ({
+        id: String(p.id),
+        creatorId: String(p.creatorId),
+        creatorName: p.creatorName || 'Creator',
+        creatorAvatar: p.creatorAvatar || '',
+        creatorCountry: p.creatorCountry || '',
+        mediaUrl: p.mediaUrl,
+        mediaType: (p.mediaType === 'video' ? 'video' : 'image') as 'image' | 'video',
+        caption: p.caption || '',
+        likes: Number(p.likes || 0),
+        commentsCount: Number(p.commentsCount || 0),
+        isLiked: Boolean(p.isLiked),
+        createdAt: p.createdAt
+          ? new Date(p.createdAt).toLocaleDateString()
+          : 'Just now',
+      }));
+    } catch (err) {
+      console.warn('fetchUserMoments failed:', err);
+      return [];
+    }
+  };
+
+  const likePost = async (
+    postId: string
+  ): Promise<{ liked: boolean; likes: number } | null> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to like moments.', 'warning');
+      return null;
+    }
+    try {
+      const res = await authFetch(`/api/v1/feed/${encodeURIComponent(postId)}/like`, {
+        method: 'POST',
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Like failed', json?.error?.message || 'Could not update like.', 'error');
+        return null;
+      }
+      const liked = Boolean(json.data?.liked);
+      const likes = Number(json.data?.likes || 0);
+      setFeedPosts((prev) =>
+        prev.map((p) => (p.id === postId ? { ...p, isLiked: liked, likes } : p))
+      );
+      if (liked) recordMomentInteraction();
+      return { liked, likes };
+    } catch (err: any) {
+      showToast('Like failed', err?.message || 'Network error', 'error');
+      return null;
+    }
+  };
+
+  const likeUserMoment = async (
+    _userId: string,
+    momentId: string
+  ): Promise<{ liked: boolean; likes: number } | null> => {
+    return likePost(momentId);
+  };
+
+  const tipMomentCreator = async (
+    creatorId: string,
+    coinAmount: number = 20,
+    postId?: string
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to tip.', 'warning');
+      return false;
+    }
+    if (!postId) {
+      showToast('Tip failed', 'Missing moment post id.', 'error');
+      return false;
+    }
+    if (creatorId === currentUser.id) {
+      showToast('Tip failed', 'You cannot tip your own moment.', 'error');
       return false;
     }
 
-    const creatorUser = users.find((u) => u.id === creatorId);
-    const isCreatorTlCreated = Boolean(creatorUser?.teamLeaderId);
-    const isEligibleFemaleCreator = creatorUser?.role === 'female_creator' || creatorUser?.role === 'female_host' || isCreatorTlCreated;
-    const canCreatorEarn = isEligibleFemaleCreator;
-    const hostGiftSharePercent = systemSettings.giftFemaleHostSharePercent ?? 70;
-    const tlGiftSharePercent = systemSettings.giftTeamLeaderSharePercent ?? 10;
-
-    const addedEarnedCoins = canCreatorEarn ? Math.max(1, Math.round(coinAmount * (hostGiftSharePercent / 100))) : 0;
-    const addedTlCoins = (isCreatorTlCreated && creatorUser?.teamLeaderId)
-      ? Math.max(1, Math.round(coinAmount * (tlGiftSharePercent / 100)))
-      : 0;
-
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return { ...u, coinBalance: Math.max(0, u.coinBalance - coinAmount) };
-        }
-        if (u.id === creatorId) {
-          const newCoins = (u.earningsCoins || 0) + addedEarnedCoins;
-          return {
-            ...u,
-            earningsCoins: newCoins,
-            totalLifetimeEarnedUSD: newCoins * systemSettings.femalePayoutRatioUSD,
-            totalGiftsReceivedCount: (u.totalGiftsReceivedCount || 0) + 1,
-          };
-        }
-        if (addedTlCoins > 0 && creatorUser?.teamLeaderId && (u.id === creatorUser.teamLeaderId || u.id === creatorUser.createdById)) {
-          const newTlCoins = (u.earningsCoins || 0) + addedTlCoins;
-          return {
-            ...u,
-            earningsCoins: newTlCoins,
-            totalLifetimeEarnedUSD: newTlCoins * systemSettings.femalePayoutRatioUSD,
-          };
-        }
-        return u;
-      })
-    );
-
-    // Sync transaction to server
-    authFetch('/api/gifts/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        senderId: currentUser.id,
-        receiverId: creatorId,
-        giftId: 'tip_moment',
-        giftCost: coinAmount,
-        hostCoinsEarned: addedEarnedCoins,
-        tlCoinsEarned: addedTlCoins,
-        tlId: creatorUser?.teamLeaderId || creatorUser?.createdById,
-      }),
-    }).catch(() => {});
-
-    showToast(
-      'Tip Sent! 🪙',
-      `You tipped ${coinAmount} coins to ${creatorUser ? creatorUser.name : 'the creator'}!`,
-      'success'
-    );
-    return true;
-  };
-
-  const addFeedPost = (post: Omit<FeedPost, 'id' | 'createdAt' | 'likes' | 'commentsCount'>) => {
-    const newPost: FeedPost = {
-      ...post,
-      id: 'post_' + Date.now(),
-      likes: 0,
-      commentsCount: 0,
-      createdAt: 'Just now',
-    };
-    const updated = [newPost, ...feedPosts];
-    setFeedPosts(updated);
-    if (isSupabaseConfigured()) {
-      upsertFeedPostToSupabase(newPost).catch(() => { });
-    }
-    recordMomentInteraction();
-    showToast('Moment Published! ✨', 'Your post is now live in the global feed.', 'success');
-  };
-
-  const toggleFavorite = (userId: string) => {
-    const exists = favorites.includes(userId);
-    const updated = exists ? favorites.filter((id) => id !== userId) : [...favorites, userId];
-    setFavorites(updated);
-    localStorage.setItem('livecall_favorites', JSON.stringify(updated));
-    if (isSupabaseConfigured() && currentUser?.id) {
-      if (exists) {
-        removeFavoriteFromSupabase(currentUser.id, userId).catch(() => { });
-      } else {
-        addFavoriteToSupabase(currentUser.id, userId).catch(() => { });
+    try {
+      const res = await authFetch(`/api/v1/feed/${encodeURIComponent(postId)}/tip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ coins: coinAmount }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Tip failed', json?.error?.message || 'Could not send tip.', 'error');
+        return false;
       }
+
+      const senderBalance = Number(json.data?.senderBalance);
+      const hostEarnings = Number(json.data?.hostEarnings);
+      const tipCoins = Number(json.data?.tipCoins || coinAmount);
+      const tlId = json.data?.tlId ? String(json.data.tlId) : null;
+      const tlEarnings =
+        json.data?.tlEarnings != null ? Number(json.data.tlEarnings) : null;
+
+      setUsers((prev) =>
+        prev.map((u) => {
+          if (u.id === currentUser.id && Number.isFinite(senderBalance)) {
+            return { ...u, coinBalance: senderBalance };
+          }
+          if (u.id === creatorId && Number.isFinite(hostEarnings)) {
+            return {
+              ...u,
+              earningsCoins: hostEarnings,
+              totalLifetimeEarnedUSD: coinsToUsd(hostEarnings, getCoinUsdPeg(systemSettings)),
+              totalGiftsReceivedCount: (u.totalGiftsReceivedCount || 0) + 1,
+            };
+          }
+          if (tlId && u.id === tlId && tlEarnings != null && Number.isFinite(tlEarnings)) {
+            return {
+              ...u,
+              earningsCoins: tlEarnings,
+              totalLifetimeEarnedUSD: coinsToUsd(tlEarnings, getCoinUsdPeg(systemSettings)),
+            };
+          }
+          return u;
+        })
+      );
+
+      const creatorUser = users.find((u) => u.id === creatorId);
+      showToast(
+        'Tip sent',
+        `You tipped ${tipCoins} coins to ${creatorUser?.name || 'the creator'}.`,
+        'success'
+      );
+      return true;
+    } catch (err: any) {
+      showToast('Tip failed', err?.message || 'Network error', 'error');
+      return false;
     }
-    showToast(
-      exists ? 'Removed from Favorites' : 'Added to Favorites ⭐',
-      exists ? 'User removed from your favorites list.' : 'User added to your priority list.',
-      'info'
-    );
+  };
+
+  const addFeedPost = async (
+    post: Omit<FeedPost, 'id' | 'createdAt' | 'likes' | 'commentsCount'>
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to post a moment.', 'warning');
+      return false;
+    }
+    try {
+      const res = await authFetch('/api/v1/feed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mediaUrl: post.mediaUrl,
+          mediaType: post.mediaType || 'image',
+          caption: post.caption || '',
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Publish failed', json?.error?.message || 'Could not publish moment.', 'error');
+        return false;
+      }
+      const saved = json.data?.post;
+      if (!saved?.id) {
+        showToast('Publish failed', 'Server did not return the new post.', 'error');
+        return false;
+      }
+      const mapped: FeedPost = {
+        id: String(saved.id),
+        creatorId: String(saved.creatorId),
+        creatorName: saved.creatorName || currentUser.name,
+        creatorAvatar: saved.creatorAvatar || currentUser.avatarUrl,
+        creatorCountry:
+          saved.creatorCountry ||
+          `${currentUser.countryCode} ${currentUser.nationality}`,
+        mediaUrl: saved.mediaUrl,
+        mediaType: saved.mediaType === 'video' ? 'video' : 'image',
+        caption: saved.caption || '',
+        likes: Number(saved.likes || 0),
+        commentsCount: Number(saved.commentsCount || 0),
+        isLiked: false,
+        createdAt: saved.createdAt
+          ? new Date(saved.createdAt).toLocaleDateString()
+          : 'Just now',
+      };
+      setFeedPosts((prev) => [mapped, ...prev.filter((p) => p.id !== mapped.id)]);
+      recordMomentInteraction();
+      showToast('Moment published', 'Your post is live in the Moments feed.', 'success');
+      return true;
+    } catch (err: any) {
+      showToast('Publish failed', err?.message || 'Network error', 'error');
+      return false;
+    }
+  };
+
+  const toggleFavorite = async (userId: string): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to manage favorites.', 'warning');
+      return false;
+    }
+    try {
+      const res = await authFetch('/api/v1/favorites/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: userId }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        const msg = json?.error?.message || 'Could not update favorite.';
+        showToast('Favorite failed', msg, 'error');
+        return false;
+      }
+      const favorited = Boolean(json.data?.favorited);
+      setFavorites((prev) => {
+        const next = favorited
+          ? prev.includes(userId)
+            ? prev
+            : [...prev, userId]
+          : prev.filter((id) => id !== userId);
+        return next;
+      });
+      showToast(
+        favorited ? 'Added to Favorites ⭐' : 'Removed from Favorites',
+        favorited ? 'User added to your priority list.' : 'User removed from your favorites list.',
+        'info'
+      );
+      return true;
+    } catch (err: any) {
+      console.warn('toggleFavorite error:', err);
+      showToast('Favorite failed', err?.message || 'Network error updating favorite.', 'error');
+      return false;
+    }
+  };
+
+  const upsertLocalMatchRecord = (match: {
+    id?: string;
+    otherUserId: string;
+    status: 'pending' | 'matched' | 'rejected' | 'unmatched';
+    initiatedBy: string;
+  }) => {
+    setUserMatchRecords((prev) => {
+      const filtered = prev.filter((m) => m.otherUserId !== match.otherUserId);
+      return [
+        {
+          id: match.id || `local_${match.otherUserId}`,
+          otherUserId: match.otherUserId,
+          status: match.status,
+          initiatedBy: match.initiatedBy,
+        },
+        ...filtered,
+      ];
+    });
+  };
+
+  const likeUser = async (
+    targetUserId: string,
+    options?: { superLike?: boolean }
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to like profiles.', 'warning');
+      return false;
+    }
+    try {
+      const res = await authFetch('/api/v1/matches/like', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetUserId,
+          superLike: Boolean(options?.superLike),
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Like failed', json?.error?.message || 'Could not save like.', 'error');
+        return false;
+      }
+      const match = json.data?.match;
+      if (match?.otherUserId) {
+        upsertLocalMatchRecord({
+          id: match.id,
+          otherUserId: match.otherUserId,
+          status: match.status,
+          initiatedBy: match.initiatedBy,
+        });
+      }
+      if (match?.status === 'matched') {
+        showToast('It\'s a Match! 🎉', 'You both liked each other.', 'success');
+      } else {
+        showToast(
+          options?.superLike ? 'Super Like sent 🌟' : 'Liked ❤️',
+          'Waiting for them to like you back.',
+          'success'
+        );
+      }
+      return true;
+    } catch (err: any) {
+      console.warn('likeUser error:', err);
+      showToast('Like failed', err?.message || 'Network error saving like.', 'error');
+      return false;
+    }
+  };
+
+  const passUser = async (targetUserId: string): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to pass profiles.', 'warning');
+      return false;
+    }
+    try {
+      const res = await authFetch('/api/v1/matches/pass', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Pass failed', json?.error?.message || 'Could not save pass.', 'error');
+        return false;
+      }
+      const match = json.data?.match;
+      if (match?.otherUserId) {
+        upsertLocalMatchRecord({
+          id: match.id,
+          otherUserId: match.otherUserId,
+          status: match.status,
+          initiatedBy: match.initiatedBy || currentUser.id,
+        });
+      }
+      return true;
+    } catch (err: any) {
+      console.warn('passUser error:', err);
+      showToast('Pass failed', err?.message || 'Network error saving pass.', 'error');
+      return false;
+    }
   };
 
   const isFriend = (userId: string): boolean => {
@@ -5119,7 +6206,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const addFriend = (userId: string) => {
     const isFemale = currentUser.gender === 'female' || currentUser.role === 'female_creator' || currentUser.role === 'female_host';
     if (isFemale) {
-      sendFriendRequest(currentUser.id, userId);
+      void sendFriendRequest(currentUser.id, userId);
     } else {
       showToast(
         'Friend Request Info 🌸',
@@ -5129,223 +6216,282 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  const sendFriendRequest = (femaleId: string, targetUserId: string, callLogId?: string) => {
-    const sender = users.find((u) => u.id === femaleId) || currentUser;
-    const receiver = users.find((u) => u.id === targetUserId);
-    if (!receiver) return;
+  const applyFriendsServerPayload = (data: any) => {
+    if (Array.isArray(data?.requests)) {
+      setFriendRequests(data.requests as FriendRequest[]);
+    }
+    if (Array.isArray(data?.friendIds)) {
+      setFriends(data.friendIds.map(String));
+    }
+  };
 
-    // Strict rule: Female creators/hosts can send Friend Requests to any user (male or female)
-    if (sender.gender !== 'female' && sender.role !== 'female_creator' && sender.role !== 'female_host') {
+  const sendFriendRequest = async (
+    _femaleId: string,
+    targetUserId: string,
+    callLogId?: string
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to send friend requests.', 'warning');
+      return false;
+    }
+
+    const isFemale =
+      currentUser.gender === 'female' ||
+      currentUser.role === 'female_creator' ||
+      currentUser.role === 'female_host' ||
+      currentUser.role === 'female_user';
+    if (!isFemale) {
       showToast(
         'Action Restricted',
         'Only female hosts can initiate Friend Requests to callers.',
         'warning'
       );
-      return;
+      return false;
     }
 
-    const female = sender;
-    const targetUser = receiver;
+    const targetUser = users.find((u) => u.id === targetUserId);
+    if (!targetUser) {
+      showToast('User not found', 'Could not find that user.', 'error');
+      return false;
+    }
 
-    // Check if already friends
     if (isFriend(targetUser.id)) {
       showToast('Already Friends 👥', `You and ${targetUser.name} are already connected as friends!`, 'info');
-      return;
+      return false;
     }
 
-    // Check if request already exists
     const existing = friendRequests.find(
-      (r) => r.senderId === female.id && r.receiverId === targetUser.id && r.status === 'pending'
+      (r) => r.senderId === currentUser.id && r.receiverId === targetUser.id && r.status === 'pending'
     );
     if (existing) {
       showToast('Request Pending ⏳', `Friend request already sent to ${targetUser.name}. Waiting for approval.`, 'info');
-      return;
+      return false;
     }
 
     const friendBurnRate = systemSettings.coinBurnRateFriendPerMin ?? 80;
-    const standardBurnRate = systemSettings.coinBurnRatePerMin ?? 120;
 
-    const newRequest: FriendRequest = {
-      id: 'freq_' + Date.now(),
-      senderId: female.id,
-      senderName: female.name,
-      senderAvatar: female.avatarUrl,
-      receiverId: targetUser.id,
-      receiverName: targetUser.name,
-      receiverAvatar: targetUser.avatarUrl,
-      status: 'pending',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      callLogId,
-    };
+    try {
+      const res = await authFetch('/api/v1/friends/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: targetUser.id, callLogId }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Friend request failed', json?.error?.message || 'Could not send friend request.', 'error');
+        return false;
+      }
 
-    setFriendRequests((prev) => [newRequest, ...prev.filter((r) => !(r.senderId === female.id && r.receiverId === targetUser.id))]);
-    if (isSupabaseConfigured()) {
-      upsertFriendRequestToSupabase(newRequest).catch((e) => console.warn('Supabase friend request save error:', e));
-    }
+      applyFriendsServerPayload(json.data);
+      const newRequest = json.data?.request as FriendRequest | undefined;
 
-    // Send real-time WebSocket event
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'friend_request:send',
-          receiverId: targetUser.id,
-          request: newRequest,
-        })
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && newRequest) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'friend_request:send',
+            receiverId: targetUser.id,
+            request: newRequest,
+          })
+        );
+      }
+
+      showToast(
+        'Friend Request Sent! 🌸',
+        `Sent friend request to ${targetUser.name}. When accepted, friend call rates (${friendBurnRate} 🪙/min) will apply!`,
+        'success'
       );
+      return true;
+    } catch (err: any) {
+      console.warn('sendFriendRequest error:', err);
+      showToast('Friend request failed', err?.message || 'Network error sending friend request.', 'error');
+      return false;
     }
-
-    showToast(
-      'Friend Request Sent! 🌸',
-      `Sent friend request to ${targetUser.name}. When accepted, friend call rates (${friendBurnRate} 🪙/min) will apply!`,
-      'success'
-    );
   };
 
-  const acceptFriendRequest = (requestId: string) => {
+  const acceptFriendRequest = async (requestId: string): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to accept friend requests.', 'warning');
+      return false;
+    }
     const targetReq = friendRequests.find((r) => r.id === requestId);
-    if (!targetReq) return;
-
-    const updatedReq: FriendRequest = { ...targetReq, status: 'accepted' };
     const friendBurnRate = systemSettings.coinBurnRateFriendPerMin ?? 80;
 
-    // Update friend request status
-    setFriendRequests((prev) =>
-      prev.map((r) => (r.id === requestId ? updatedReq : r))
-    );
-    if (isSupabaseConfigured()) {
-      upsertFriendRequestToSupabase(updatedReq).catch((e) => console.warn('Supabase accept friend request error:', e));
-    }
+    try {
+      const res = await authFetch('/api/v1/friends/accept', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Accept failed', json?.error?.message || 'Could not accept friend request.', 'error');
+        return false;
+      }
 
-    // Add to friends list (both locally and persist)
-    const otherUserId = targetReq.senderId === currentUser.id ? targetReq.receiverId : targetReq.senderId;
-    setFriends((prev) => {
-      const next = Array.from(new Set([...prev, targetReq.senderId, targetReq.receiverId, otherUserId]));
-      return next;
-    });
+      applyFriendsServerPayload(json.data);
+      const accepted = (json.data?.request as FriendRequest | undefined) || targetReq;
 
-    // Send real-time WebSocket update
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'friend_request:accept',
-          requestId,
-          senderId: targetReq.senderId,
-          receiverId: targetReq.receiverId,
-        })
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && accepted) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'friend_request:accept',
+            requestId,
+            senderId: accepted.senderId,
+            receiverId: accepted.receiverId,
+          })
+        );
+      }
+
+      const otherName =
+        accepted?.senderId === currentUser.id ? accepted?.receiverName : accepted?.senderName;
+      showToast(
+        'Friend Request Accepted! 👥',
+        `You are now Friends with ${otherName || 'this user'}! Special Friend Rate (${friendBurnRate} 🪙/min) is active for 1-on-1 video calls.`,
+        'success'
       );
+      return true;
+    } catch (err: any) {
+      console.warn('acceptFriendRequest error:', err);
+      showToast('Accept failed', err?.message || 'Network error accepting friend request.', 'error');
+      return false;
     }
-
-    showToast(
-      'Friend Request Accepted! 👥',
-      `You are now Friends with ${targetReq.senderId === currentUser.id ? targetReq.receiverName : targetReq.senderName}! Special Friend Rate (${friendBurnRate} 🪙/min) is active for 1-on-1 video calls.`,
-      'success'
-    );
   };
 
-  const declineFriendRequest = (requestId: string) => {
+  const declineFriendRequest = async (requestId: string): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to decline friend requests.', 'warning');
+      return false;
+    }
     const targetReq = friendRequests.find((r) => r.id === requestId);
-    if (!targetReq) return;
-
-    const updatedReq: FriendRequest = { ...targetReq, status: 'declined' };
     const standardBurnRate = systemSettings.coinBurnRatePerMin ?? 120;
 
-    setFriendRequests((prev) =>
-      prev.map((r) => (r.id === requestId ? updatedReq : r))
-    );
-    if (isSupabaseConfigured()) {
-      upsertFriendRequestToSupabase(updatedReq).catch((e) => console.warn('Supabase decline friend request error:', e));
-    }
+    try {
+      const res = await authFetch('/api/v1/friends/decline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Decline failed', json?.error?.message || 'Could not decline friend request.', 'error');
+        return false;
+      }
 
-    // Send real-time WebSocket decline update
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'friend_request:decline',
-          requestId,
-          senderId: targetReq.senderId,
-          receiverId: targetReq.receiverId,
-        })
+      applyFriendsServerPayload(json.data);
+      const declined = (json.data?.request as FriendRequest | undefined) || targetReq;
+
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && declined) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'friend_request:decline',
+            requestId,
+            senderId: declined.senderId,
+            receiverId: declined.receiverId,
+          })
+        );
+      }
+
+      showToast(
+        'Request Declined',
+        `Friend request declined. Standard coin burn rate (${standardBurnRate} 🪙/min) remains active.`,
+        'info'
       );
+      return true;
+    } catch (err: any) {
+      console.warn('declineFriendRequest error:', err);
+      showToast('Decline failed', err?.message || 'Network error declining friend request.', 'error');
+      return false;
     }
-
-    showToast(
-      'Request Declined',
-      `Friend request declined. Standard coin burn rate (${standardBurnRate} 🪙/min) remains active.`,
-      'info'
-    );
   };
 
-  const removeFriend = (userId: string) => {
-    const updatedFriends = friends.filter((id) => id !== userId);
-    setFriends(updatedFriends);
-
-    // Completely remove all friend requests between these two users
-    setFriendRequests((prev) => {
-      const next = prev.filter(
-        (r) =>
-          !(
-            (r.senderId === currentUserId && r.receiverId === userId) ||
-            (r.senderId === userId && r.receiverId === currentUserId) ||
-            (currentUser && r.senderId === currentUser.id && r.receiverId === userId) ||
-            (currentUser && r.senderId === userId && r.receiverId === currentUser.id)
-          )
-      );
-      return next;
-    });
-
-    // Persist removal in Supabase
-    if (isSupabaseConfigured() && currentUserId) {
-      removeFriendInSupabase(currentUserId, userId).catch(() => {});
+  const removeFriend = async (userId: string): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to manage friends.', 'warning');
+      return false;
     }
 
-    // Broadcast removal over WebSocket so the other user's client immediately syncs
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'friend_request:remove',
-          userA: currentUserId,
-          userB: userId,
-        })
-      );
-    }
+    try {
+      const res = await authFetch('/api/v1/friends/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: userId }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Remove failed', json?.error?.message || 'Could not remove friend.', 'error');
+        return false;
+      }
 
-    const targetUser = users.find((u) => u.id === userId);
-    const targetName = targetUser ? targetUser.name : 'User';
-    showToast(
-      'Removed from Friends 👥',
-      `${targetName} removed from your Friends list. Standard call rate (${systemSettings.coinBurnRatePerMin ?? 120} 🪙/min) is now active.`,
-      'info'
-    );
+      applyFriendsServerPayload(json.data);
+
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'friend_request:remove',
+            userA: currentUser.id,
+            userB: userId,
+          })
+        );
+      }
+
+      const targetUser = users.find((u) => u.id === userId);
+      const targetName = targetUser ? targetUser.name : 'User';
+      showToast(
+        'Removed from Friends 👥',
+        `${targetName} removed from your Friends list. Standard call rate (${systemSettings.coinBurnRatePerMin ?? 120} 🪙/min) is now active.`,
+        'info'
+      );
+      return true;
+    } catch (err: any) {
+      console.warn('removeFriend error:', err);
+      showToast('Remove failed', err?.message || 'Network error removing friend.', 'error');
+      return false;
+    }
   };
 
   const toggleFriend = (userId: string) => {
     if (isFriend(userId)) {
-      removeFriend(userId);
+      void removeFriend(userId);
     } else {
       addFriend(userId);
     }
   };
 
-  const blockUser = (userId: string, reason: string = 'Inappropriate Behavior') => {
-    if (!blockedUserIds.includes(userId)) {
-      const updated = [...blockedUserIds, userId];
-      setBlockedUserIds(updated);
-      localStorage.setItem('livecall_blocked', JSON.stringify(updated));
-      if (isSupabaseConfigured() && currentUser?.id) {
-        addBlockedUserToSupabase(currentUser.id, userId, reason).catch(() => { });
+  const blockUser = async (
+    userId: string,
+    reason: string = 'Inappropriate Behavior'
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to block users.', 'warning');
+      return false;
+    }
+    if (blockedUserIds.includes(userId)) {
+      return true;
+    }
+
+    try {
+      const res = await authFetch('/api/v1/blocks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: userId, reason }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Block failed', json?.error?.message || 'Could not block user.', 'error');
+        return false;
       }
 
-      // Auto-cleanup: remove from friends if previously friends
-      if (friends.includes(userId)) {
-        removeFriend(userId);
+      if (Array.isArray(json.data?.blockedUserIds)) {
+        setBlockedUserIds(json.data.blockedUserIds.map(String));
+      } else {
+        setBlockedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+      }
+      if (Array.isArray(json.data?.blockedByUserIds)) {
+        setBlockedByUserIds(json.data.blockedByUserIds.map(String));
       }
 
-      // Auto-cleanup: remove from favorites if saved
-      if (favorites.includes(userId)) {
-        toggleFavorite(userId);
-      }
-
-      // Auto-cleanup: dismiss any pending friend requests
+      setFavorites((prev) => prev.filter((id) => id !== userId));
+      setFriends((prev) => prev.filter((id) => id !== userId));
       setFriendRequests((prev) =>
         prev.map((r) =>
           (r.senderId === userId && r.receiverId === currentUser.id) ||
@@ -5356,23 +6502,105 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
 
       showToast('User Blocked 🚫', `User has been blocked. Reason: ${reason}`, 'warning');
+      return true;
+    } catch (err: any) {
+      console.warn('blockUser error:', err);
+      showToast('Block failed', err?.message || 'Network error blocking user.', 'error');
+      return false;
     }
   };
 
-  const unblockUser = (userId: string) => {
-    if (blockedUserIds.includes(userId)) {
-      const updated = blockedUserIds.filter((id) => id !== userId);
-      setBlockedUserIds(updated);
-      localStorage.setItem('livecall_blocked', JSON.stringify(updated));
-      if (isSupabaseConfigured() && currentUser?.id) {
-        removeBlockedUserFromSupabase(currentUser.id, userId).catch(() => { });
+  const unblockUser = async (userId: string): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to unblock users.', 'warning');
+      return false;
+    }
+    if (!blockedUserIds.includes(userId)) {
+      return true;
+    }
+
+    try {
+      const res = await authFetch(`/api/v1/blocks/${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Unblock failed', json?.error?.message || 'Could not unblock user.', 'error');
+        return false;
       }
+
+      if (Array.isArray(json.data?.blockedUserIds)) {
+        setBlockedUserIds(json.data.blockedUserIds.map(String));
+      } else {
+        setBlockedUserIds((prev) => prev.filter((id) => id !== userId));
+      }
+      if (Array.isArray(json.data?.blockedByUserIds)) {
+        setBlockedByUserIds(json.data.blockedByUserIds.map(String));
+      }
+
       showToast('User Unblocked 🔓', 'User has been unblocked successfully.', 'success');
+      return true;
+    } catch (err: any) {
+      console.warn('unblockUser error:', err);
+      showToast('Unblock failed', err?.message || 'Network error unblocking user.', 'error');
+      return false;
     }
   };
 
-  const reportUser = (userId: string, reason: string) => {
-    showToast('Report Submitted 🛡️', `Thank you. Our AI moderation team is reviewing this report: "${reason}".`, 'info');
+  const openBlockReportModal = (userId: string, action: 'report' | 'block' = 'report') => {
+    if (!userId || userId === currentUser?.id) return;
+    setBlockReportModal({ userId, action });
+  };
+
+  const closeBlockReportModal = () => setBlockReportModal(null);
+
+  const reportUser = async (
+    userId: string,
+    reason: string,
+    details?: string
+  ): Promise<boolean> => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to report users.', 'warning');
+      return false;
+    }
+    if (!userId || userId === currentUser.id) {
+      showToast('Report failed', 'You cannot report yourself.', 'error');
+      return false;
+    }
+    try {
+      const res = await authFetch('/api/v1/reports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reportedUserId: userId,
+          reason,
+          ...(details ? { details } : {}),
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Report failed', json?.error?.message || 'Could not submit report.', 'error');
+        return false;
+      }
+      if (json?.data?.alreadyReported) {
+        showToast(
+          'Already reported',
+          'You already have a pending report for this user with the same reason.',
+          'info'
+        );
+      } else {
+        showToast(
+          'Report submitted',
+          'Report submitted — our safety team will review.',
+          'info'
+        );
+      }
+      return true;
+    } catch (err: any) {
+      console.warn('reportUser error:', err);
+      showToast('Report failed', err?.message || 'Network error submitting report.', 'error');
+      return false;
+    }
   };
 
   const contributeToGoal = (creatorId: string, coins: number): boolean => {
@@ -5409,100 +6637,63 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   // ============================================================================
-  // DAILY REWARDS & GAMIFIED ACTIVITY QUESTS ENGINE
+  // DAILY REWARDS & GAMIFIED ACTIVITY QUESTS ENGINE (server-authoritative claims)
   // ============================================================================
   const openDailyRewardsModal = () => setIsDailyRewardsModalOpen(true);
   const closeDailyRewardsModal = () => setIsDailyRewardsModalOpen(false);
 
-  // VIP multiplier calculator for reward coins
-  const getVipRewardMultiplier = () => {
-    const vip = currentUser?.vipTier || 'none';
-    if (vip === 'diamond') return 2.0;
-    if (vip === 'gold') return 1.5;
-    if (vip === 'silver') return 1.25;
-    if (vip === 'bronze') return 1.1;
-    return 1.0;
+  /** Local calendar day YYYY-MM-DD — preferred reward day (server accepts within ±1 of UTC). */
+  const getLocalRewardDayString = (d = new Date()) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
   };
 
-  // Sync and initialize user daily rewards directly from Supabase
+  const applyServerCoinBalance = (coinBalance: number | null | undefined) => {
+    if (coinBalance == null || !Number.isFinite(Number(coinBalance)) || !currentUser?.id) return;
+    const bal = Number(coinBalance);
+    setUsers((prev) =>
+      prev.map((u) => (u.id === currentUser.id ? { ...u, coinBalance: bal } : u))
+    );
+  };
+
+  const postRewardProgress = async (payload: Record<string, unknown>) => {
+    try {
+      const res = await authFetch('/api/rewards/progress', {
+        method: 'POST',
+        body: JSON.stringify({ ...payload, rewardDay: getLocalRewardDayString() }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (json?.success && json?.data?.record) {
+        setDailyRewardRecord(json.data.record as DailyRewardRecord);
+      }
+    } catch (err) {
+      console.warn('[AppContext] reward progress error:', err);
+    }
+  };
+
+  // Sync reward record from server (rollover + create handled server-side)
   useEffect(() => {
     if (!currentUser?.id || currentUser.id === 'guest_user') return;
-    const currentUid = currentUser.id;
-    const todayStr = new Date().toISOString().split('T')[0];
-    const yesterdayDate = new Date();
-    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-    const yesterdayStr = yesterdayDate.toISOString().split('T')[0];
-
     let isMounted = true;
 
     async function initDailyRewards() {
-      if (!isSupabaseConfigured()) return;
       try {
-        const dbRec = await fetchUserDailyRewardsFromSupabase(currentUid);
+        const res = await authFetch('/api/rewards/get', {
+          method: 'POST',
+          body: JSON.stringify({ rewardDay: getLocalRewardDayString() }),
+        });
+        const json = await res.json().catch(() => ({}));
         if (!isMounted) return;
-
-        if (dbRec) {
-          let updated: DailyRewardRecord = { ...dbRec };
-          let changed = false;
-
-          // Check day rollover for daily tasks
-          if (updated.tasksDate !== todayStr) {
-            updated.tasksDate = todayStr;
-            updated.taskChatFriends = [];
-            updated.taskChatClaimed = false;
-            updated.taskQuickMatches = 0;
-            updated.taskQuickMatchClaimed = false;
-            updated.taskVideoCallSeconds = 0;
-            updated.taskVideoCallClaimed = false;
-            updated.taskMomentInteractions = 0;
-            updated.taskMomentClaimed = false;
-            updated.taskGiftCount = 0;
-            updated.taskGiftClaimed = false;
-            updated.masterChestClaimed = false;
-            changed = true;
-          }
-
-          // Check login streak
-          if (updated.lastLoginDate === yesterdayStr) {
-            if (updated.streakClaimedDate === yesterdayStr) {
-              updated.streakCount = (updated.streakCount >= 7) ? 1 : updated.streakCount + 1;
-            }
-            updated.lastLoginDate = todayStr;
-            changed = true;
-          } else if (updated.lastLoginDate !== todayStr) {
-            // Missed streak: reset to 1
-            updated.streakCount = 1;
-            updated.lastLoginDate = todayStr;
-            changed = true;
-          }
-
-          setDailyRewardRecord(updated);
-          if (changed) {
-            upsertUserDailyRewardsInSupabase(updated);
-          }
-        } else {
-          // Brand new user daily rewards record
-          const initialRecord: DailyRewardRecord = {
-            userId: currentUid,
-            lastLoginDate: todayStr,
-            streakCount: 1,
-            streakClaimedDate: null,
-            tasksDate: todayStr,
-            taskChatFriends: [],
-            taskChatClaimed: false,
-            taskQuickMatches: 0,
-            taskQuickMatchClaimed: false,
-            taskVideoCallSeconds: 0,
-            taskVideoCallClaimed: false,
-            taskMomentInteractions: 0,
-            taskMomentClaimed: false,
-            taskGiftCount: 0,
-            taskGiftClaimed: false,
-            masterChestClaimed: false,
-            totalCoinsEarned: 0,
-          };
-          setDailyRewardRecord(initialRecord);
-          upsertUserDailyRewardsInSupabase(initialRecord);
+        if (json?.success && json?.data?.record) {
+          setDailyRewardRecord(json.data.record as DailyRewardRecord);
+          return;
+        }
+        // Fallback read-only fetch if API unavailable
+        if (isSupabaseConfigured()) {
+          const dbRec = await fetchUserDailyRewardsFromSupabase(currentUser.id);
+          if (isMounted && dbRec) setDailyRewardRecord(dbRec);
         }
       } catch (err) {
         console.warn('[AppContext] Daily rewards sync error:', err);
@@ -5517,7 +6708,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [currentUser?.id]);
 
   // Determine if there are unclaimed streak, missions, or master chest rewards
-  const todayDateStr = new Date().toISOString().split('T')[0];
+  const todayDateStr = getLocalRewardDayString();
   const isStreakUnclaimed = Boolean(
     dailyRewardRecord &&
     dailyRewardRecord.streakClaimedDate !== todayDateStr
@@ -5559,216 +6750,171 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const hasUnclaimedDailyRewards = isStreakUnclaimed || hasUnclaimedMissions || hasUnclaimedMasterChest;
 
-  // Activity tracking hooks
+  // Activity tracking — progress only (no claim flags / coins)
   const recordChatFriendInteraction = (receiverId: string) => {
     if (!currentUser?.id || !receiverId || receiverId === currentUser.id) return;
     setDailyRewardRecord((prev) => {
       if (!prev || prev.taskChatClaimed) return prev;
       const existing = prev.taskChatFriends || [];
       if (existing.includes(receiverId)) return prev;
-      const updated = { ...prev, taskChatFriends: [...existing, receiverId] };
-      upsertUserDailyRewardsInSupabase(updated);
-      return updated;
+      return { ...prev, taskChatFriends: [...existing, receiverId] };
     });
+    postRewardProgress({ type: 'chat_friend', receiverId });
   };
 
   const recordQuickMatchInteraction = () => {
     if (!currentUser?.id) return;
     setDailyRewardRecord((prev) => {
       if (!prev || prev.taskQuickMatchClaimed) return prev;
-      const updated = { ...prev, taskQuickMatches: (prev.taskQuickMatches || 0) + 1 };
-      upsertUserDailyRewardsInSupabase(updated);
-      return updated;
+      return { ...prev, taskQuickMatches: (prev.taskQuickMatches || 0) + 1 };
     });
+    postRewardProgress({ type: 'quick_match' });
   };
 
   const recordVideoCallDuration = (seconds: number) => {
     if (!currentUser?.id || seconds <= 0) return;
     setDailyRewardRecord((prev) => {
       if (!prev || prev.taskVideoCallClaimed) return prev;
-      const updated = { ...prev, taskVideoCallSeconds: (prev.taskVideoCallSeconds || 0) + seconds };
-      upsertUserDailyRewardsInSupabase(updated);
-      return updated;
+      return { ...prev, taskVideoCallSeconds: (prev.taskVideoCallSeconds || 0) + seconds };
     });
+    postRewardProgress({ type: 'video_call', seconds });
   };
 
   const recordMomentInteraction = () => {
     if (!currentUser?.id) return;
     setDailyRewardRecord((prev) => {
       if (!prev || prev.taskMomentClaimed) return prev;
-      const updated = { ...prev, taskMomentInteractions: (prev.taskMomentInteractions || 0) + 1 };
-      upsertUserDailyRewardsInSupabase(updated);
-      return updated;
+      return { ...prev, taskMomentInteractions: (prev.taskMomentInteractions || 0) + 1 };
     });
+    postRewardProgress({ type: 'moment' });
   };
 
   const recordGiftSentInteraction = () => {
     if (!currentUser?.id) return;
     setDailyRewardRecord((prev) => {
       if (!prev || prev.taskGiftClaimed) return prev;
-      const updated = { ...prev, taskGiftCount: (prev.taskGiftCount || 0) + 1 };
-      upsertUserDailyRewardsInSupabase(updated);
-      return updated;
+      return { ...prev, taskGiftCount: (prev.taskGiftCount || 0) + 1 };
     });
+    postRewardProgress({ type: 'gift' });
   };
 
-  // Claim Daily Streak
+  // Claim Daily Streak — server only
   const claimDailyStreak = async (): Promise<boolean> => {
     if (!currentUser?.id || !dailyRewardRecord) return false;
-    const todayStr = new Date().toISOString().split('T')[0];
-    if (dailyRewardRecord.streakClaimedDate === todayStr) {
-      showToast('Already Claimed', 'You have already claimed today’s streak reward!', 'info');
+    try {
+      const res = await authFetch('/api/rewards/claim-streak', {
+        method: 'POST',
+        body: JSON.stringify({ rewardDay: getLocalRewardDayString() }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (json?.data?.record) setDailyRewardRecord(json.data.record as DailyRewardRecord);
+      if (json?.data?.coinBalance != null) applyServerCoinBalance(json.data.coinBalance);
+
+      if (!json?.success) {
+        const code = json?.error?.code || '';
+        if (code === 'ALREADY_CLAIMED' || res.status === 409) {
+          showToast('Already Claimed', 'You have already claimed today’s streak reward!', 'info');
+        } else {
+          showToast('Claim Failed', json?.error?.message || 'Could not claim streak reward.', 'error');
+        }
+        return false;
+      }
+
+      const coins = Number(json.data?.coinsAwarded || 0);
+      if (coins <= 0 && json.data?.alreadyClaimed) {
+        showToast('Already Claimed', 'You have already claimed today’s streak reward!', 'info');
+        return false;
+      }
+
+      showToast(
+        'Daily Check-in Claimed! 🔥',
+        `+${coins} Free Coins added to your wallet! (Day ${json.data?.record?.streakCount || dailyRewardRecord.streakCount} Streak)`,
+        'success'
+      );
+      return true;
+    } catch (err) {
+      console.warn('[AppContext] claimDailyStreak error:', err);
+      showToast('Claim Failed', 'Network error claiming streak reward.', 'error');
       return false;
     }
-
-    const streakRewards = systemSettings.dailyStreakRewards || [10, 15, 20, 25, 35, 50, 100];
-    const dayIndex = Math.min(Math.max(0, (dailyRewardRecord.streakCount || 1) - 1), 6);
-    const baseCoins = streakRewards[dayIndex] || 20;
-    const coins = Math.round(baseCoins * getVipRewardMultiplier());
-
-    const updatedRecord: DailyRewardRecord = {
-      ...dailyRewardRecord,
-      streakClaimedDate: todayStr,
-      totalCoinsEarned: (dailyRewardRecord.totalCoinsEarned || 0) + coins,
-    };
-
-    setDailyRewardRecord(updatedRecord);
-    await upsertUserDailyRewardsInSupabase(updatedRecord);
-
-    const newCoinBalance = (currentUser.coinBalance || 0) + coins;
-    setUsers((prev) =>
-      prev.map((u) => (u.id === currentUser.id ? { ...u, coinBalance: newCoinBalance } : u))
-    );
-
-    if (isSupabaseConfigured()) {
-      updateUserProfileInSupabase(currentUser.id, { coinBalance: newCoinBalance }).catch(() => {});
-    }
-
-    showToast(
-      'Daily Check-in Claimed! 🔥',
-      `+${coins} Free Coins added to your wallet! (Day ${dailyRewardRecord.streakCount} Streak)`,
-      'success'
-    );
-    return true;
   };
 
-  // Claim Daily Mission
+  // Claim Daily Mission — server only
   const claimDailyMission = async (missionKey: string): Promise<boolean> => {
     if (!currentUser?.id || !dailyRewardRecord) return false;
-    const missionsConfig = systemSettings.dailyMissionsConfig || {
-      chatFriends: { target: 3, reward: 25, enabled: true },
-      quickMatches: { target: 10, reward: 30, enabled: true },
-      videoCall: { target: 60, reward: 35, enabled: true },
-      momentInteract: { target: 3, reward: 15, enabled: true },
-      sendGift: { target: 1, reward: 20, enabled: true },
-      masterChest: { target: 4, reward: 50, enabled: true },
-    };
+    try {
+      const res = await authFetch('/api/rewards/claim-mission', {
+        method: 'POST',
+        body: JSON.stringify({ missionKey, rewardDay: getLocalRewardDayString() }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (json?.data?.record) setDailyRewardRecord(json.data.record as DailyRewardRecord);
+      if (json?.data?.coinBalance != null) applyServerCoinBalance(json.data.coinBalance);
 
-    let baseReward = 0;
-    const updated: DailyRewardRecord = { ...dailyRewardRecord };
+      if (!json?.success) {
+        const code = json?.error?.code || '';
+        if (code === 'ALREADY_CLAIMED' || res.status === 409) {
+          showToast('Already Claimed', 'This mission reward was already claimed.', 'info');
+        } else if (code === 'INCOMPLETE' || code === 'LOCKED') {
+          showToast('Quest Incomplete', json?.error?.message || 'Finish the mission first.', 'info');
+        } else {
+          showToast('Claim Failed', json?.error?.message || 'Could not claim mission reward.', 'error');
+        }
+        return false;
+      }
 
-    if (missionKey === 'chat_friends') {
-      if (updated.taskChatClaimed || (updated.taskChatFriends?.length || 0) < (missionsConfig.chatFriends?.target || 3)) {
+      const coins = Number(json.data?.coinsAwarded || 0);
+      if (coins <= 0 && json.data?.alreadyClaimed) {
+        showToast('Already Claimed', 'This mission reward was already claimed.', 'info');
         return false;
       }
-      updated.taskChatClaimed = true;
-      baseReward = missionsConfig.chatFriends?.reward || 25;
-    } else if (missionKey === 'quick_matches') {
-      if (updated.taskQuickMatchClaimed || (updated.taskQuickMatches || 0) < (missionsConfig.quickMatches?.target || 10)) {
-        return false;
-      }
-      updated.taskQuickMatchClaimed = true;
-      baseReward = missionsConfig.quickMatches?.reward || 30;
-    } else if (missionKey === 'video_call') {
-      if (updated.taskVideoCallClaimed || (updated.taskVideoCallSeconds || 0) < (missionsConfig.videoCall?.target || 60)) {
-        return false;
-      }
-      updated.taskVideoCallClaimed = true;
-      baseReward = missionsConfig.videoCall?.reward || 35;
-    } else if (missionKey === 'moment_interact') {
-      if (updated.taskMomentClaimed || (updated.taskMomentInteractions || 0) < (missionsConfig.momentInteract?.target || 3)) {
-        return false;
-      }
-      updated.taskMomentClaimed = true;
-      baseReward = missionsConfig.momentInteract?.reward || 15;
-    } else if (missionKey === 'send_gift') {
-      if (updated.taskGiftClaimed || (updated.taskGiftCount || 0) < (missionsConfig.sendGift?.target || 1)) {
-        return false;
-      }
-      updated.taskGiftClaimed = true;
-      baseReward = missionsConfig.sendGift?.reward || 20;
-    } else {
+
+      showToast('Quest Completed! ✨', `+${coins} Free Coins earned from daily mission!`, 'success');
+      return true;
+    } catch (err) {
+      console.warn('[AppContext] claimDailyMission error:', err);
+      showToast('Claim Failed', 'Network error claiming mission reward.', 'error');
       return false;
     }
-
-    const coins = Math.round(baseReward * getVipRewardMultiplier());
-    updated.totalCoinsEarned = (updated.totalCoinsEarned || 0) + coins;
-
-    setDailyRewardRecord(updated);
-    await upsertUserDailyRewardsInSupabase(updated);
-
-    const newCoinBalance = (currentUser.coinBalance || 0) + coins;
-    setUsers((prev) =>
-      prev.map((u) => (u.id === currentUser.id ? { ...u, coinBalance: newCoinBalance } : u))
-    );
-
-    if (isSupabaseConfigured()) {
-      updateUserProfileInSupabase(currentUser.id, { coinBalance: newCoinBalance }).catch(() => {});
-    }
-
-    showToast('Quest Completed! ✨', `+${coins} Free Coins earned from daily mission!`, 'success');
-    return true;
   };
 
-  // Claim Daily Master Chest
+  // Claim Daily Master Chest — server only
   const claimDailyMasterChest = async (): Promise<boolean> => {
     if (!currentUser?.id || !dailyRewardRecord || dailyRewardRecord.masterChestClaimed) return false;
-    const missionsConfig = systemSettings.dailyMissionsConfig || {
-      chatFriends: { target: 3, reward: 25, enabled: true },
-      quickMatches: { target: 10, reward: 30, enabled: true },
-      videoCall: { target: 60, reward: 35, enabled: true },
-      momentInteract: { target: 3, reward: 15, enabled: true },
-      sendGift: { target: 1, reward: 20, enabled: true },
-      masterChest: { target: 4, reward: 50, enabled: true },
-    };
+    try {
+      const res = await authFetch('/api/rewards/claim-master-chest', {
+        method: 'POST',
+        body: JSON.stringify({ rewardDay: getLocalRewardDayString() }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (json?.data?.record) setDailyRewardRecord(json.data.record as DailyRewardRecord);
+      if (json?.data?.coinBalance != null) applyServerCoinBalance(json.data.coinBalance);
 
-    const claimedCount = [
-      dailyRewardRecord.taskChatClaimed,
-      dailyRewardRecord.taskQuickMatchClaimed,
-      dailyRewardRecord.taskVideoCallClaimed,
-      dailyRewardRecord.taskMomentClaimed,
-      dailyRewardRecord.taskGiftClaimed,
-    ].filter(Boolean).length;
+      if (!json?.success) {
+        const code = json?.error?.code || '';
+        if (code === 'ALREADY_CLAIMED' || res.status === 409) {
+          showToast('Already Claimed', 'Master chest already claimed today.', 'info');
+        } else if (code === 'LOCKED') {
+          showToast('Master Chest Locked', json?.error?.message || 'Complete more missions first!', 'info');
+        } else {
+          showToast('Claim Failed', json?.error?.message || 'Could not claim master chest.', 'error');
+        }
+        return false;
+      }
 
-    const masterTarget = missionsConfig.masterChest?.target || 4;
-    if (claimedCount < masterTarget) {
-      showToast('Master Chest Locked', `Complete at least ${masterTarget} daily missions first!`, 'info');
+      const coins = Number(json.data?.coinsAwarded || 0);
+      if (coins <= 0 && json.data?.alreadyClaimed) {
+        showToast('Already Claimed', 'Master chest already claimed today.', 'info');
+        return false;
+      }
+
+      showToast('🏆 Master Chest Unlocked!', `+${coins} Mega Bonus Coins added to your wallet!`, 'success');
+      return true;
+    } catch (err) {
+      console.warn('[AppContext] claimDailyMasterChest error:', err);
+      showToast('Claim Failed', 'Network error claiming master chest.', 'error');
       return false;
     }
-
-    const baseReward = missionsConfig.masterChest?.reward || 50;
-    const coins = Math.round(baseReward * getVipRewardMultiplier());
-
-    const updated: DailyRewardRecord = {
-      ...dailyRewardRecord,
-      masterChestClaimed: true,
-      totalCoinsEarned: (dailyRewardRecord.totalCoinsEarned || 0) + coins,
-    };
-
-    setDailyRewardRecord(updated);
-    await upsertUserDailyRewardsInSupabase(updated);
-
-    const newCoinBalance = (currentUser.coinBalance || 0) + coins;
-    setUsers((prev) =>
-      prev.map((u) => (u.id === currentUser.id ? { ...u, coinBalance: newCoinBalance } : u))
-    );
-
-    if (isSupabaseConfigured()) {
-      updateUserProfileInSupabase(currentUser.id, { coinBalance: newCoinBalance }).catch(() => {});
-    }
-
-    showToast('🏆 Master Chest Unlocked!', `+${coins} Mega Bonus Coins added to your wallet!`, 'success');
-    return true;
   };
 
   // Legacy bonus alias
@@ -5937,163 +7083,199 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  // Quick Match Successful Matches History (Preserves last 50 matches strictly per user)
-  const [quickMatches, setQuickMatches] = useState<QuickMatchItem[]>(() => {
-    try {
-      const saved = currentUserId ? localStorage.getItem('livecall_quick_matches_v4_' + currentUserId) : null;
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Quick Match Successful Matches History — hydrated from Supabase via Express (not localStorage-as-DB)
+  const [quickMatches, setQuickMatches] = useState<QuickMatchItem[]>([]);
 
-  // Load and sync real matches directly from Supabase database scoped to currentUser
+  // Hydrate favorites, match records, blocks, friends when session user is ready
   useEffect(() => {
-    if (!currentUser?.id) {
+    if (!currentUser?.id || currentUser.id === 'guest_user' || !isLoggedIn) {
+      setFavorites([]);
+      setUserMatchRecords([]);
+      setBlockedByUserIds([]);
       setQuickMatches([]);
+      setFriendRequests([]);
+      setFriends([]);
       return;
     }
 
-    const currentUid = currentUser.id;
+    let cancelled = false;
 
-    // Load from local storage for this specific user
-    try {
-      const saved = localStorage.getItem('livecall_quick_matches_v4_' + currentUid);
-      if (saved) {
-        setQuickMatches(JSON.parse(saved));
-      } else {
-        setQuickMatches([]);
-      }
-    } catch {
-      setQuickMatches([]);
-    }
-
-    async function loadMatchesFromSupabase() {
-      if (!isSupabaseConfigured() || !currentUid) return;
+    async function hydrateSocialFromServer() {
       try {
-        const dbMatches = await fetchMatchesForUser(currentUid);
-        if (dbMatches && Array.isArray(dbMatches)) {
-          const currentUsersList = usersRef.current || users;
-          const formattedMatches: QuickMatchItem[] = dbMatches
-            .filter((m: any) => m.status === 'matched')
-            .map((m: any) => {
-              const otherUserId = m.user_a_id === currentUid ? m.user_b_id : m.user_a_id;
-              if (!otherUserId || otherUserId === currentUid) return null;
+        const [favRes, matchRes, blockRes, friendsRes] = await Promise.all([
+          authFetch('/api/v1/favorites/me'),
+          authFetch('/api/v1/matches/me'),
+          authFetch('/api/v1/matches/blocks'),
+          authFetch('/api/v1/friends/requests'),
+        ]);
 
-              const otherUser =
-                currentUsersList.find((u) => u.id === otherUserId) ||
-                (m.user_a_id === currentUid ? m.user_b : m.user_a);
+        if (cancelled) return;
 
-              const name = otherUser?.name || 'Member';
-              const avatar = otherUser?.avatarUrl || otherUser?.avatar_url || '';
-              const gender = otherUser?.gender || 'male';
-              const age = otherUser?.age;
-              const countryCode = otherUser?.countryCode || otherUser?.country_code;
-              const city = otherUser?.city || otherUser?.location_city || 'Online Member';
+        if (favRes.ok) {
+          const favJson = await favRes.json().catch(() => null);
+          if (favJson?.success && Array.isArray(favJson.data?.favoriteUserIds)) {
+            setFavorites(favJson.data.favoriteUserIds.map(String));
+          }
+        } else {
+          console.warn('Favorites hydrate failed:', favRes.status);
+        }
 
-              return {
-                id: m.id || `qm_${Date.now()}_${otherUserId}`,
-                matchedUserId: otherUserId,
-                matchedUserName: name,
-                matchedUserAvatar: avatar,
-                matchedUserGender: gender,
-                matchedUserAge: age,
-                matchedUserCountryCode: countryCode,
-                matchedUserCity: city,
-                matchedAt: m.matched_at || m.created_at || new Date().toISOString(),
-                giftsExchangedCoins: 0,
-              };
-            })
-            .filter(Boolean) as QuickMatchItem[];
+        if (matchRes.ok) {
+          const matchJson = await matchRes.json().catch(() => null);
+          if (matchJson?.success && Array.isArray(matchJson.data?.matches)) {
+            const records = matchJson.data.matches.map((m: any) => ({
+              id: String(m.id),
+              otherUserId: String(m.otherUserId),
+              status: m.status as 'pending' | 'matched' | 'rejected' | 'unmatched',
+              initiatedBy: String(m.initiatedBy || ''),
+            }));
+            setUserMatchRecords(records);
 
-          setQuickMatches(formattedMatches);
-          try {
-            localStorage.setItem('livecall_quick_matches_v4_' + currentUid, JSON.stringify(formattedMatches));
-          } catch (e) {}
+            const currentUsersList = usersRef.current || users;
+            const formattedMatches: QuickMatchItem[] = matchJson.data.matches
+              .filter((m: any) => m.status === 'matched')
+              .map((m: any) => {
+                const otherUserId = String(m.otherUserId);
+                const otherUser = currentUsersList.find((u) => u.id === otherUserId);
+                const loc = otherUser ? getUserEffectiveLocation(otherUser) : null;
+                return {
+                  id: String(m.id),
+                  matchedUserId: otherUserId,
+                  matchedUserName: otherUser?.name || 'Member',
+                  matchedUserAvatar: otherUser?.avatarUrl || '',
+                  matchedUserGender: otherUser?.gender || 'male',
+                  matchedUserAge: otherUser?.age,
+                  matchedUserCountryCode: otherUser?.countryCode,
+                  matchedUserCity: loc?.displayCity || otherUser?.locationCity || 'Online Member',
+                  matchedAt: m.matchedAt || m.createdAt || new Date().toISOString(),
+                  giftsExchangedCoins: 0,
+                };
+              });
+            setQuickMatches(formattedMatches);
+          }
+        } else {
+          console.warn('Matches hydrate failed:', matchRes.status);
+        }
+
+        if (blockRes.ok) {
+          const blockJson = await blockRes.json().catch(() => null);
+          if (blockJson?.success) {
+            if (Array.isArray(blockJson.data?.blockedUserIds)) {
+              setBlockedUserIds(blockJson.data.blockedUserIds.map(String));
+            }
+            if (Array.isArray(blockJson.data?.blockedByUserIds)) {
+              setBlockedByUserIds(blockJson.data.blockedByUserIds.map(String));
+            }
+          }
+        } else {
+          console.warn('Blocks hydrate failed:', blockRes.status);
+        }
+
+        if (friendsRes.ok) {
+          const friendsJson = await friendsRes.json().catch(() => null);
+          if (friendsJson?.success) {
+            if (Array.isArray(friendsJson.data?.requests)) {
+              setFriendRequests(friendsJson.data.requests as FriendRequest[]);
+            }
+            if (Array.isArray(friendsJson.data?.friendIds)) {
+              setFriends(friendsJson.data.friendIds.map(String));
+            }
+          }
+        } else {
+          console.warn('Friends hydrate failed:', friendsRes.status);
         }
       } catch (err) {
-        console.warn('Error loading matches from Supabase:', err);
+        console.warn('Social hydrate error:', err);
       }
     }
 
-    loadMatchesFromSupabase();
-  }, [currentUser?.id]);
-
-  const recordQuickMatch = (matchedUser: UserProfile, giftsCoins = 0) => {
-    if (!currentUser?.id || !matchedUser?.id) return;
-    recordQuickMatchInteraction();
-    const currentUid = currentUser.id;
-    const loc = getUserEffectiveLocation(matchedUser);
-    const matchItem: QuickMatchItem = {
-      id: `qm_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-      matchedUserId: matchedUser.id,
-      matchedUserName: matchedUser.name,
-      matchedUserAvatar: matchedUser.avatarUrl,
-      matchedUserGender: matchedUser.gender,
-      matchedUserAge: matchedUser.age,
-      matchedUserCountryCode: matchedUser.countryCode,
-      matchedUserCity: loc.displayCity,
-      matchedAt: new Date().toISOString(),
-      giftsExchangedCoins: giftsCoins,
+    void hydrateSocialFromServer();
+    return () => {
+      cancelled = true;
     };
+  }, [currentUser?.id, isLoggedIn]);
 
-    setQuickMatches((prev) => {
-      const filtered = prev.filter((m) => m.matchedUserId !== matchedUser.id);
-      const updated = [matchItem, ...filtered].slice(0, 50);
-      try {
-        localStorage.setItem('livecall_quick_matches_v4_' + currentUid, JSON.stringify(updated));
-      } catch (e) {}
-      return updated;
-    });
+  const recordQuickMatch = async (
+    matchedUser: UserProfile,
+    giftsCoins = 0
+  ): Promise<boolean> => {
+    if (!currentUser?.id || !matchedUser?.id) return false;
+    const currentUid = currentUser.id;
 
-    // Also sync matchedUser's storage for same-device/multi-tab persona testing
     try {
-      const otherLoc = getUserEffectiveLocation(currentUser);
-      const otherMatchItem: QuickMatchItem = {
-        id: matchItem.id,
-        matchedUserId: currentUid,
-        matchedUserName: currentUser.name,
-        matchedUserAvatar: currentUser.avatarUrl,
-        matchedUserGender: currentUser.gender,
-        matchedUserAge: currentUser.age,
-        matchedUserCountryCode: currentUser.countryCode,
-        matchedUserCity: otherLoc.displayCity,
-        matchedAt: matchItem.matchedAt,
+      const res = await authFetch('/api/v1/matches/quick-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetUserId: matchedUser.id,
+          giftsCoins,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast(
+          'Match save failed',
+          json?.error?.message || 'Could not persist Quick Match.',
+          'error'
+        );
+        return false;
+      }
+
+      // Daily mission counter only for real Quick Match connections (not swipe likes)
+      recordQuickMatchInteraction();
+
+      const loc = getUserEffectiveLocation(matchedUser);
+      const matchItem: QuickMatchItem = {
+        id: json.data?.match?.id || `qm_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+        matchedUserId: matchedUser.id,
+        matchedUserName: matchedUser.name,
+        matchedUserAvatar: matchedUser.avatarUrl,
+        matchedUserGender: matchedUser.gender,
+        matchedUserAge: matchedUser.age,
+        matchedUserCountryCode: matchedUser.countryCode,
+        matchedUserCity: loc.displayCity,
+        matchedAt: json.data?.match?.matchedAt || new Date().toISOString(),
         giftsExchangedCoins: giftsCoins,
       };
-      const existingOther = localStorage.getItem('livecall_quick_matches_v4_' + matchedUser.id);
-      const otherList: QuickMatchItem[] = existingOther ? JSON.parse(existingOther) : [];
-      const nextOther = [otherMatchItem, ...otherList.filter((m) => m.matchedUserId !== currentUid)].slice(0, 50);
-      localStorage.setItem('livecall_quick_matches_v4_' + matchedUser.id, JSON.stringify(nextOther));
-      localStorage.setItem('livecall_quick_matches_sync', JSON.stringify({ timestamp: Date.now(), userA: currentUid, userB: matchedUser.id }));
-    } catch (e) {}
 
-    // Broadcast over WebSocket in real-time
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'match:created',
-          senderId: currentUid,
-          receiverId: matchedUser.id,
-          matchItem,
-        })
-      );
-    }
+      setQuickMatches((prev) => {
+        const filtered = prev.filter((m) => m.matchedUserId !== matchedUser.id);
+        return [matchItem, ...filtered].slice(0, 50);
+      });
 
-    // Directly persist match to Supabase matches table
-    if (isSupabaseConfigured()) {
-      upsertMatchToSupabase(currentUid, matchedUser.id, 'matched', currentUid).catch((e) =>
-        console.warn('Supabase match upsert error:', e)
-      );
+      upsertLocalMatchRecord({
+        id: matchItem.id,
+        otherUserId: matchedUser.id,
+        status: 'matched',
+        initiatedBy: currentUid,
+      });
+
+      // Broadcast AFTER durable DB write (event does not replace DB)
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'match:created',
+            senderId: currentUid,
+            receiverId: matchedUser.id,
+            matchItem,
+          })
+        );
+      }
+
+      return true;
+    } catch (err: any) {
+      console.warn('recordQuickMatch error:', err);
+      showToast('Match save failed', err?.message || 'Network error saving Quick Match.', 'error');
+      return false;
     }
   };
 
-  const sendQuickMatchGift = (
+  const sendQuickMatchGift = async (
     targetUserId: string,
     giftKey: string,
     giftCost: number,
     giftName: string
-  ): boolean => {
+  ): Promise<boolean> => {
     const sender = users.find((u) => u.id === currentUser.id) || currentUser;
     if (sender.coinBalance < giftCost) {
       showToast(
@@ -6110,71 +7292,87 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return false;
     }
 
-    // Role check for earning split
-    const isFemaleCreatorOrHost =
-      receiver.gender === 'female' ||
-      receiver.role === 'female_creator' ||
-      receiver.role === 'female_host';
+    // Prefer authoritative /api/gifts/send when catalog id can be resolved
+    const keyToCatalogId: Record<string, string> = {
+      rose: 'g_rose',
+      heart: 'g_heart',
+      rocket: 'g_rocket',
+      tiara: 'g_crown',
+      diamond: 'g_ring',
+      cheers: 'g_heart',
+    };
+    const mappedId = keyToCatalogId[giftKey];
+    const catalogGift =
+      (mappedId && virtualGifts.find((g) => g.id === mappedId && g.isActive !== false)) ||
+      virtualGifts.find((g) => g.id === `g_${giftKey}` && g.isActive !== false) ||
+      virtualGifts.find((g) => g.animationType === giftKey && g.isActive !== false) ||
+      virtualGifts.find((g) => g.coinCost === giftCost && g.isActive !== false);
 
-    const creatorSplit = systemSettings.quickMatchGiftSplitFemaleCreator ?? 60;
-    const tlSplit = systemSettings.quickMatchGiftSplitTL ?? 10;
-
-    let addedCreatorCoins = 0;
-    let addedTlCoins = 0;
-
-    if (isFemaleCreatorOrHost && (receiver.role === 'female_creator' || receiver.role === 'female_host' || systemSettings.enableRegularFemaleCoinEarning)) {
-      addedCreatorCoins = Math.max(1, Math.round(giftCost * (creatorSplit / 100)));
-      if (receiver.teamLeaderId) {
-        addedTlCoins = Math.max(1, Math.round(giftCost * (tlSplit / 100)));
+    if (catalogGift) {
+      try {
+        const res = await authFetch('/api/gifts/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            receiverId: targetUserId,
+            giftId: catalogGift.id,
+          }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          showToast(
+            'Gift failed',
+            typeof json?.error === 'string'
+              ? json.error
+              : json?.error?.message || 'Could not send gift.',
+            'error'
+          );
+          return false;
+        }
+        if (typeof json.senderBalance === 'number') {
+          setUsers((prev) =>
+            prev.map((u) =>
+              u.id === currentUser.id ? { ...u, coinBalance: json.senderBalance } : u
+            )
+          );
+        } else {
+          setUsers((prev) =>
+            prev.map((u) =>
+              u.id === currentUser.id
+                ? { ...u, coinBalance: Math.max(0, u.coinBalance - catalogGift.coinCost) }
+                : u
+            )
+          );
+        }
+        setQuickMatches((prev) =>
+          prev.map((m) =>
+            m.matchedUserId === targetUserId
+              ? { ...m, giftsExchangedCoins: (m.giftsExchangedCoins || 0) + catalogGift.coinCost }
+              : m
+          )
+        );
+        recordGiftSentInteraction();
+        showToast(
+          'Quick Gift Sent! ✨',
+          `Sent ${giftName} (${catalogGift.coinCost} 🪙) to ${receiver.name}!`,
+          'success'
+        );
+        return true;
+      } catch (err: any) {
+        console.warn('sendQuickMatchGift API error:', err);
+        showToast('Gift failed', err?.message || 'Network error sending gift.', 'error');
+        return false;
       }
-    } else {
-      // Regular male or regular female user: 100% goes to Platform (0 user earnings)
-      addedCreatorCoins = 0;
-      addedTlCoins = 0;
     }
 
-    // Update users state
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return { ...u, coinBalance: Math.max(0, u.coinBalance - giftCost) };
-        }
-        if (u.id === targetUserId && addedCreatorCoins > 0) {
-          return {
-            ...u,
-            earningsCoins: (u.earningsCoins || 0) + addedCreatorCoins,
-            totalLifetimeEarnedUSD: (u.totalLifetimeEarnedUSD || 0) + addedCreatorCoins * (systemSettings.femalePayoutRatioUSD || 0.008),
-            totalGiftsReceivedCount: (u.totalGiftsReceivedCount || 0) + 1,
-          };
-        }
-        if (receiver.teamLeaderId && u.id === receiver.teamLeaderId && addedTlCoins > 0) {
-          return {
-            ...u,
-            earningsCoins: (u.earningsCoins || 0) + addedTlCoins,
-            totalLifetimeEarnedUSD: (u.totalLifetimeEarnedUSD || 0) + addedTlCoins * (systemSettings.femalePayoutRatioUSD || 0.008),
-          };
-        }
-        return u;
-      })
-    );
-
-    // Update quick match record if present
-    setQuickMatches((prev) =>
-      prev.map((m) =>
-        m.matchedUserId === targetUserId
-          ? { ...m, giftsExchangedCoins: (m.giftsExchangedCoins || 0) + giftCost }
-          : m
-      )
-    );
-
-    recordGiftSentInteraction();
-
+    // TODO: Quick Match gift keys without catalog mapping still need server pricing;
+    // do not mint coins client-side — refuse unmapped gifts.
     showToast(
-      'Quick Gift Sent! ✨',
-      `Sent ${giftName} (${giftCost} 🪙) to ${receiver.name}!`,
-      'success'
+      'Gift unavailable',
+      `${giftName} is not wired to the gift catalog yet.`,
+      'warning'
     );
-    return true;
+    return false;
   };
 
   // Home & Policies CMS Handlers
@@ -6191,160 +7389,268 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setActivePolicyDoc(null);
   };
 
-  const saveHomeBanner = (banner: Partial<HomeBanner> & { id?: string }) => {
-    if (banner.id) {
-      const updatedList = homeBanners.map((b) => (b.id === banner.id ? ({ ...b, ...banner } as HomeBanner) : b));
-      setHomeBanners(updatedList);
-      localStorage.setItem('livecall_home_banners', JSON.stringify(updatedList));
-      if (isSupabaseConfigured()) {
-        upsertHomeBannerToSupabase(banner).catch(() => { });
+  const saveHomeBanner = async (
+    banner: Partial<HomeBanner> & { id?: string }
+  ): Promise<{ success: boolean; error?: string }> => {
+    const payload: HomeBanner = banner.id
+      ? ({
+          ...(homeBanners.find((b) => b.id === banner.id) || {}),
+          ...banner,
+        } as HomeBanner)
+      : {
+          id: 'banner_' + Date.now(),
+          title: banner.title || 'New Live Promo',
+          subtitle: banner.subtitle || 'Discover exciting video matches today.',
+          tagText: banner.tagText || 'FEATURED',
+          tagColor: banner.tagColor || 'bg-indigo-600 text-white',
+          imageUrl:
+            banner.imageUrl ||
+            'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=1200',
+          ctaText: banner.ctaText || 'Explore Now',
+          actionType: banner.actionType || 'tab',
+          actionTarget: banner.actionTarget || 'discovery',
+          active: banner.active ?? true,
+          order: banner.order ?? homeBanners.length + 1,
+          bgGradient: banner.bgGradient || 'from-indigo-950/90 via-purple-950/70 to-slate-900/90',
+        };
+
+    try {
+      const res = await authFetch('/api/admin/cms/banners', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to save banner';
+        showToast('Banner Save Failed', error, 'error');
+        return { success: false, error };
       }
-      showToast('Banner Updated 🖼️', `Updated promo banner: ${banner.title || banner.id}`, 'success');
-    } else {
-      const newBanner: HomeBanner = {
-        id: 'banner_' + Date.now(),
-        title: banner.title || 'New Live Promo',
-        subtitle: banner.subtitle || 'Discover exciting video matches today.',
-        tagText: banner.tagText || 'FEATURED',
-        tagColor: banner.tagColor || 'bg-indigo-600 text-white',
-        imageUrl: banner.imageUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=1200',
-        ctaText: banner.ctaText || 'Explore Now',
-        actionType: banner.actionType || 'tab',
-        actionTarget: banner.actionTarget || 'discovery',
-        active: banner.active ?? true,
-        order: homeBanners.length + 1,
-        bgGradient: banner.bgGradient || 'from-indigo-950/90 via-purple-950/70 to-slate-900/90',
-      };
-      const updatedList = [...homeBanners, newBanner];
-      setHomeBanners(updatedList);
-      localStorage.setItem('livecall_home_banners', JSON.stringify(updatedList));
-      if (isSupabaseConfigured()) {
-        upsertHomeBannerToSupabase(newBanner).catch(() => { });
-      }
-      showToast('Banner Created 🖼️', `Added new promo banner: ${newBanner.title}`, 'success');
+      const saved = data.data as HomeBanner;
+      setHomeBanners((prev) => {
+        const exists = prev.some((b) => b.id === saved.id);
+        return exists ? prev.map((b) => (b.id === saved.id ? saved : b)) : [...prev, saved];
+      });
+      showToast('Banner Saved 🖼️', `Saved promo banner: ${saved.title}`, 'success');
+      return { success: true };
+    } catch (err: any) {
+      console.error('saveHomeBanner error:', err);
+      showToast('Banner Save Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
     }
   };
 
-  const deleteHomeBanner = (bannerId: string) => {
-    const updated = homeBanners.filter((b) => b.id !== bannerId);
-    setHomeBanners(updated);
-    localStorage.setItem('livecall_home_banners', JSON.stringify(updated));
-    if (isSupabaseConfigured()) {
-      deleteHomeBannerFromSupabase(bannerId).catch(() => { });
+  const deleteHomeBanner = async (bannerId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await authFetch(`/api/admin/cms/banners/${encodeURIComponent(bannerId)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to delete banner';
+        showToast('Delete Failed', error, 'error');
+        return { success: false, error };
+      }
+      setHomeBanners((prev) => prev.filter((b) => b.id !== bannerId));
+      showToast('Banner Deleted', 'Promo banner removed from Home page', 'info');
+      return { success: true };
+    } catch (err: any) {
+      console.error('deleteHomeBanner error:', err);
+      showToast('Delete Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
     }
-    showToast('Banner Deleted', 'Promo banner removed from Home page', 'info');
   };
 
-  const toggleBannerActive = (bannerId: string) => {
+  const toggleBannerActive = async (bannerId: string): Promise<{ success: boolean; error?: string }> => {
     const target = homeBanners.find((b) => b.id === bannerId);
-    const nextActive = target ? !target.active : true;
-    const updated = homeBanners.map((b) => (b.id === bannerId ? { ...b, active: nextActive } : b));
-    setHomeBanners(updated);
-    localStorage.setItem('livecall_home_banners', JSON.stringify(updated));
-    if (isSupabaseConfigured() && target) {
-      upsertHomeBannerToSupabase({ ...target, active: nextActive }).catch(() => { });
+    if (!target) return { success: false, error: 'Banner not found' };
+    const nextActive = !target.active;
+    try {
+      const res = await authFetch(`/api/admin/cms/banners/${encodeURIComponent(bannerId)}/active`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: nextActive }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to update banner';
+        showToast('Update Failed', error, 'error');
+        return { success: false, error };
+      }
+      setHomeBanners((prev) => prev.map((b) => (b.id === bannerId ? { ...b, active: nextActive } : b)));
+      return { success: true };
+    } catch (err: any) {
+      console.error('toggleBannerActive error:', err);
+      showToast('Update Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
     }
   };
 
-  const savePolicyDocument = (policy: Partial<PolicyDocument> & { id?: string }) => {
-    if (policy.id) {
-      const updatedDoc = {
-        ...policy,
-        lastUpdated: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-      };
-      const updated = policyDocuments.map((p) => (p.id === policy.id ? ({ ...p, ...updatedDoc } as PolicyDocument) : p));
-      setPolicyDocuments(updated);
-      localStorage.setItem('livecall_policy_documents', JSON.stringify(updated));
-      if (isSupabaseConfigured()) {
-        upsertCmsPolicy({
-          id: policy.id,
-          slug: policy.slug || (policy.title || 'policy').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-          title: policy.title || 'Policy',
+  const savePolicyDocument = async (
+    policy: Partial<PolicyDocument> & { id?: string }
+  ): Promise<{ success: boolean; error?: string }> => {
+    const payload: PolicyDocument = policy.id
+      ? ({
+          ...(policyDocuments.find((p) => p.id === policy.id) || {}),
+          ...policy,
+          lastUpdated: new Date().toISOString(),
+        } as PolicyDocument)
+      : {
+          id: 'policy_' + Date.now(),
+          slug: (policy.title || 'policy').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          title: policy.title || 'Platform Policy',
           category: policy.category || 'safety',
           icon: policy.icon || 'ShieldCheck',
-          content: policy.content || '',
-          summary: policy.summary || '',
-          effectiveDate: updatedDoc.lastUpdated,
-          order: policy.order,
-          isFeaturedOnHome: policy.isFeaturedOnHome,
+          summary: policy.summary || 'Platform safety and regulatory guidelines.',
+          content: policy.content || '### Policy Details\n\nPolicy compliance guidelines and terms.',
+          lastUpdated: new Date().toISOString(),
+          order: policy.order ?? policyDocuments.length + 1,
+          isFeaturedOnHome: policy.isFeaturedOnHome ?? true,
           externalUrl: policy.externalUrl,
-        }).catch(() => { });
+        };
+
+    try {
+      const res = await authFetch('/api/admin/cms/policies', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to save policy';
+        showToast('Policy Save Failed', error, 'error');
+        return { success: false, error };
       }
-      showToast('Policy Updated 📜', `Updated policy document: ${policy.title || policy.id}`, 'success');
-    } else {
-      const newDoc: PolicyDocument = {
-        id: 'policy_' + Date.now(),
-        slug: (policy.title || 'policy').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-        title: policy.title || 'Platform Policy',
-        category: policy.category || 'safety',
-        icon: policy.icon || 'ShieldCheck',
-        summary: policy.summary || 'Platform safety and regulatory guidelines.',
-        content: policy.content || '### Policy Details\n\nPolicy compliance guidelines and terms.',
-        lastUpdated: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-        order: policyDocuments.length + 1,
-        isFeaturedOnHome: policy.isFeaturedOnHome ?? true,
-        externalUrl: policy.externalUrl,
-      };
-      const updated = [...policyDocuments, newDoc];
-      setPolicyDocuments(updated);
-      localStorage.setItem('livecall_policy_documents', JSON.stringify(updated));
-      if (isSupabaseConfigured()) {
-        upsertCmsPolicy(newDoc).catch(() => { });
-      }
-      showToast('Policy Published 📜', `Created new policy: ${newDoc.title}`, 'success');
+      const saved = data.data as PolicyDocument;
+      setPolicyDocuments((prev) => {
+        const exists = prev.some((p) => p.id === saved.id);
+        return exists ? prev.map((p) => (p.id === saved.id ? saved : p)) : [...prev, saved];
+      });
+      showToast('Policy Saved 📜', `Saved policy: ${saved.title}`, 'success');
+      return { success: true };
+    } catch (err: any) {
+      console.error('savePolicyDocument error:', err);
+      showToast('Policy Save Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
     }
   };
 
-  const deletePolicyDocument = (policyId: string) => {
-    const updated = policyDocuments.filter((p) => p.id !== policyId);
-    setPolicyDocuments(updated);
-    localStorage.setItem('livecall_policy_documents', JSON.stringify(updated));
-    if (isSupabaseConfigured()) {
-      deleteCmsPolicyFromSupabase(policyId).catch(() => { });
-    }
-    showToast('Policy Deleted', 'Policy document removed', 'info');
-  };
-
-  const saveHomeQuickLink = (link: Partial<HomeQuickLink> & { id?: string }) => {
-    if (link.id) {
-      const updated = homeQuickLinks.map((l) => (l.id === link.id ? ({ ...l, ...link } as HomeQuickLink) : l));
-      setHomeQuickLinks(updated);
-      localStorage.setItem('livecall_home_quick_links', JSON.stringify(updated));
-      if (isSupabaseConfigured()) {
-        upsertHomeQuickLinkToSupabase(link).catch(() => { });
+  const deletePolicyDocument = async (policyId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await authFetch(`/api/admin/cms/policies/${encodeURIComponent(policyId)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to delete policy';
+        showToast('Delete Failed', error, 'error');
+        return { success: false, error };
       }
-      showToast('Shortcut Updated', `Updated shortcut: ${link.title}`, 'success');
-    } else {
-      const newLink: HomeQuickLink = {
-        id: 'link_' + Date.now(),
-        title: link.title || 'Quick Action',
-        subtitle: link.subtitle || 'Explore feature',
-        icon: link.icon || 'Zap',
-        badge: link.badge,
-        actionType: link.actionType || 'tab',
-        actionTarget: link.actionTarget || 'discovery',
-        colorGradient: link.colorGradient || 'from-indigo-500 to-purple-600',
-        order: homeQuickLinks.length + 1,
-        active: link.active ?? true,
-      };
-      const updated = [...homeQuickLinks, newLink];
-      setHomeQuickLinks(updated);
-      localStorage.setItem('livecall_home_quick_links', JSON.stringify(updated));
-      if (isSupabaseConfigured()) {
-        upsertHomeQuickLinkToSupabase(newLink).catch(() => { });
-      }
-      showToast('Shortcut Added', `Added shortcut: ${newLink.title}`, 'success');
+      setPolicyDocuments((prev) => prev.filter((p) => p.id !== policyId));
+      showToast('Policy Deleted', 'Policy document removed', 'info');
+      return { success: true };
+    } catch (err: any) {
+      console.error('deletePolicyDocument error:', err);
+      showToast('Delete Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
     }
   };
 
-  const deleteHomeQuickLink = (linkId: string) => {
-    const updated = homeQuickLinks.filter((l) => l.id !== linkId);
-    setHomeQuickLinks(updated);
-    localStorage.setItem('livecall_home_quick_links', JSON.stringify(updated));
-    if (isSupabaseConfigured()) {
-      deleteHomeQuickLinkFromSupabase(linkId).catch(() => { });
+  const saveHomeQuickLink = async (
+    link: Partial<HomeQuickLink> & { id?: string }
+  ): Promise<{ success: boolean; error?: string }> => {
+    const payload: HomeQuickLink = link.id
+      ? ({ ...(homeQuickLinks.find((l) => l.id === link.id) || {}), ...link } as HomeQuickLink)
+      : {
+          id: 'link_' + Date.now(),
+          title: link.title || 'Quick Action',
+          subtitle: link.subtitle || 'Explore feature',
+          icon: link.icon || 'Zap',
+          badge: link.badge,
+          actionType: link.actionType || 'tab',
+          actionTarget: link.actionTarget || 'discovery',
+          colorGradient: link.colorGradient || 'from-indigo-500 to-purple-600',
+          order: link.order ?? homeQuickLinks.length + 1,
+          active: link.active ?? true,
+        };
+
+    try {
+      const res = await authFetch('/api/admin/cms/quick-links', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to save quick link';
+        showToast('Shortcut Save Failed', error, 'error');
+        return { success: false, error };
+      }
+      const saved = data.data as HomeQuickLink;
+      setHomeQuickLinks((prev) => {
+        const exists = prev.some((l) => l.id === saved.id);
+        return exists ? prev.map((l) => (l.id === saved.id ? saved : l)) : [...prev, saved];
+      });
+      showToast('Shortcut Saved', `Saved shortcut: ${saved.title}`, 'success');
+      return { success: true };
+    } catch (err: any) {
+      console.error('saveHomeQuickLink error:', err);
+      showToast('Shortcut Save Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
     }
-    showToast('Shortcut Removed', 'Quick shortcut removed from Home page', 'info');
+  };
+
+  const deleteHomeQuickLink = async (linkId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await authFetch(`/api/admin/cms/quick-links/${encodeURIComponent(linkId)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to delete quick link';
+        showToast('Delete Failed', error, 'error');
+        return { success: false, error };
+      }
+      setHomeQuickLinks((prev) => prev.filter((l) => l.id !== linkId));
+      showToast('Shortcut Removed', 'Quick shortcut removed from Home page', 'info');
+      return { success: true };
+    } catch (err: any) {
+      console.error('deleteHomeQuickLink error:', err);
+      showToast('Delete Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
+    }
+  };
+
+  const seedHomeCmsDefaults = async (): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await authFetch('/api/admin/cms/seed-defaults', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          banners: INITIAL_HOME_BANNERS,
+          policies: INITIAL_POLICY_DOCUMENTS,
+          quickLinks: INITIAL_HOME_QUICK_LINKS,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to seed starter CMS content';
+        showToast('Seed Failed', error, 'error');
+        return { success: false, error };
+      }
+      if (data.data?.banners) setHomeBanners(data.data.banners);
+      if (data.data?.policies) setPolicyDocuments(data.data.policies);
+      if (data.data?.quickLinks) setHomeQuickLinks(data.data.quickLinks);
+      localStorage.removeItem('livecall_home_banners');
+      localStorage.removeItem('livecall_policy_documents');
+      localStorage.removeItem('livecall_home_quick_links');
+      showToast('Starter CMS Loaded', 'Honest default banners, policies, and shortcuts saved to the database.', 'success');
+      return { success: true };
+    } catch (err: any) {
+      console.error('seedHomeCmsDefaults error:', err);
+      showToast('Seed Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
+    }
   };
 
   // =========================================================================
@@ -6497,94 +7803,64 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
   };
 
-  const adminSpawnDemoCall = (hostId?: string, callerId?: string): string => {
-    // Find female host and male caller
-    const femaleHosts = users.filter((u) => u.gender === 'female' || u.role === 'female_creator');
-    const maleCallers = users.filter((u) => u.gender === 'male' || u.role === 'male_user');
-
-    const host = (hostId ? users.find((u) => u.id === hostId) : null) ||
-      femaleHosts.find((h) => !adminActiveCalls.some((c) => c.hostId === h.id)) ||
-      femaleHosts[0] ||
-      users[1];
-
-    const caller = (callerId ? users.find((u) => u.id === callerId) : null) ||
-      maleCallers.find((m) => !adminActiveCalls.some((c) => c.callerId === m.id)) ||
-      maleCallers[0] ||
-      users[0];
-
-    const newCallId = 'call_live_' + Math.floor(10000 + Math.random() * 90000);
-
-    const newCall: AdminActiveCall = {
-      id: newCallId,
-      hostId: host.id,
-      hostName: host.name,
-      hostAvatar: host.avatarUrl,
-      hostCountry: host.nationality || 'Spain',
-      hostCountryCode: host.countryCode || 'ES',
-      hostHourlyRate: host.hourlyCoinRate || getEffectiveCallRate(host.id, caller.id),
-      hostRating: 4.97,
-      hostAge: host.age || 24,
-      hostEarningsCoins: host.earningsCoins || 7500,
-      callerId: caller.id,
-      callerName: caller.name,
-      callerAvatar: caller.avatarUrl,
-      callerCountry: caller.nationality || 'United States',
-      callerCountryCode: caller.countryCode || 'US',
-      callerVipTier: caller.vipTier || 'gold',
-      callerCoinBalance: caller.coinBalance || 350,
-      startTime: Date.now() - 45000,
-      durationSeconds: 45,
-      coinsSpent: 8,
-      coinsEarned: 4,
-      status: 'active',
-      burnRatePerMin: getEffectiveCallRate(host.id, caller.id),
-      videoQuality: systemSettings.livekitCaptureResolution === '4k' ? '4K Ultra HD' : systemSettings.livekitCaptureResolution === '1080p' ? '1080p FHD' : systemSettings.livekitCaptureResolution === '480p' ? '480p SD' : '720p HD',
-      fps: 60,
-      bitrateKbps: 2340,
-      latencyMs: 44,
-      packetLoss: 0.01,
-      safetyScore: 99.9,
-      safetyFlag: 'clean',
-      aiShieldActive: false,
-      hostAudioLevel: 62,
-      callerAudioLevel: 38,
-    };
-
-    // Update host online status to in_call
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === host.id) return { ...u, onlineStatus: 'in_call' };
-        if (u.id === caller.id) return { ...u, onlineStatus: 'in_call' };
-        return u;
-      })
-    );
-
-    // Sync call to backend signaling server so server presence marks both users busy
-    authFetch('/api/calls/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        callId: newCallId,
-        callerId: caller.id,
-        receiverId: host.id,
-        status: 'active',
-        startTime: Date.now() - 45000,
-      }),
-    }).catch(() => {});
-
-    setAdminActiveCalls((prev) => [newCall, ...prev]);
-
-    showToast(
-      'Test Live Call Spawned 🟢',
-      `Live call started between ${host.name} and ${caller.name}. Ready for Silent Admin Monitoring!`,
-      'success'
-    );
-
-    return newCallId;
-  };
-
   // Female Creator Performance Metrics & Intelligence
   const [creatorMetricsMap, setCreatorMetricsMap] = useState<Record<string, CreatorMetrics>>({});
+
+  // Hydrate creator metrics from REST on login (WS also pushes creator_metrics:all)
+  useEffect(() => {
+    if (!isLoggedIn || !currentUserId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await authFetch('/api/creator/metrics');
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (data?.success && data.metrics && typeof data.metrics === 'object') {
+          setCreatorMetricsMap(data.metrics as Record<string, CreatorMetrics>);
+        } else if (data?.success && data.metric && currentUserId) {
+          setCreatorMetricsMap((prev) => ({
+            ...prev,
+            [currentUserId]: data.metric as CreatorMetrics,
+          }));
+        }
+      } catch {
+        // WS may still deliver metrics
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoggedIn, currentUserId]);
+
+  // Optional nudge: female creators ping server accrual every 45s while tab visible
+  useEffect(() => {
+    if (!isLoggedIn || !currentUser || currentUser.gender !== 'female') return;
+    const creatorId = currentUser.id;
+    const tick = () => {
+      if (document.visibilityState !== 'visible') return;
+      void (async () => {
+        try {
+          const res = await authFetch('/api/creator/heartbeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          if (!res.ok) return;
+          const data = await res.json().catch(() => null);
+          if (data?.success && data.metrics) {
+            setCreatorMetricsMap((prev) => ({
+              ...prev,
+              [creatorId]: data.metrics as CreatorMetrics,
+            }));
+          }
+        } catch {
+          // Presence-driven server accrual remains authoritative
+        }
+      })();
+    };
+    const timer = setInterval(tick, 45000);
+    return () => clearInterval(timer);
+  }, [isLoggedIn, currentUser?.id, currentUser?.gender]);
 
   const myCreatorMetrics = useMemo<CreatorMetrics | null>(() => {
     if (!currentUser || currentUser.gender !== 'female') return null;
@@ -6594,8 +7870,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       creatorAvatar: currentUser.avatarUrl,
       agencyLeaderId: currentUser.teamLeaderId || null,
       agencyName: currentUser.agencyName || null,
-      activeOnlineSeconds: (currentUser.totalCallMinutes || 0) * 60,
-      activeOnlineHours: Number(((currentUser.totalCallMinutes || 0) / 60).toFixed(2)),
+      activeOnlineSeconds: 0,
+      activeOnlineHours: 0,
       coinsEarnedFromCalls: currentUser.earningsCoins || 0,
       coinsEarnedFromGifts: 0,
       totalTargetCoins: currentUser.earningsCoins || 0,
@@ -6620,132 +7896,120 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [currentUser, creatorMetricsMap]);
 
   const toggleReadyNow = async (creatorIdOrActive?: string | boolean): Promise<boolean> => {
-    const targetId = typeof creatorIdOrActive === 'string' ? creatorIdOrActive : currentUser?.id;
-    if (!targetId) return false;
-    setCreatorMetricsMap((prev) => {
-      const existing = prev[targetId] || {
-        creatorId: targetId,
-        activeOnlineSeconds: 0,
-        activeOnlineHours: 0,
-        coinsEarnedFromCalls: 0,
-        coinsEarnedFromGifts: 0,
-        totalTargetCoins: 0,
-        currentStreakDays: 1,
-        totalCallsOffered: 0,
-        totalCallsAnswered: 0,
-        totalCallsDeclined: 0,
-        totalCallsMissed: 0,
-        responseHealthScore: 100,
-        performanceTier: 'bronze' as CreatorTier,
-        isReadyNowActive: false,
-        bonusEarnedCoins: 0,
-        bonusEarnedUSD: 0,
-      };
-      const nextActive = typeof creatorIdOrActive === 'boolean' ? creatorIdOrActive : !existing.isReadyNowActive;
-      const updated: CreatorMetrics = {
-        ...existing,
-        isReadyNowActive: nextActive,
-        readyNowToggledAt: nextActive ? new Date().toISOString() : null,
-      };
+    if (!currentUser?.id) return false;
+    const nextActive =
+      typeof creatorIdOrActive === 'boolean'
+        ? creatorIdOrActive
+        : !(creatorMetricsMap[currentUser.id]?.isReadyNowActive);
+
+    try {
+      const res = await authFetch('/api/creator/ready-now-toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isReadyNow: nextActive }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        showToast('Ready Now Failed', data?.error || 'Could not update Ready Now status.', 'error');
+        return false;
+      }
+      if (data.metrics) {
+        setCreatorMetricsMap((prev) => ({
+          ...prev,
+          [currentUser.id]: data.metrics as CreatorMetrics,
+        }));
+      }
       showToast(
         nextActive ? 'Ready Now Surge Active! ⚡' : 'Ready Now Deactivated',
         nextActive ? '+100 pts discovery rank surge applied.' : 'Returned to standard discovery ranking.',
         'info'
       );
-      return { ...prev, [targetId]: updated };
-    });
-    return true;
+      return true;
+    } catch {
+      showToast('Ready Now Failed', 'Network error updating Ready Now.', 'error');
+      return false;
+    }
   };
 
   const sendCreatorHeartbeat = async (): Promise<void> => {
     if (!currentUser || currentUser.gender !== 'female') return;
-    setCreatorMetricsMap((prev) => {
-      const existing = prev[currentUser.id] || {
-        creatorId: currentUser.id,
-        activeOnlineSeconds: 0,
-        activeOnlineHours: 0,
-        coinsEarnedFromCalls: 0,
-        coinsEarnedFromGifts: 0,
-        totalTargetCoins: 0,
-        currentStreakDays: 1,
-        totalCallsOffered: 0,
-        totalCallsAnswered: 0,
-        totalCallsDeclined: 0,
-        totalCallsMissed: 0,
-        responseHealthScore: 100,
-        performanceTier: 'bronze' as CreatorTier,
-        isReadyNowActive: false,
-        bonusEarnedCoins: 0,
-        bonusEarnedUSD: 0,
-      };
-      const newSecs = (existing.activeOnlineSeconds || 0) + 15;
-      return {
-        ...prev,
-        [currentUser.id]: {
-          ...existing,
-          activeOnlineSeconds: newSecs,
-          activeOnlineHours: Number((newSecs / 3600).toFixed(2)),
-          lastActiveDate: new Date().toISOString().split('T')[0],
-        },
-      };
-    });
+    try {
+      const res = await authFetch('/api/creator/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      if (data?.success && data.metrics) {
+        setCreatorMetricsMap((prev) => ({
+          ...prev,
+          [currentUser.id]: data.metrics as CreatorMetrics,
+        }));
+      }
+    } catch {
+      // Presence-driven server accrual remains authoritative
+    }
   };
 
   const claimDailyFirstCallBonus = async (): Promise<boolean> => {
     if (!currentUser || currentUser.gender !== 'female') return false;
-    const bonusCoins = systemSettings.dailyFirstCallBonusCoins ?? 100;
-    const bonusUSD = systemSettings.dailyFirstCallBonusUSD ?? 1.00;
-    const todayStr = new Date().toISOString().split('T')[0];
 
-    setCreatorMetricsMap((prev) => {
-      const existing = prev[currentUser.id] || {
-        creatorId: currentUser.id,
-        activeOnlineSeconds: 0,
-        activeOnlineHours: 0,
-        coinsEarnedFromCalls: 0,
-        coinsEarnedFromGifts: 0,
-        totalTargetCoins: 0,
-        currentStreakDays: 1,
-        totalCallsOffered: 0,
-        totalCallsAnswered: 0,
-        totalCallsDeclined: 0,
-        totalCallsMissed: 0,
-        responseHealthScore: 100,
-        performanceTier: 'bronze' as CreatorTier,
-        isReadyNowActive: false,
-        bonusEarnedCoins: 0,
-        bonusEarnedUSD: 0,
-      };
-      if (existing.firstCallBonusClaimedDate === todayStr) {
-        showToast('Already Claimed', 'You have already claimed today\'s first call speed bonus.', 'info');
-        return prev;
+    try {
+      const res = await authFetch('/api/creator/first-call-bonus', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        showToast('Bonus Claim Failed', data?.error || 'Could not claim bonus.', 'error');
+        return false;
       }
-      const updated: CreatorMetrics = {
-        ...existing,
-        firstCallBonusClaimedDate: todayStr,
-        bonusEarnedCoins: (existing.bonusEarnedCoins || 0) + bonusCoins,
-        bonusEarnedUSD: (existing.bonusEarnedUSD || 0) + bonusUSD,
-      };
-      showToast('First Call Speed Bonus Claimed! ⚡', `+${bonusCoins} 🪙 (+$${bonusUSD.toFixed(2)} USD) added to your earnings!`, 'success');
-      return { ...prev, [currentUser.id]: updated };
-    });
+      if (data?.alreadyClaimed) {
+        showToast('Already Claimed', data.message || 'You have already claimed today\'s first call speed bonus.', 'info');
+        return false;
+      }
+      if (!data?.success) {
+        showToast('Bonus Claim Failed', data?.message || data?.error || 'Could not claim bonus.', 'error');
+        return false;
+      }
 
-    // Also credit coins to currentUser
-    if (currentUser?.id) {
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === currentUser.id) {
-            return {
-              ...u,
-              earningsCoins: (u.earningsCoins || 0) + bonusCoins,
-              totalLifetimeEarnedUSD: (u.totalLifetimeEarnedUSD || 0) + bonusUSD,
-            };
-          }
-          return u;
-        })
+      if (data.metrics) {
+        setCreatorMetricsMap((prev) => ({
+          ...prev,
+          [currentUser.id]: data.metrics as CreatorMetrics,
+        }));
+      }
+
+      const bonusCoins = Number(data.bonusCoins ?? systemSettings.dailyFirstCallBonusCoins ?? 100);
+      const bonusUSD = Number(data.bonusUSD ?? systemSettings.dailyFirstCallBonusUSD ?? 1);
+
+      if (currentUser?.id) {
+        setUsers((prev) =>
+          prev.map((u) => {
+            if (u.id === currentUser.id) {
+              return {
+                ...u,
+                earningsCoins: (u.earningsCoins || 0) + bonusCoins,
+                totalLifetimeEarnedUSD: (u.totalLifetimeEarnedUSD || 0) + bonusUSD,
+              };
+            }
+            return u;
+          })
+        );
+      }
+
+      showToast(
+        'First Call Speed Bonus Claimed! ⚡',
+        `+${bonusCoins} 🪙 (+$${bonusUSD.toFixed(2)} USD) added to your earnings!`,
+        'success'
       );
+      return true;
+    } catch {
+      showToast('Bonus Claim Failed', 'Network error claiming bonus.', 'error');
+      return false;
     }
-    return true;
   };
 
   return (
@@ -6761,6 +8025,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         sendCreatorHeartbeat,
         claimDailyFirstCallBonus,
         coinPackages,
+        currencyConfigs,
         virtualGifts,
         saveVirtualGift,
         deleteVirtualGift,
@@ -6779,12 +8044,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         favorites,
         friends,
         blockedUserIds,
+        blockedByUserIds,
+        userMatchRecords,
         creatorGoals,
         dailyBonusClaimed,
         dailyRewardRecord,
         isDailyRewardsModalOpen,
         openDailyRewardsModal,
         closeDailyRewardsModal,
+        blockReportModal,
+        openBlockReportModal,
+        closeBlockReportModal,
         claimDailyStreak,
         claimDailyMission,
         claimDailyMasterChest,
@@ -6795,7 +8065,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         recordMomentInteraction,
         recordGiftSentInteraction,
         toast,
-        fastTestMode,
         theme,
         setTheme,
         toggleTheme,
@@ -6812,6 +8081,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         deletePolicyDocument,
         saveHomeQuickLink,
         deleteHomeQuickLink,
+        seedHomeCmsDefaults,
         showToast,
         hideToast,
         switchUser,
@@ -6823,18 +8093,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         updateUserProfile,
         changeUserPassword,
         buyCoinPackage,
-        purchaseVip,
         claimDailyBonus,
         startCall,
         acceptCall,
         rejectCall,
         endCall,
         sendGiftInCall,
-        toggleFastTestMode,
         getEffectiveCallRate,
         sendMessage,
+        ingestInCallChatPreview,
+        notifyInCallChatPreview,
         clearChatHistory,
         toggleFavorite,
+        likeUser,
+        passUser,
         toggleFriend,
         addFriend,
         removeFriend,
@@ -6862,6 +8134,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         updateLiveKitConfig,
         saveCoinPackage,
         deleteCoinPackage,
+        saveCurrencyConfigs,
         adminApprovePayout,
         adminRejectPayout,
         adminUpdateUser,
@@ -6877,13 +8150,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         likeUserMoment,
         tipMomentCreator,
         addFeedPost,
+        refreshFeedPosts,
+        fetchUserMoments,
         createTeamLeader,
         createCreatorByTeamLeader,
         updateCreatorCoinEarnOverride,
         banCreatorByTeamLeader,
         unbanCreatorByTeamLeader,
         deleteCreatorByTeamLeader,
+        refreshTeamLeaderCreators,
         creatorReviews,
+        refreshCreatorReviews,
         submitCreatorReview,
         sendRatingRequest,
         pendingRatingCall,
@@ -6894,7 +8171,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         adminTerminateCall,
         adminIssueCallWarning,
         adminCaptureEvidence,
-        adminSpawnDemoCall,
       }}
     >
       {children}

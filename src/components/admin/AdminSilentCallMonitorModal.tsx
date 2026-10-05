@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { AdminActiveCall } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { DEFAULT_COIN_BURN_RATE_PER_MIN } from '../../../shared/finance/economyBurn';
 
 interface AdminSilentCallMonitorModalProps {
   call: AdminActiveCall;
@@ -234,7 +235,7 @@ export const AdminSilentCallMonitorModal: React.FC<AdminSilentCallMonitorModalPr
 
   // Remaining minutes male caller can afford before 0 coins
   const callerRemainingCoins = callerUser ? callerUser.coinBalance : call.callerCoinBalance;
-  const ratePerMin = call.burnRatePerMin || 120;
+  const ratePerMin = call.burnRatePerMin || DEFAULT_COIN_BURN_RATE_PER_MIN;
   const minutesRunway = Math.floor(callerRemainingCoins / Math.max(1, ratePerMin));
 
   const handleSendWarning = async () => {
@@ -454,7 +455,7 @@ export const AdminSilentCallMonitorModal: React.FC<AdminSilentCallMonitorModalPr
             {/* Live Visual Scanline / Quality Overlay */}
             <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-transparent to-slate-950/30 pointer-events-none z-10" />
             
-            {/* Live Audio Decibel Waveform Pulse */}
+            {/* Host audio controls — decibel bar only when real level is available */}
             <div className="absolute bottom-3 left-3 right-3 z-20 bg-slate-950/85 backdrop-blur-md border border-slate-800/80 rounded-xl p-2 flex items-center justify-between text-xs font-mono">
               <div className="flex items-center space-x-2">
                 <button
@@ -471,18 +472,21 @@ export const AdminSilentCallMonitorModal: React.FC<AdminSilentCallMonitorModalPr
                 <span className="text-[11px] text-slate-300">Host Mic Audio</span>
               </div>
 
-              {/* Real-time Decibel Bar */}
-              <div className="flex items-center space-x-1">
-                <div className="w-24 h-2 bg-slate-800 rounded-full overflow-hidden flex">
-                  <div
-                    className="h-full bg-gradient-to-r from-emerald-500 via-yellow-400 to-rose-500 transition-all duration-150"
-                    style={{ width: `${isHostAudioMuted ? 0 : call.hostAudioLevel ?? 55}%` }}
-                  />
+              {typeof call.hostAudioLevel === 'number' ? (
+                <div className="flex items-center space-x-1">
+                  <div className="w-24 h-2 bg-slate-800 rounded-full overflow-hidden flex">
+                    <div
+                      className="h-full bg-gradient-to-r from-emerald-500 via-yellow-400 to-rose-500 transition-all duration-150"
+                      style={{ width: `${isHostAudioMuted ? 0 : call.hostAudioLevel}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-slate-400 w-8 text-right">
+                    {isHostAudioMuted ? 'Muted' : `${call.hostAudioLevel}%`}
+                  </span>
                 </div>
-                <span className="text-[10px] text-slate-400 w-8 text-right">
-                  {isHostAudioMuted ? 'Muted' : `${call.hostAudioLevel ?? 55} dB`}
-                </span>
-              </div>
+              ) : (
+                <span className="text-[10px] text-slate-500">{isHostAudioMuted ? 'Muted' : 'Level n/a'}</span>
+              )}
             </div>
           </div>
 
@@ -521,7 +525,7 @@ export const AdminSilentCallMonitorModal: React.FC<AdminSilentCallMonitorModalPr
             <div className="flex items-center space-x-2 bg-slate-950/80 backdrop-blur-md border border-indigo-500/40 px-2.5 py-1 rounded-xl shadow-lg pointer-events-auto">
               <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
               <span className="text-xs font-black text-white">{call.callerName}</span>
-              <span className="text-[10px] text-indigo-300 font-bold font-mono">CALLER ({call.callerVipTier?.toUpperCase() || 'VIP'})</span>
+              <span className="text-[10px] text-indigo-300 font-bold font-mono">CALLER</span>
               <span className="text-xs">{getCountryFlag(call.callerCountryCode, call.callerCountry)}</span>
             </div>
 
@@ -569,7 +573,7 @@ export const AdminSilentCallMonitorModal: React.FC<AdminSilentCallMonitorModalPr
             {/* Scanline / Quality Overlay */}
             <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-transparent to-slate-950/30 pointer-events-none z-10" />
 
-            {/* Live Audio Decibel Waveform Pulse */}
+            {/* Caller audio controls — decibel bar only when real level is available */}
             <div className="absolute bottom-3 left-3 right-3 z-20 bg-slate-950/85 backdrop-blur-md border border-slate-800/80 rounded-xl p-2 flex items-center justify-between text-xs font-mono">
               <div className="flex items-center space-x-2">
                 <button
@@ -586,18 +590,21 @@ export const AdminSilentCallMonitorModal: React.FC<AdminSilentCallMonitorModalPr
                 <span className="text-[11px] text-slate-300">Caller Mic Audio</span>
               </div>
 
-              {/* Real-time Decibel Bar */}
-              <div className="flex items-center space-x-1">
-                <div className="w-24 h-2 bg-slate-800 rounded-full overflow-hidden flex">
-                  <div
-                    className="h-full bg-gradient-to-r from-emerald-500 via-yellow-400 to-rose-500 transition-all duration-150"
-                    style={{ width: `${isCallerAudioMuted ? 0 : call.callerAudioLevel ?? 35}%` }}
-                  />
+              {typeof call.callerAudioLevel === 'number' ? (
+                <div className="flex items-center space-x-1">
+                  <div className="w-24 h-2 bg-slate-800 rounded-full overflow-hidden flex">
+                    <div
+                      className="h-full bg-gradient-to-r from-emerald-500 via-yellow-400 to-rose-500 transition-all duration-150"
+                      style={{ width: `${isCallerAudioMuted ? 0 : call.callerAudioLevel}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-slate-400 w-8 text-right">
+                    {isCallerAudioMuted ? 'Muted' : `${call.callerAudioLevel}%`}
+                  </span>
                 </div>
-                <span className="text-[10px] text-slate-400 w-8 text-right">
-                  {isCallerAudioMuted ? 'Muted' : `${call.callerAudioLevel ?? 35} dB`}
-                </span>
-              </div>
+              ) : (
+                <span className="text-[10px] text-slate-500">{isCallerAudioMuted ? 'Muted' : 'Level n/a'}</span>
+              )}
             </div>
           </div>
 

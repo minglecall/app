@@ -44,7 +44,6 @@ export interface Database {
           online_status: 'online' | 'busy' | 'offline' | 'in_call';
           role: 'male_user' | 'female_user' | 'female_creator' | 'female_host' | 'other_user' | 'admin' | 'team_leader' | 'agency_manager';
           coin_balance: number;
-          vip_tier: 'none' | 'bronze' | 'silver' | 'gold' | 'diamond';
           hourly_coin_rate: number;
           earnings_coins: number;
           total_lifetime_earned_usd: number;
@@ -110,7 +109,6 @@ export interface Database {
           online_status?: 'online' | 'busy' | 'offline' | 'in_call';
           role?: 'male_user' | 'female_user' | 'female_creator' | 'female_host' | 'other_user' | 'admin' | 'team_leader' | 'agency_manager';
           coin_balance?: number;
-          vip_tier?: 'none' | 'bronze' | 'silver' | 'gold' | 'diamond';
           hourly_coin_rate?: number;
           earnings_coins?: number;
           total_lifetime_earned_usd?: number;
@@ -208,6 +206,19 @@ export interface Database {
         };
         Update: Partial<Database['public']['Tables']['messages']['Insert']>;
       };
+      message_conversation_clears: {
+        Row: {
+          user_id: string;
+          other_user_id: string;
+          cleared_at: string;
+        };
+        Insert: {
+          user_id: string;
+          other_user_id: string;
+          cleared_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['message_conversation_clears']['Insert']>;
+      };
       call_logs: {
         Row: {
           id: string;
@@ -241,14 +252,14 @@ export interface Database {
         Row: {
           id: string;
           user_id: string;
-          user_name: string;
-          user_email: string;
           amount_coins: number;
           amount_usd: number;
           payout_method: string;
-          account_details: string;
-          status: 'pending' | 'processing' | 'completed' | 'rejected';
-          admin_note: string | null;
+          /** Canonical schema column (JSONB). Legacy clients sometimes mapped this as account_details. */
+          payout_details: Json;
+          status: 'pending' | 'approved' | 'rejected' | 'processing' | 'completed';
+          /** Canonical schema column. Legacy clients sometimes mapped this as admin_note. */
+          admin_notes: string | null;
           kyc_verified: boolean;
           team_leader_id: string | null;
           team_leader_name: string | null;
@@ -259,14 +270,12 @@ export interface Database {
         Insert: {
           id?: string;
           user_id: string;
-          user_name: string;
-          user_email: string;
           amount_coins: number;
           amount_usd: number;
           payout_method: string;
-          account_details: string;
-          status?: 'pending' | 'processing' | 'completed' | 'rejected';
-          admin_note?: string | null;
+          payout_details: Json;
+          status?: 'pending' | 'approved' | 'rejected' | 'processing' | 'completed';
+          admin_notes?: string | null;
           kyc_verified?: boolean;
           team_leader_id?: string | null;
           team_leader_name?: string | null;
@@ -305,12 +314,14 @@ export interface Database {
           coin_burn_rate_per_min: number;
           coin_burn_rate_friend_per_min: number;
           female_host_share_percent?: number;
+          female_host_target_share_percent?: number;
           team_leader_share_percent?: number;
           gift_female_host_share_percent?: number;
           gift_team_leader_share_percent?: number;
           enable_virtual_gifts?: boolean;
           virtual_gifts_json?: Json | null;
           female_earning_rate_per_min: number;
+          coin_usd_peg: number;
           coin_to_usd_ratio: number;
           female_payout_ratio_usd: number;
           min_payout_threshold_usd: number;
@@ -356,6 +367,10 @@ export interface Database {
           creator_target_gold_hours?: number;
           creator_target_gold_coins?: number;
           creator_target_gold_bonus_usd?: number;
+          /** UTC HH:mm for Financial Module period close (default 00:00). */
+          period_close_utc_time?: string;
+          /** When true, period-end settlement batches are the intended cash-out path. */
+          settlement_enabled?: boolean;
           peak_hours_start?: string;
           peak_hours_end?: string;
           peak_hours_enabled?: boolean;
@@ -370,6 +385,210 @@ export interface Database {
         };
         Insert: Partial<Database['public']['Tables']['system_configs']['Row']>;
         Update: Partial<Database['public']['Tables']['system_configs']['Row']>;
+      };
+      settlement_periods: {
+        Row: {
+          id: string;
+          cycle_type: 'weekly' | 'monthly';
+          period_start: string;
+          period_end: string;
+          close_scheduled_at: string;
+          closed_at: string | null;
+          status: 'open' | 'closing' | 'closed' | 'failed';
+          config_snapshot: Json;
+          close_error: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          cycle_type: 'weekly' | 'monthly';
+          period_start: string;
+          period_end: string;
+          close_scheduled_at: string;
+          closed_at?: string | null;
+          status?: 'open' | 'closing' | 'closed' | 'failed';
+          config_snapshot?: Json;
+          close_error?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['settlement_periods']['Insert']>;
+      };
+      financial_ledger: {
+        Row: {
+          id: string;
+          created_at: string;
+          period_id: string | null;
+          entry_type:
+            | 'PLATFORM_EARN'
+            | 'HOST_EARN'
+            | 'TL_EARN'
+            | 'TARGET_BONUS'
+            | 'TARGET_SHARE_TRUEUP'
+            | 'SETTLEMENT_ACCRUAL'
+            | 'SETTLEMENT_PAID'
+            | 'REVERSAL';
+          user_id: string | null;
+          team_leader_id: string | null;
+          counterparty_role: 'platform' | 'host' | 'team_leader' | null;
+          amount_coins: number;
+          amount_usd: number;
+          fx_ratio: number;
+          source_ref_type: string | null;
+          source_ref_id: string | null;
+          metadata: Json;
+        };
+        Insert: {
+          id?: string;
+          created_at?: string;
+          period_id?: string | null;
+          entry_type:
+            | 'PLATFORM_EARN'
+            | 'HOST_EARN'
+            | 'TL_EARN'
+            | 'TARGET_BONUS'
+            | 'TARGET_SHARE_TRUEUP'
+            | 'SETTLEMENT_ACCRUAL'
+            | 'SETTLEMENT_PAID'
+            | 'REVERSAL';
+          user_id?: string | null;
+          team_leader_id?: string | null;
+          counterparty_role?: 'platform' | 'host' | 'team_leader' | null;
+          amount_coins: number;
+          amount_usd: number;
+          fx_ratio: number;
+          source_ref_type?: string | null;
+          source_ref_id?: string | null;
+          metadata?: Json;
+        };
+        Update: Partial<Database['public']['Tables']['financial_ledger']['Insert']>;
+      };
+      settlement_batches: {
+        Row: {
+          id: string;
+          period_id: string;
+          batch_kind: 'team_leader_bundle' | 'direct_host';
+          team_leader_id: string | null;
+          payee_user_id: string;
+          status: 'pending_admin_pay' | 'admin_paid' | 'tl_confirmed' | 'cancelled';
+          total_host_salary_usd: number;
+          total_tl_commission_usd: number;
+          total_due_usd: number;
+          total_host_salary_coins: number;
+          total_tl_commission_coins: number;
+          currency: string;
+          payment_reference: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          period_id: string;
+          batch_kind: 'team_leader_bundle' | 'direct_host';
+          team_leader_id?: string | null;
+          payee_user_id: string;
+          status?: 'pending_admin_pay' | 'admin_paid' | 'tl_confirmed' | 'cancelled';
+          total_host_salary_usd?: number;
+          total_tl_commission_usd?: number;
+          total_due_usd?: number;
+          total_host_salary_coins?: number;
+          total_tl_commission_coins?: number;
+          currency?: string;
+          payment_reference?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['settlement_batches']['Insert']>;
+      };
+      settlement_line_items: {
+        Row: {
+          id: string;
+          batch_id: string;
+          payee_user_id: string;
+          payee_role: 'host' | 'team_leader';
+          amount_coins: number;
+          amount_usd: number;
+          component: 'call_earnings' | 'gift_earnings' | 'target_bonus' | 'target_share_trueup' | 'tl_commission' | 'other';
+          breakdown: Json;
+          host_salary_status: 'pending' | 'paid';
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          batch_id: string;
+          payee_user_id: string;
+          payee_role: 'host' | 'team_leader';
+          amount_coins: number;
+          amount_usd: number;
+          component: 'call_earnings' | 'gift_earnings' | 'target_bonus' | 'target_share_trueup' | 'tl_commission' | 'other';
+          breakdown?: Json;
+          host_salary_status?: 'pending' | 'paid';
+          created_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['settlement_line_items']['Insert']>;
+      };
+      settlement_events: {
+        Row: {
+          id: string;
+          batch_id: string | null;
+          period_id: string | null;
+          event_type: 'created' | 'admin_marked_paid' | 'tl_confirmed' | 'cancelled' | 'note';
+          actor_user_id: string;
+          note: string | null;
+          payload: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          batch_id?: string | null;
+          period_id?: string | null;
+          event_type: 'created' | 'admin_marked_paid' | 'tl_confirmed' | 'cancelled' | 'note';
+          actor_user_id: string;
+          note?: string | null;
+          payload?: Json;
+          created_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['settlement_events']['Insert']>;
+      };
+      creator_period_snapshots: {
+        Row: {
+          id: string;
+          period_id: string;
+          creator_id: string;
+          agency_leader_id: string | null;
+          active_online_seconds: number;
+          active_online_hours: number;
+          coins_earned_from_calls: number;
+          coins_earned_from_gifts: number;
+          total_target_coins: number;
+          performance_tier: 'bronze' | 'silver' | 'gold';
+          bonus_earned_coins: number;
+          bonus_earned_usd: number;
+          current_streak_days: number;
+          response_health_score: number;
+          metrics_snapshot: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          period_id: string;
+          creator_id: string;
+          agency_leader_id?: string | null;
+          active_online_seconds?: number;
+          active_online_hours?: number;
+          coins_earned_from_calls?: number;
+          coins_earned_from_gifts?: number;
+          total_target_coins?: number;
+          performance_tier?: 'bronze' | 'silver' | 'gold';
+          bonus_earned_coins?: number;
+          bonus_earned_usd?: number;
+          current_streak_days?: number;
+          response_health_score?: number;
+          metrics_snapshot?: Json;
+          created_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['creator_period_snapshots']['Insert']>;
       };
       moderation_reports: {
         Row: {
@@ -425,6 +644,9 @@ export interface Database {
           coins: number;
           bonus_coins: number;
           price_usd: number;
+          discount_price_usd: number | null;
+          approx_call_minutes: number | null;
+          saving_label: string | null;
           badge_tag: string | null;
           popular: boolean;
           order_num: number;
@@ -432,6 +654,19 @@ export interface Database {
         };
         Insert: Partial<Database['public']['Tables']['coin_packages']['Row']>;
         Update: Partial<Database['public']['Tables']['coin_packages']['Row']>;
+      };
+      currency_configs: {
+        Row: {
+          code: string;
+          name: string;
+          symbol: string;
+          rate_from_usd: number;
+          enabled: boolean;
+          order_num: number;
+          created_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['currency_configs']['Row']>;
+        Update: Partial<Database['public']['Tables']['currency_configs']['Row']>;
       };
       favorites: {
         Row: {

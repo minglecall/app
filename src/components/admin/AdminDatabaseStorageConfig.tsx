@@ -80,6 +80,10 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
   const [isTestingR2Upload, setIsTestingR2Upload] = useState(false);
   const [r2TestResult, setR2TestResult] = useState<{ success?: boolean; url?: string; durationMs?: number; message?: string } | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [storageRuntimeStatus, setStorageRuntimeStatus] = useState<{
+    configured: boolean;
+    mockStorageActive: boolean;
+  } | null>(null);
 
   const [showSecretKey, setShowSecretKey] = useState(false);
   const [showAnonKey, setShowAnonKey] = useState(false);
@@ -163,7 +167,22 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
   useEffect(() => {
     fetchConfig();
     fetchSmtpStatus();
+    fetchStorageRuntimeStatus();
   }, []);
+
+  const fetchStorageRuntimeStatus = async () => {
+    try {
+      const res = await authFetch('/api/storage/config');
+      if (!res.ok) return;
+      const data = await res.json();
+      setStorageRuntimeStatus({
+        configured: Boolean(data.configured),
+        mockStorageActive: Boolean(data.mockStorageActive),
+      });
+    } catch (e) {
+      console.warn('Storage runtime status fetch notice:', e);
+    }
+  };
 
   const fetchSmtpStatus = async () => {
     // 1. First check localStorage for instant client recovery
@@ -1144,6 +1163,28 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
               <p className="text-xs text-slate-400 mt-1">
                 Zero egress fees with S3-compatible presigned URLs. Files are uploaded directly from client browsers to Cloudflare R2 without burdening the application database.
               </p>
+              {storageRuntimeStatus?.mockStorageActive && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                  <div>
+                    <div className="font-semibold text-amber-100">Mock storage active</div>
+                    <div className="mt-0.5 text-amber-200/90">
+                      R2 credentials are missing or incomplete. Authenticated uploads use the local mock endpoint
+                      (<code className="text-amber-100">/api/storage/mock-upload</code>). Configure R2 for production;
+                      mock mode is blocked in production unless <code className="text-amber-100">ALLOW_MOCK_STORAGE=true</code>.
+                    </div>
+                  </div>
+                </div>
+              )}
+              {storageRuntimeStatus && !storageRuntimeStatus.configured && !storageRuntimeStatus.mockStorageActive && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+                  <div>
+                    <div className="font-semibold text-rose-100">Storage not configured</div>
+                    <div className="mt-0.5">Uploads will fail closed until R2 credentials are set (or mock storage is explicitly allowed).</div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

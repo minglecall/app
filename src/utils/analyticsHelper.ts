@@ -1,4 +1,17 @@
+/**
+ * Host call-activity analytics helpers.
+ *
+ * IMPORTANT (Phase 8 / Phase 1 peg): USD estimates here (coins × Fixed Peg via getCoinUsdPeg)
+ * are operational charts only — NOT settlement / cash-out truth.
+ * Payable amounts live in settlement_batches / settlement_line_items via the Financial Module.
+ */
+
 import { CallLogItem, PayoutRequest, UserProfile, TransactionReceipt, WalletLedgerEntry, SystemSettings } from '../types';
+import { DEFAULT_COIN_USD_PEG, getCoinUsdPeg, coinsToUsd } from '../../shared/finance/fx';
+import {
+  DEFAULT_COIN_BURN_RATE_PER_MIN,
+  DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN,
+} from '../../shared/finance/economyBurn';
 
 export interface EarningsDataPoint {
   period: string;
@@ -96,7 +109,7 @@ export interface FavoriteHostStat {
 export function computeHostEarningsData(
   hostId: string,
   callLogs: CallLogItem[],
-  femalePayoutRatioUSD: number = 0.008,
+  femalePayoutRatioUSD: number = DEFAULT_COIN_USD_PEG,
   timeframe: 'daily' | 'weekly' | 'monthly' | 'yearly' = 'daily'
 ): EarningsDataPoint[] {
   const hostLogs = callLogs.filter((log) => log.receiverId === hostId || log.callerId === hostId);
@@ -222,7 +235,7 @@ export function computeHostEarningsData(
 export function computeHostMetrics(
   user: UserProfile,
   callLogs: CallLogItem[],
-  femalePayoutRatioUSD: number = 0.008
+  femalePayoutRatioUSD: number = DEFAULT_COIN_USD_PEG
 ): HostMetrics {
   const hostLogs = callLogs.filter((l) => l.receiverId === user.id);
   const totalCalls = hostLogs.length || (user.totalCallsHosted || 0);
@@ -357,7 +370,7 @@ export function computeHostMetrics(
 export function computeCallerSpendingData(
   callerId: string,
   callLogs: CallLogItem[],
-  coinToUSDRatio: number = 0.01,
+  coinToUSDRatio: number = DEFAULT_COIN_USD_PEG,
   timeframe: 'daily' | 'weekly' = 'daily'
 ): SpendingDataPoint[] {
   const userLogs = callLogs.filter((log) => log.callerId === callerId);
@@ -437,7 +450,7 @@ export function computeCallerMetrics(
   const audioMinutes = audioLogs.reduce((acc, l) => acc + Math.round((l.durationSeconds || 0) / 60), 0);
 
   const totalCoinsSpent = userLogs.reduce((acc, l) => acc + (l.coinsSpent || 0), 0);
-  const coinToUSDRatio = systemSettings.coinToUSDRatio || 0.01;
+  const coinToUSDRatio = getCoinUsdPeg(systemSettings);
   const totalUSDSpent = Number((totalCoinsSpent * coinToUSDRatio).toFixed(2));
 
   // Current month spend
@@ -450,8 +463,8 @@ export function computeCallerMetrics(
   const monthlyUSDSpent = Number((monthlyCoinsSpent * coinToUSDRatio).toFixed(2));
 
   // Friend rate savings: (standardRate - friendRate) * callMinutes
-  const standardRate = systemSettings.coinBurnRatePerMin || 120;
-  const friendRate = systemSettings.coinBurnRateFriendPerMin || 80;
+  const standardRate = systemSettings.coinBurnRatePerMin || DEFAULT_COIN_BURN_RATE_PER_MIN;
+  const friendRate = systemSettings.coinBurnRateFriendPerMin || DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN;
   const discountPerMin = Math.max(0, standardRate - friendRate);
 
   const friendSavingsCoins = userLogs
@@ -468,7 +481,7 @@ export function computeCallerMetrics(
     totalUSDSpent,
     monthlyCoinsSpent,
     monthlyUSDSpent,
-    // No gifts-sent ledger/table — omit KPI rather than hardcoding 0 as real activity
+    // GIFT_DEBIT rows exist for finance; male spend KPI still omits gift count until a dedicated counter is wired
     totalGiftsCount: null,
     friendSavingsCoins,
     friendSavingsUSD,
@@ -482,10 +495,12 @@ export function computeFavoriteHosts(
   callerId: string,
   callLogs: CallLogItem[],
   allUsers: UserProfile[],
-  friendsList: string[] = []
+  friendsList: string[] = [],
+  coinToUSDRatio: number = DEFAULT_COIN_USD_PEG
 ): FavoriteHostStat[] {
   const userLogs = callLogs.filter((l) => l.callerId === callerId);
   const hostMap = new Map<string, { minutes: number; coins: number; count: number; lastDate: string }>();
+  const usdRatio = Number.isFinite(coinToUSDRatio) && coinToUSDRatio > 0 ? coinToUSDRatio : DEFAULT_COIN_USD_PEG;
 
   userLogs.forEach((l) => {
     const prev = hostMap.get(l.receiverId) || { minutes: 0, coins: 0, count: 0, lastDate: l.timestamp };
@@ -509,13 +524,15 @@ export function computeFavoriteHosts(
         countryCode: host.countryCode || 'US',
         totalMinutes: stat.minutes,
         totalCoinsSpent: stat.coins,
-        totalUSDSpent: Number((stat.coins * 0.01).toFixed(2)),
+        totalUSDSpent: Number((stat.coins * usdRatio).toFixed(2)),
         callsCount: stat.count,
         giftsSentCount: null,
         lastCallDate: stat.lastDate,
         isFriend: friendsList.includes(host.id),
-        hourlyCoinRate: host.hourlyCoinRate || 120,
-        friendHourlyRate: Math.floor((host.hourlyCoinRate || 120) * 0.5),
+        hourlyCoinRate: host.hourlyCoinRate || DEFAULT_COIN_BURN_RATE_PER_MIN,
+        friendHourlyRate: Math.floor(
+          (host.hourlyCoinRate || DEFAULT_COIN_BURN_RATE_PER_MIN) * 0.5
+        ),
       });
     }
   });
@@ -523,33 +540,80 @@ export function computeFavoriteHosts(
   return results.sort((a, b) => b.totalMinutes - a.totalMinutes);
 }
 
-/**
- * Build transaction receipts from user transactions and call logs
- */
-export function computeTransactionReceipts(
-  userId: string,
-  callLogs: CallLogItem[]
-): TransactionReceipt[] {
-  const userLogs = callLogs.filter((l) => l.callerId === userId);
-  return userLogs.slice(0, 15).map((l, idx) => ({
-    id: `rec_${l.id || idx}`,
-    invoiceNumber: `INV-${new Date(l.startTime || Date.now()).getFullYear()}-${String(idx + 1).padStart(4, '0')}`,
-    userId,
-    userName: l.callerName || 'Member',
-    packageTitle: `1-on-1 Call Session (${Math.round((l.durationSeconds || 0) / 60)} min)`,
-    coinsCredited: l.coinsSpent || 0,
-    bonusCoins: 0,
-    amountUSD: Number(((l.coinsSpent || 0) * 0.01).toFixed(2)),
-    taxUSD: 0,
-    paymentGateway: 'stripe',
-    status: 'paid',
-    createdAt: l.timestamp || new Date(l.startTime || Date.now()).toLocaleDateString(),
-  }));
+function normalizeCallStatementStatus(
+  raw?: string
+): TransactionReceipt['status'] {
+  const s = String(raw || '').toLowerCase();
+  if (s === 'completed' || s === 'ended' || s === 'success') return 'completed';
+  if (s === 'missed') return 'missed';
+  if (s === 'declined') return 'declined';
+  if (s === 'rejected') return 'rejected';
+  if (s === 'failed') return 'failed';
+  // Billed sessions with coin spend are treated as completed call billing
+  return 'completed';
 }
 
 /**
+ * A1: Call spending statements from real call_logs (not payment-gateway purchase invoices).
+ */
+export function computeCallSpendingStatements(
+  userId: string,
+  callLogs: CallLogItem[],
+  coinToUSDRatio: number = DEFAULT_COIN_USD_PEG
+): TransactionReceipt[] {
+  const usdRatio = Number.isFinite(coinToUSDRatio) && coinToUSDRatio > 0 ? coinToUSDRatio : DEFAULT_COIN_USD_PEG;
+  const userLogs = callLogs
+    .filter((l) => l.callerId === userId)
+    .slice()
+    .sort((a, b) => {
+      const ta = new Date(a.startTime || a.timestamp || 0).getTime();
+      const tb = new Date(b.startTime || b.timestamp || 0).getTime();
+      return tb - ta;
+    });
+
+  return userLogs.map((l, idx) => {
+    const mins = Math.max(0, Math.round((l.durationSeconds || 0) / 60));
+    const coins = Number(l.coinsSpent || 0);
+    const when = l.timestamp || (l.startTime ? new Date(l.startTime).toLocaleString() : 'Unknown');
+    const host = l.receiverName || 'Host';
+    const year = new Date(l.startTime || Date.now()).getFullYear();
+    return {
+      id: `stmt_${l.id || idx}`,
+      statementNumber: `CALL-${year}-${String(idx + 1).padStart(4, '0')}`,
+      userId,
+      userName: l.callerName || 'Member',
+      description: `1-on-1 call with ${host} (${mins} min)`,
+      hostName: host,
+      coinsDebited: coins,
+      amountUSD: Number((coins * usdRatio).toFixed(2)),
+      status: coins > 0 ? 'completed' : normalizeCallStatementStatus(l.status),
+      createdAt: when,
+      callLogId: l.id,
+      durationMinutes: mins,
+      source: 'call_log' as const,
+    };
+  });
+}
+
+/** @deprecated Use computeCallSpendingStatements — kept as alias for older imports */
+export function computeTransactionReceipts(
+  userId: string,
+  callLogs: CallLogItem[],
+  coinToUSDRatio: number = DEFAULT_COIN_USD_PEG
+): TransactionReceipt[] {
+  return computeCallSpendingStatements(userId, callLogs, coinToUSDRatio);
+}
+
+/** Male spender view: call debits + reward credits only (never host/TL earnings). */
+const MALE_SPENDER_LEDGER_TYPES = new Set([
+  'CALL_DEBIT',
+  'REWARD_STREAK',
+  'REWARD_MISSION',
+  'REWARD_MASTER_CHEST',
+]);
+
+/**
  * Build wallet ledger entries from authoritative wallet_ledger rows.
- * Falls back to synthetic call_logs reconstruction when ledger is empty.
  */
 export function mapWalletLedgerRows(
   rows: Array<{
@@ -566,18 +630,20 @@ export function mapWalletLedgerRows(
 ): WalletLedgerEntry[] {
   return rows.map((row) => {
     const isDebit = row.transactionType === 'CALL_DEBIT' || Number(row.amount) < 0;
-    const category: WalletLedgerEntry['category'] =
-      row.transactionType === 'HOST_EARN' || row.transactionType === 'TL_EARN'
-        ? 'host_earning'
-        : 'call_spend';
     const title =
       row.transactionType === 'CALL_DEBIT'
         ? `Call billing · minute ${row.billingMinute ?? '?'}`
-        : row.transactionType === 'HOST_EARN'
-        ? `Host earnings · minute ${row.billingMinute ?? '?'}`
-        : row.transactionType === 'TL_EARN'
-        ? `Team leader commission · minute ${row.billingMinute ?? '?'}`
+        : row.transactionType === 'REWARD_STREAK'
+        ? 'Daily streak reward'
+        : row.transactionType === 'REWARD_MISSION'
+        ? 'Daily mission reward'
+        : row.transactionType === 'REWARD_MASTER_CHEST'
+        ? 'Daily master chest reward'
         : 'Wallet entry';
+
+    const category: WalletLedgerEntry['category'] = row.transactionType?.startsWith('REWARD_')
+      ? 'daily_bonus'
+      : 'call_spend';
 
     return {
       id: row.id,
@@ -595,7 +661,9 @@ export function mapWalletLedgerRows(
 }
 
 /**
- * Build wallet ledger entries
+ * Prefer authoritative wallet_ledger API rows.
+ * - Loaded empty → [] (honest empty; no fabricated opening balance).
+ * - API null/unavailable with call history → clearly labeled call-history derivation.
  */
 export function computeWalletLedger(
   user: UserProfile,
@@ -612,44 +680,42 @@ export function computeWalletLedger(
     createdAt?: string;
   }> | null
 ): WalletLedgerEntry[] {
-  if (ledgerRows && ledgerRows.length > 0) {
-    return mapWalletLedgerRows(ledgerRows);
+  if (Array.isArray(ledgerRows)) {
+    const spenderRows = ledgerRows.filter((r) =>
+      MALE_SPENDER_LEDGER_TYPES.has(String(r.transactionType || ''))
+    );
+    if (spenderRows.length > 0) {
+      return mapWalletLedgerRows(spenderRows);
+    }
+    // Authoritative empty ledger — do not invent rows
+    return [];
   }
 
-  const userLogs = callLogs.filter((l) => l.callerId === user.id);
-  const list: WalletLedgerEntry[] = [
-    {
-      id: 'led_init',
-      userId: user.id,
-      type: 'credit',
-      category: 'daily_bonus',
-      title: 'Initial Account Balance',
-      coins: user.coinBalance || 0,
-      balanceAfter: user.coinBalance || 0,
-      timestamp: user.createdAt ? new Date(user.createdAt).toLocaleString() : 'Recent',
-      referenceId: 'balance_initial',
-    },
-  ];
+  // Ledger API not loaded / failed: optional derivation from call logs only (no fake opening credit)
+  const userLogs = callLogs.filter((l) => l.callerId === user.id && (l.coinsSpent || 0) > 0);
+  if (userLogs.length === 0) return [];
 
-  let currentBal = user.coinBalance || 0;
-  userLogs.forEach((l) => {
-    currentBal = Math.max(0, currentBal - (l.coinsSpent || 0));
-    list.push({
-      id: `led_${l.id}`,
+  return userLogs
+    .slice()
+    .sort((a, b) => {
+      const ta = new Date(a.startTime || a.timestamp || 0).getTime();
+      const tb = new Date(b.startTime || b.timestamp || 0).getTime();
+      return tb - ta;
+    })
+    .map((l) => ({
+      id: `derived_${l.id}`,
       userId: user.id,
-      type: 'debit',
-      category: 'call_spend',
-      title: `Call with ${l.receiverName || 'Host'}`,
+      type: 'debit' as const,
+      category: 'call_spend' as const,
+      title: `Derived from call history · ${l.receiverName || 'Host'}`,
+      description: 'Estimated from call log (wallet ledger unavailable)',
       coins: -(l.coinsSpent || 0),
-      balanceAfter: currentBal,
+      balanceAfter: 0,
       counterpartName: l.receiverName,
       counterpartAvatar: l.receiverAvatar,
-      timestamp: l.timestamp || 'Recent',
+      timestamp: l.timestamp || (l.startTime ? new Date(l.startTime).toLocaleString() : 'Recent'),
       referenceId: l.id,
-    });
-  });
-
-  return list.reverse();
+    }));
 }
 
 /**

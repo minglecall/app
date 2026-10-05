@@ -31,9 +31,12 @@ export const AdminHomeCMS: React.FC = () => {
     homeQuickLinks,
     saveHomeQuickLink,
     deleteHomeQuickLink,
+    seedHomeCmsDefaults,
   } = useApp();
 
   const [cmsSection, setCmsSection] = useState<'banners' | 'policies' | 'shortcuts'>('banners');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isSeeding, setIsSeeding] = useState(false);
 
   // Edit / Add Banner State
   const [editingBanner, setEditingBanner] = useState<Partial<HomeBanner> | null>(null);
@@ -47,7 +50,7 @@ export const AdminHomeCMS: React.FC = () => {
   const [editingShortcut, setEditingShortcut] = useState<Partial<HomeQuickLink> | null>(null);
   const [isShortcutModalOpen, setIsShortcutModalOpen] = useState(false);
 
-  // Preset Unsplash Dating/Social Images for Quick Pick
+  // Preset Unsplash Dating/Social Images for Quick Pick (URL is stored in DB like any imageUrl)
   const PRESET_BANNER_IMAGES = [
     {
       label: 'Live Video Match Duo',
@@ -71,28 +74,59 @@ export const AdminHomeCMS: React.FC = () => {
     },
   ];
 
-  const handleSaveBanner = (e: React.FormEvent) => {
+  const handleSaveBanner = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingBanner) return;
-    saveHomeBanner(editingBanner);
-    setIsBannerModalOpen(false);
-    setEditingBanner(null);
+    if (!editingBanner || isSaving) return;
+    setIsSaving(true);
+    try {
+      const result = await saveHomeBanner(editingBanner);
+      if (result.success) {
+        setIsBannerModalOpen(false);
+        setEditingBanner(null);
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleSavePolicy = (e: React.FormEvent) => {
+  const handleSavePolicy = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingPolicy) return;
-    savePolicyDocument(editingPolicy);
-    setIsPolicyModalOpen(false);
-    setEditingPolicy(null);
+    if (!editingPolicy || isSaving) return;
+    setIsSaving(true);
+    try {
+      const result = await savePolicyDocument(editingPolicy);
+      if (result.success) {
+        setIsPolicyModalOpen(false);
+        setEditingPolicy(null);
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleSaveShortcut = (e: React.FormEvent) => {
+  const handleSaveShortcut = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingShortcut) return;
-    saveHomeQuickLink(editingShortcut);
-    setIsShortcutModalOpen(false);
-    setEditingShortcut(null);
+    if (!editingShortcut || isSaving) return;
+    setIsSaving(true);
+    try {
+      const result = await saveHomeQuickLink(editingShortcut);
+      if (result.success) {
+        setIsShortcutModalOpen(false);
+        setEditingShortcut(null);
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSeedDefaults = async () => {
+    if (isSeeding) return;
+    setIsSeeding(true);
+    try {
+      await seedHomeCmsDefaults();
+    } finally {
+      setIsSeeding(false);
+    }
   };
 
   return (
@@ -108,11 +142,22 @@ export const AdminHomeCMS: React.FC = () => {
             <span>Home Page CMS & Policy Manager</span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Add, update, or reorganize hero banners, platform policy documents, and quick shortcuts displayed on the Home screen.
+            Content is stored in Supabase. Changes require admin auth and show real success/failure.
           </p>
         </div>
 
-        <div className="flex bg-[#0B0D13] p-1 rounded-xl border border-slate-800 text-xs font-bold space-x-1 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleSeedDefaults}
+            disabled={isSeeding || isSaving}
+            className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center space-x-1.5 border border-slate-700 disabled:opacity-50"
+            title="Write honest starter banners/policies/links into the database"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+            <span>{isSeeding ? 'Seeding…' : 'Load starter content'}</span>
+          </button>
+          <div className="flex bg-[#0B0D13] p-1 rounded-xl border border-slate-800 text-xs font-bold space-x-1">
           <button
             onClick={() => setCmsSection('banners')}
             className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
@@ -149,6 +194,7 @@ export const AdminHomeCMS: React.FC = () => {
             <Zap className="w-3.5 h-3.5" />
             <span>Quick Shortcuts ({homeQuickLinks.length})</span>
           </button>
+          </div>
         </div>
       </div>
 
@@ -184,6 +230,11 @@ export const AdminHomeCMS: React.FC = () => {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {homeBanners.length === 0 && (
+              <div className="md:col-span-2 p-6 rounded-2xl border border-dashed border-slate-700 bg-slate-950/50 text-center text-xs text-slate-400">
+                No banners in the database yet. Add one, or click <strong className="text-white">Load starter content</strong>.
+              </div>
+            )}
             {homeBanners.map((banner) => (
               <div
                 key={banner.id}
@@ -228,7 +279,7 @@ export const AdminHomeCMS: React.FC = () => {
                   {/* Actions */}
                   <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
                     <button
-                      onClick={() => toggleBannerActive(banner.id)}
+                      onClick={() => void toggleBannerActive(banner.id)}
                       className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
                         banner.active ? 'bg-amber-500/10 text-amber-300 hover:bg-amber-500/20' : 'bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
                       }`}
@@ -248,7 +299,7 @@ export const AdminHomeCMS: React.FC = () => {
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => deleteHomeBanner(banner.id)}
+                        onClick={() => void deleteHomeBanner(banner.id)}
                         className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 transition-colors"
                         title="Delete banner"
                       >
@@ -334,7 +385,7 @@ export const AdminHomeCMS: React.FC = () => {
                   </button>
 
                   <button
-                    onClick={() => deletePolicyDocument(doc.id)}
+                    onClick={() => void deletePolicyDocument(doc.id)}
                     className="p-1.5 rounded-xl bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 transition-colors"
                     title="Delete policy"
                   >
@@ -412,7 +463,7 @@ export const AdminHomeCMS: React.FC = () => {
                     <Edit2 className="w-3.5 h-3.5" />
                   </button>
                   <button
-                    onClick={() => deleteHomeQuickLink(link.id)}
+                    onClick={() => void deleteHomeQuickLink(link.id)}
                     className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -490,6 +541,17 @@ export const AdminHomeCMS: React.FC = () => {
               </div>
 
               <div>
+                <label className="block text-slate-300 font-bold mb-1">Tag Color Classes</label>
+                <input
+                  type="text"
+                  value={editingBanner.tagColor || 'bg-rose-500 text-white'}
+                  onChange={(e) => setEditingBanner({ ...editingBanner, tagColor: e.target.value })}
+                  placeholder="e.g. bg-rose-500 text-white"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-medium focus:border-pink-500 focus:outline-none font-mono text-xs"
+                />
+              </div>
+
+              <div>
                 <label className="block text-slate-300 font-bold mb-2">Banner Image</label>
                 <UnifiedImageUploader
                   currentImageUrl={editingBanner.imageUrl || ''}
@@ -530,7 +592,7 @@ export const AdminHomeCMS: React.FC = () => {
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-pink-500 focus:outline-none"
                   >
                     <option value="tab">Navigate to Tab</option>
-                    <option value="modal">Open Modal (match, vip, store)</option>
+                    <option value="modal">Open Modal (match, store)</option>
                     <option value="policy">Open Policy Doc</option>
                     <option value="external">External Link</option>
                   </select>
@@ -542,7 +604,7 @@ export const AdminHomeCMS: React.FC = () => {
                     type="text"
                     value={editingBanner.actionTarget || 'discovery'}
                     onChange={(e) => setEditingBanner({ ...editingBanner, actionTarget: e.target.value })}
-                    placeholder="e.g. discovery, match, vip, store, policy_safety"
+                    placeholder="e.g. discovery, match, store, policy_safety"
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-pink-500 focus:outline-none"
                   />
                 </div>
@@ -571,9 +633,10 @@ export const AdminHomeCMS: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-black shadow-lg"
+                  disabled={isSaving}
+                  className="px-5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-black shadow-lg disabled:opacity-50"
                 >
-                  Save Banner
+                  {isSaving ? 'Saving…' : 'Save Banner'}
                 </button>
               </div>
             </form>
@@ -687,9 +750,10 @@ export const AdminHomeCMS: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-black shadow-lg"
+                  disabled={isSaving}
+                  className="px-5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-black shadow-lg disabled:opacity-50"
                 >
-                  Save Policy
+                  {isSaving ? 'Saving…' : 'Save Policy'}
                 </button>
               </div>
             </form>
@@ -755,7 +819,7 @@ export const AdminHomeCMS: React.FC = () => {
                     type="text"
                     value={editingShortcut.actionTarget || 'discovery'}
                     onChange={(e) => setEditingShortcut({ ...editingShortcut, actionTarget: e.target.value })}
-                    placeholder="e.g. discovery, match, vip, store"
+                    placeholder="e.g. discovery, match, store"
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-pink-500 focus:outline-none"
                   />
                 </div>
@@ -771,9 +835,10 @@ export const AdminHomeCMS: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-black shadow-lg"
+                  disabled={isSaving}
+                  className="px-5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-black shadow-lg disabled:opacity-50"
                 >
-                  Save Shortcut
+                  {isSaving ? 'Saving…' : 'Save Shortcut'}
                 </button>
               </div>
             </form>

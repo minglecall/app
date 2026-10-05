@@ -6,6 +6,19 @@ import { VIRTUAL_GIFTS } from '../src/constants/appDefaults';
 
 dotenv.config();
 
+const AUTH_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const DEFAULT_R2_PURGE_PREFIXES = [
+  'uploads/avatar/',
+  'uploads/gallery/',
+  'uploads/chat_media/',
+  'uploads/moment/',
+  'uploads/verification/',
+  'uploads/intro_video/',
+  'uploads/media/',
+];
+
 let supabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
 let supabaseServiceKey = (
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -154,6 +167,104 @@ export function ensureValidUuid(id: string): string {
   });
 }
 
+function isWritableAuthUuid(id: unknown): id is string {
+  if (typeof id !== 'string' || !AUTH_UUID_RE.test(id)) return false;
+  return !id.startsWith('user_') && !id.startsWith('admin_');
+}
+
+/**
+ * Resolve a candidate auth_id for writes. Prefer explicit authId/auth_id, else profile id.
+ * Does not verify auth.users — callers should verify or rely on FK omit/retry.
+ */
+export function resolveAuthIdCandidate(profile: {
+  id?: string;
+  authId?: string | null;
+  auth_id?: string | null;
+}): string | undefined {
+  if (isWritableAuthUuid(profile.authId)) return profile.authId;
+  if (isWritableAuthUuid(profile.auth_id)) return profile.auth_id;
+  if (isWritableAuthUuid(profile.id)) return profile.id;
+  return undefined;
+}
+
+/** Confirm candidate exists in auth.users before writing (FK-safe). */
+async function authUserExistsAdmin(
+  client: SupabaseClient,
+  authUserId: string
+): Promise<boolean> {
+  try {
+    const { data, error } = await client.auth.admin.getUserById(authUserId);
+    return !error && Boolean(data?.user?.id);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Link profiles.auth_id to a real auth.users id (by profile id and/or email).
+ * Does not rewrite profiles.id. Safe no-op if auth user missing.
+ */
+export async function linkProfileAuthIdAdmin(opts: {
+  authUserId: string;
+  profileId?: string | null;
+  email?: string | null;
+}): Promise<{ success: boolean; linked: boolean; error?: string }> {
+  const client = getSupabaseAdmin();
+  if (!client) {
+    return { success: false, linked: false, error: 'Supabase not configured' };
+  }
+
+  const authUserId = String(opts.authUserId || '').trim();
+  if (!isWritableAuthUuid(authUserId)) {
+    return { success: false, linked: false, error: 'Invalid auth user id' };
+  }
+
+  const exists = await authUserExistsAdmin(client, authUserId);
+  if (!exists) {
+    return { success: false, linked: false, error: 'Auth user does not exist' };
+  }
+
+  const payload = {
+    auth_id: authUserId,
+    updated_at: new Date().toISOString(),
+  };
+  const profileId = opts.profileId ? String(opts.profileId).trim() : '';
+  const cleanEmail = opts.email ? String(opts.email).toLowerCase().trim() : '';
+
+  try {
+    if (profileId) {
+      const { data, error } = await client
+        .from('profiles')
+        .update(payload as any)
+        .eq('id', profileId)
+        .select('id')
+        .maybeSingle();
+      if (!error && data?.id) {
+        return { success: true, linked: true };
+      }
+    }
+
+    if (cleanEmail) {
+      const { data, error } = await client
+        .from('profiles')
+        .update(payload as any)
+        .ilike('email', cleanEmail)
+        .select('id')
+        .maybeSingle();
+      if (!error && data?.id) {
+        return { success: true, linked: true };
+      }
+      if (error) {
+        return { success: false, linked: false, error: error.message };
+      }
+    }
+
+    return { success: true, linked: false, error: 'No matching profile to link' };
+  } catch (err: any) {
+    return { success: false, linked: false, error: err?.message || 'link failed' };
+  }
+}
+
 /**
  * Server-side profile upsert that bypasses RLS using Service Role Key or direct server client
  * Automatically hashes any plain-text password with bcrypt and ensures raw passwords are NEVER stored.
@@ -184,12 +295,13 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
     }
 
     // Check if a profile with this email already exists in Supabase to reuse its ID & preserve existing password_hash
+    let existingAuthId: string | null = null;
     if (profile.email) {
       const cleanEmail = String(profile.email).toLowerCase().trim();
       try {
         const { data: existingUser } = await client
           .from('profiles')
-          .select('id, password_hash, has_password_set')
+          .select('id, password_hash, has_password_set, auth_id')
           .eq('email', cleanEmail)
           .limit(1)
           .maybeSingle();
@@ -197,6 +309,7 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
         if (existingUser && existingUser.id) {
           console.log(`[Supabase Admin] Reusing existing profile ID ${existingUser.id} for email ${cleanEmail}`);
           validId = existingUser.id;
+          existingAuthId = existingUser.auth_id || null;
           if (!passwordHash && existingUser.password_hash) {
             passwordHash = existingUser.password_hash;
             hasPassword = true;
@@ -207,10 +320,35 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
       }
     }
 
+    if (!existingAuthId && validId) {
+      try {
+        const { data: byId } = await client
+          .from('profiles')
+          .select('auth_id')
+          .eq('id', validId)
+          .maybeSingle();
+        if (byId?.auth_id) existingAuthId = byId.auth_id;
+      } catch {
+        // continue
+      }
+    }
+
+    // Prefer explicit / candidate auth_id only when it exists in auth.users.
+    // NEVER write auth_id: null — omit so upsert preserves existing linkage.
+    let authIdForDb: string | undefined;
+    const candidate = resolveAuthIdCandidate({ ...profile, id: validId });
+    if (candidate) {
+      if (await authUserExistsAdmin(client, candidate)) {
+        authIdForDb = candidate;
+      } else if (existingAuthId && isWritableAuthUuid(existingAuthId)) {
+        // Incoming candidate invalid; keep existing DB value by omitting (or re-assert existing)
+        authIdForDb = undefined;
+      }
+    }
+
     // Core standardized profile record (Raw password completely stripped!)
     const payload: Record<string, any> = {
       id: validId,
-      auth_id: (profile.authId && profile.authId !== validId && profile.authId !== profile.id && !String(profile.authId).startsWith('user_')) ? profile.authId : null,
       name: profile.name || 'New Member',
       email: profile.email || null,
       phone: profile.phone || null,
@@ -256,6 +394,9 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
       team_leader_note: profile.teamLeaderNote || profile.team_leader_note || null,
       has_password_set: hasPassword,
     };
+    if (authIdForDb) {
+      payload.auth_id = authIdForDb;
+    }
     // Only write password_hash when explicitly provided — never null-out an existing hash
     if (passwordHash) {
       payload.password_hash = passwordHash;
@@ -302,6 +443,10 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
 
             if (existingUser && existingUser.id) {
               currentPayload.id = existingUser.id;
+              // Never clobber auth_id with null on email-recovery update
+              if (currentPayload.auth_id == null) {
+                delete currentPayload.auth_id;
+              }
               const updateRes = await client
                 .from('profiles')
                 .update(currentPayload)
@@ -330,7 +475,8 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
         error.message.includes('auth_id_fkey') ||
         error.message.includes('profiles_auth_id_fkey')
       ) {
-        console.log('[Supabase Admin] Pruning invalid auth_id to resolve foreign key constraint and retrying...');
+        console.log('[Supabase Admin] Omitting invalid auth_id to resolve foreign key constraint and retrying...');
+        // Omit field — do NOT set null (would clear a valid existing auth_id)
         delete currentPayload.auth_id;
         maxRetries--;
         continue;
@@ -366,6 +512,9 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
           avatar_url: payload.avatar_url,
           online_status: payload.online_status,
         };
+        if (payload.auth_id) {
+          currentPayload.auth_id = payload.auth_id;
+        }
         maxRetries = 1;
         continue;
       }
@@ -462,26 +611,19 @@ export function isProfileBanned(profile: any): { isBanned: boolean; message?: st
 }
 
 /**
- * Delete profile from Supabase server-side (DB and Auth)
+ * Delete profile from Supabase server-side (DB, Auth, R2 media).
+ * Prefer hardDeleteUserCompletely for structured results; this wrapper remains for callers.
  */
 export async function deleteProfileAdmin(userId: string): Promise<{ success: boolean; error?: string }> {
-  const client = getSupabaseAdmin();
-  if (!client) {
-    return { success: false, error: 'Supabase not configured' };
-  }
-
   try {
-    const { error } = await client.from('profiles').delete().eq('id', userId);
-    if (error) {
-      console.warn('[Supabase Admin] Error deleting profile from DB:', error.message);
+    const { hardDeleteUserCompletely } = await import('./userHardDelete');
+    const result = await hardDeleteUserCompletely(userId);
+    if (!result.success) {
+      return { success: false, error: result.error || result.warnings.join('; ') || 'Hard delete failed' };
     }
-
-    // Delete user from Supabase Auth if valid UUID
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    if (uuidRegex.test(userId)) {
-      client.auth.admin.deleteUser(userId).catch(() => {});
+    if (result.warnings.length) {
+      console.warn('[Supabase Admin] Hard delete warnings:', result.warnings);
     }
-
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -491,13 +633,15 @@ export async function deleteProfileAdmin(userId: string): Promise<{ success: boo
 /**
  * Update or create user password in Supabase Auth & profiles table server-side
  * Hashes password using bcrypt before persisting.
+ * Always links profiles.auth_id to the Auth user id when Auth create/update succeeds.
+ * Always passes role + gender in Auth user_metadata (TL/agency_manager → gender female).
  */
 export async function updateUserPasswordAdmin(
   userId: string,
   newPassword: string,
   email?: string,
   meta?: { role?: string; gender?: string; name?: string }
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; authUserId?: string; error?: string }> {
   const client = getSupabaseAdmin();
   if (!client) {
     return { success: false, error: 'Supabase not configured' };
@@ -529,17 +673,26 @@ export async function updateUserPasswordAdmin(
     }
 
     // 2. Also sync to Supabase Auth so native Supabase tokens and client sessions work
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     let authUpdated = false;
-    const userMetadata: Record<string, any> = { id: userId };
-    if (meta?.role) userMetadata.role = meta.role;
-    if (meta?.gender) userMetadata.gender = meta.gender;
+    let resolvedAuthUserId: string | undefined;
+
+    const metaRole = String(meta?.role || '').trim() || 'male_user';
+    const isTeamLeaderRole = metaRole === 'team_leader' || metaRole === 'agency_manager';
+    const metaGender = isTeamLeaderRole
+      ? 'female'
+      : String(meta?.gender || '').trim() || 'male';
+
+    const userMetadata: Record<string, any> = {
+      id: userId,
+      role: metaRole,
+      gender: metaGender,
+    };
     if (meta?.name) {
       userMetadata.name = meta.name;
       userMetadata.full_name = meta.name;
     }
 
-    if (userId && uuidRegex.test(userId)) {
+    if (userId && AUTH_UUID_RE.test(userId)) {
       try {
         const { data, error } = await client.auth.admin.updateUserById(userId, {
           password: newPassword,
@@ -548,6 +701,7 @@ export async function updateUserPasswordAdmin(
         });
         if (!error && data?.user) {
           authUpdated = true;
+          resolvedAuthUserId = data.user.id;
           console.log(`[Supabase Admin] Updated password & confirmed email for auth user ID ${userId}`);
         }
       } catch (e: any) {
@@ -572,6 +726,7 @@ export async function updateUserPasswordAdmin(
             });
             if (!updErr) {
               authUpdated = true;
+              resolvedAuthUserId = matched.id;
               console.log(`[Supabase Admin] Updated password & confirmed email for auth user matching email ${cleanEmail}`);
             }
           } else {
@@ -584,6 +739,7 @@ export async function updateUserPasswordAdmin(
             });
             if (!createErr && createdAuth?.user) {
               authUpdated = true;
+              resolvedAuthUserId = createdAuth.user.id;
               console.log(`[Supabase Admin] Created auth record in Supabase Auth for email ${cleanEmail}`);
             } else if (createErr) {
               console.warn(`[Supabase Admin] Create auth user notice:`, createErr.message);
@@ -595,10 +751,218 @@ export async function updateUserPasswordAdmin(
       }
     }
 
-    return { success: true };
+    // 3. Always link profiles.auth_id after Auth create/update (id may differ from auth user id for TL hosts)
+    if (resolvedAuthUserId) {
+      const linkRes = await linkProfileAuthIdAdmin({
+        authUserId: resolvedAuthUserId,
+        profileId: userId || undefined,
+        email: cleanEmail || undefined,
+      });
+      if (linkRes.linked) {
+        console.log(
+          `[Supabase Admin] Linked profiles.auth_id=${resolvedAuthUserId} (profileId=${userId || 'n/a'}, email=${cleanEmail || 'n/a'})`
+        );
+      } else if (linkRes.error) {
+        console.warn(`[Supabase Admin] auth_id link notice:`, linkRes.error);
+      }
+    }
+
+    // 4. Re-assert privileged role/gender on the linked profile (Auth trigger must not leave male_user)
+    if (isTeamLeaderRole || metaRole === 'admin') {
+      const assertPayload: Record<string, any> = {
+        role: metaRole,
+        updated_at: new Date().toISOString(),
+      };
+      if (isTeamLeaderRole) {
+        assertPayload.gender = 'female';
+        assertPayload.gender_locked = true;
+      } else if (meta?.gender) {
+        assertPayload.gender = metaGender;
+      }
+      try {
+        if (userId) {
+          await client.from('profiles').update(assertPayload as any).eq('id', userId);
+        }
+        if (cleanEmail) {
+          await client.from('profiles').update(assertPayload as any).ilike('email', cleanEmail);
+        }
+        if (resolvedAuthUserId) {
+          await client.from('profiles').update(assertPayload as any).eq('auth_id', resolvedAuthUserId);
+        }
+      } catch (e: any) {
+        console.warn('[Supabase Admin] privileged role re-assert notice:', e?.message || e);
+      }
+    }
+
+    return { success: true, authUserId: resolvedAuthUserId };
   } catch (err: any) {
     console.error('[Supabase Admin] updateUserPasswordAdmin exception:', err);
     return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Confirm an Auth user's email after custom OTP verification so password
+ * sign-in works when Supabase "Confirm email" is enabled.
+ */
+export async function confirmUserEmailAdmin(
+  email: string,
+  userId?: string
+): Promise<{ success: boolean; error?: string }> {
+  const client = getSupabaseAdmin();
+  if (!client) {
+    return { success: false, error: 'Supabase not configured' };
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  try {
+    if (userId && uuidRegex.test(userId)) {
+      const { error } = await client.auth.admin.updateUserById(userId, {
+        email_confirm: true,
+      });
+      if (!error) {
+        return { success: true };
+      }
+      console.warn('[Supabase Admin] confirmUserEmailAdmin by id notice:', error.message);
+    }
+
+    if (!cleanEmail) {
+      return { success: false, error: 'Email is required to confirm account' };
+    }
+
+    const { data: userList, error: listErr } = await client.auth.admin.listUsers({
+      perPage: 1000,
+    });
+    if (listErr || !userList?.users) {
+      return { success: false, error: listErr?.message || 'Could not look up auth user' };
+    }
+
+    const matched = (userList.users as any[]).find(
+      (u: any) => u.email?.toLowerCase().trim() === cleanEmail
+    );
+    if (!matched) {
+      return { success: false, error: 'No auth user found for this email' };
+    }
+
+    const { error: updErr } = await client.auth.admin.updateUserById(matched.id, {
+      email_confirm: true,
+    });
+    if (updErr) {
+      return { success: false, error: updErr.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.error('[Supabase Admin] confirmUserEmailAdmin exception:', err);
+    return { success: false, error: err?.message || 'Failed to confirm email' };
+  }
+}
+
+/**
+ * One-shot / admin utility: backfill profiles.auth_id from auth.users by email
+ * where auth_id IS NULL. Does not delete or recreate users.
+ */
+export async function backfillMissingAuthIdsAdmin(): Promise<{
+  success: boolean;
+  linked: number;
+  skipped: Array<{ id: string; email: string; reason: string }>;
+  error?: string;
+}> {
+  const client = getSupabaseAdmin();
+  if (!client) {
+    return { success: false, linked: 0, skipped: [], error: 'Supabase not configured' };
+  }
+
+  const skipped: Array<{ id: string; email: string; reason: string }> = [];
+  let linked = 0;
+
+  try {
+    const { data: nullAuthRows, error: listErr } = await client
+      .from('profiles')
+      .select('id, email, auth_id')
+      .is('auth_id', null)
+      .not('email', 'is', null);
+
+    if (listErr) {
+      return { success: false, linked: 0, skipped: [], error: listErr.message };
+    }
+
+    const rows = (nullAuthRows || []).filter(
+      (r: any) => r.email && String(r.email).trim().length > 0
+    ) as Array<{ id: string; email: string }>;
+
+    if (rows.length === 0) {
+      return { success: true, linked: 0, skipped: [] };
+    }
+
+    // Build email → auth user id map (paginated listUsers)
+    const emailToAuthId = new Map<string, string[]>();
+    let page = 1;
+    const perPage = 1000;
+    for (;;) {
+      const { data: userList, error: authListErr } = await client.auth.admin.listUsers({
+        page,
+        perPage,
+      });
+      if (authListErr) {
+        return {
+          success: false,
+          linked,
+          skipped,
+          error: authListErr.message,
+        };
+      }
+      const users = userList?.users || [];
+      for (const u of users) {
+        const em = u.email?.toLowerCase().trim();
+        if (!em) continue;
+        const list = emailToAuthId.get(em) || [];
+        list.push(u.id);
+        emailToAuthId.set(em, list);
+      }
+      if (users.length < perPage) break;
+      page += 1;
+      if (page > 50) break; // safety cap
+    }
+
+    for (const row of rows) {
+      const email = String(row.email).toLowerCase().trim();
+      const matches = emailToAuthId.get(email) || [];
+      if (matches.length === 0) {
+        skipped.push({ id: row.id, email, reason: 'no_auth_user' });
+        continue;
+      }
+      if (matches.length > 1) {
+        skipped.push({ id: row.id, email, reason: 'ambiguous_multiple_auth_users' });
+        continue;
+      }
+      const authUserId = matches[0];
+      const { error: updErr } = await client
+        .from('profiles')
+        .update({
+          auth_id: authUserId,
+          updated_at: new Date().toISOString(),
+        } as any)
+        .eq('id', row.id)
+        .is('auth_id', null);
+
+      if (updErr) {
+        skipped.push({ id: row.id, email, reason: updErr.message });
+        continue;
+      }
+      linked += 1;
+      console.log(`[Supabase Admin] Backfilled auth_id=${authUserId} for profile ${row.id} (${email})`);
+    }
+
+    return { success: true, linked, skipped };
+  } catch (err: any) {
+    return {
+      success: false,
+      linked,
+      skipped,
+      error: err?.message || 'backfill failed',
+    };
   }
 }
 
@@ -632,36 +996,75 @@ export async function authenticateUserWithPasswordAdmin(
       return { success: false, error: 'Invalid email or password. Please check your credentials.' };
     }
 
-    const { data: profile } = await client
-      .from('profiles')
-      .select('*')
-      .eq('email', cleanEmail)
-      .limit(1)
-      .maybeSingle();
-
-    if (profile) {
-      const banCheck = isProfileBanned(profile);
-      if (banCheck.isBanned) {
-        return { success: false, error: banCheck.message };
-      }
+    // Prefer email, then auth_id / id — never invent a profile when Auth has no row
+    let profile: any = null;
+    {
+      const { data: byEmail } = await client
+        .from('profiles')
+        .select('*')
+        .ilike('email', cleanEmail)
+        .limit(1)
+        .maybeSingle();
+      profile = byEmail;
+    }
+    if (!profile) {
+      const { data: byAuth } = await client
+        .from('profiles')
+        .select('*')
+        .eq('auth_id', authData.user.id)
+        .limit(1)
+        .maybeSingle();
+      profile = byAuth;
+    }
+    if (!profile) {
+      const { data: byId } = await client
+        .from('profiles')
+        .select('*')
+        .eq('id', authData.user.id)
+        .limit(1)
+        .maybeSingle();
+      profile = byId;
     }
 
-    const sanitized = profile
-      ? { ...profile }
-      : {
-          id: authData.user.id,
-          name: authData.user.user_metadata?.full_name || 'Member',
-          email: cleanEmail,
-          role: 'male_user',
-          isOnboarded: true,
-          onlineStatus: 'online',
-        };
+    if (!profile) {
+      // Sign out the service-side session created by signInWithPassword
+      try {
+        await client.auth.signOut();
+      } catch {
+        /* ignore */
+      }
+      return {
+        success: false,
+        error: 'Account not found or was deleted. Please register again.',
+      };
+    }
+
+    const banCheck = isProfileBanned(profile);
+    if (banCheck.isBanned) {
+      try {
+        await client.auth.signOut();
+      } catch {
+        /* ignore */
+      }
+      return { success: false, error: banCheck.message };
+    }
+
+    const sanitized = { ...profile };
     delete (sanitized as any).password;
     delete (sanitized as any).password_hash;
     sanitized.hasPasswordSet = true;
     if (authData.user.id) {
       sanitized.auth_id = authData.user.id;
       sanitized.authId = authData.user.id;
+      if (!profile.auth_id) {
+        linkProfileAuthIdAdmin({
+          authUserId: authData.user.id,
+          profileId: profile.id,
+          email: cleanEmail,
+        }).catch((e) =>
+          console.warn('[Supabase Admin] login auth_id link notice:', e?.message || e)
+        );
+      }
     }
 
     return { success: true, user: sanitized, session: authData.session };
@@ -677,7 +1080,8 @@ export async function authenticateUserWithPasswordAdmin(
  */
 export async function updateUserStatusAdmin(
   userId: string,
-  status: string
+  status: string,
+  options?: { touchLastSeen?: boolean }
 ): Promise<{ success: boolean; error?: string }> {
   const client = getSupabaseAdmin();
   if (!client) {
@@ -689,10 +1093,13 @@ export async function updateUserStatusAdmin(
   }
 
   try {
-    const payload = {
+    const payload: Record<string, any> = {
       online_status: status,
       updated_at: new Date().toISOString(),
     };
+    if (options?.touchLastSeen !== false) {
+      payload.last_seen_at = new Date().toISOString();
+    }
 
     const { error: byIdError } = await client
       .from('profiles')
@@ -717,6 +1124,25 @@ export async function updateUserStatusAdmin(
   } catch (err: any) {
     console.warn('[Supabase Admin] updateUserStatusAdmin exception:', err);
     return { success: false, error: err.message };
+  }
+}
+
+/** Throttled last-seen touch without changing online_status. */
+export async function touchLastSeenAdmin(userId: string): Promise<{ success: boolean; error?: string }> {
+  const client = getSupabaseAdmin();
+  if (!client || !userId) {
+    return { success: false, error: 'Supabase not configured' };
+  }
+  try {
+    const payload = { last_seen_at: new Date().toISOString() };
+    const { error: byIdError } = await client.from('profiles').update(payload as any).eq('id', userId);
+    const { error: byAuthError } = await client.from('profiles').update(payload as any).eq('auth_id', userId);
+    if (byIdError && byAuthError) {
+      return { success: false, error: byIdError.message || byAuthError.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'touch failed' };
   }
 }
 
@@ -768,6 +1194,7 @@ export async function granularResetSupabaseAdmin(options: {
   favorites?: boolean;
   blockedUsers?: boolean;
   creatorAnalytics?: boolean;
+  creatorReviews?: boolean;
   dailyRewardsAndQuests?: boolean;
   taxonomiesAndFlags?: boolean;
   creatorGoals?: boolean;
@@ -777,12 +1204,13 @@ export async function granularResetSupabaseAdmin(options: {
   systemSettings?: boolean;
   coinPackages?: boolean;
   virtualGiftsCatalog?: boolean;
+  /** Explicit wallet_ledger wipe; also implied by callLogs / balance reset / clearAllUsers. */
+  walletLedger?: boolean;
   resetBalances?: {
     callerCoins?: boolean;
     creatorEarnings?: boolean;
-    vipTiers?: boolean;
   };
-}): Promise<{ success: boolean; clearedTables: string[]; error?: string }> {
+}): Promise<{ success: boolean; clearedTables: string[]; error?: string; warnings?: string[] }> {
   const client = getSupabaseAdmin();
   if (!client) {
     return { success: false, clearedTables: [], error: 'Supabase service role admin is not configured.' };
@@ -798,6 +1226,7 @@ export async function granularResetSupabaseAdmin(options: {
 
   const clearedTables: string[] = [];
   const failedOps: string[] = [];
+  const warnings: string[] = [];
 
   try {
     const recordDelete = (table: string, error: { message: string } | null | undefined) => {
@@ -809,14 +1238,19 @@ export async function granularResetSupabaseAdmin(options: {
       console.warn(`[Supabase Admin Reset] ${table} purge warning:`, error.message);
     };
 
+    const purgeWalletLedger =
+      Boolean(options.walletLedger) ||
+      Boolean(options.callLogs) ||
+      Boolean(options.clearAllUsers) ||
+      Boolean(options.resetBalances?.callerCoins) ||
+      Boolean(options.resetBalances?.creatorEarnings);
+
     // Optional: purge Cloudflare R2 uploads before DB deletion
     if (options.purgeR2MediaStorage) {
       clearLocalMediaCache();
       const purgeRes = await purgeR2MediaUploads({
         purgeAllUploads: Boolean(options.purgeAllR2Uploads),
-        prefixes: Boolean(options.purgeAllR2Uploads)
-          ? undefined
-          : ['uploads/avatar/', 'uploads/gallery/', 'uploads/chat_media/', 'uploads/moment/', 'uploads/verification/'],
+        prefixes: Boolean(options.purgeAllR2Uploads) ? undefined : DEFAULT_R2_PURGE_PREFIXES,
       });
       clearedTables.push(`r2_media_uploads (${purgeRes.deletedCount} objects)`);
     }
@@ -854,44 +1288,54 @@ export async function granularResetSupabaseAdmin(options: {
     const deleteAllRows = (table: string, notNullColumn: string) =>
       (client.from(table) as any).delete().not(notNullColumn, 'is', null);
 
-    // 1. Delete Messages Table
-    if (options.chatMessages) {
+    // 1. Delete Messages + conversation clears
+    if (options.chatMessages || options.clearAllUsers) {
       const { error } = await deleteAllRows('messages', 'id');
       recordDelete('messages', error);
+      const { error: clearsErr } = await deleteAllRows('message_conversation_clears', 'user_id');
+      recordDelete('message_conversation_clears', clearsErr);
+    }
+
+    // 1b. Wallet ledger (before call_logs / profiles)
+    if (purgeWalletLedger) {
+      const { error } = await deleteAllRows('wallet_ledger', 'id');
+      recordDelete('wallet_ledger', error);
     }
 
     // 2. Delete Call Logs Table
-    if (options.callLogs) {
+    if (options.callLogs || options.clearAllUsers) {
       const { error } = await deleteAllRows('call_logs', 'id');
       recordDelete('call_logs', error);
     }
 
     // 3. Delete Matches Table
-    if (options.callLogs || options.chatMessages) {
+    if (options.callLogs || options.chatMessages || options.clearAllUsers) {
       const { error } = await deleteAllRows('matches', 'id');
       recordDelete('matches', error);
     }
 
     // 4. Delete Friend Requests Table
-    if (options.friendRequests) {
+    if (options.friendRequests || options.clearAllUsers) {
       const { error } = await deleteAllRows('friend_requests', 'id');
       recordDelete('friend_requests', error);
     }
 
     // 5. Delete Payout Requests Table
-    if (options.payoutRequests) {
+    if (options.payoutRequests || options.clearAllUsers) {
       const { error } = await deleteAllRows('payout_requests', 'id');
       recordDelete('payout_requests', error);
     }
 
     // 6. Delete Moderation Reports Table
-    if (options.moderationReports) {
+    if (options.moderationReports || options.clearAllUsers) {
       const { error } = await deleteAllRows('moderation_reports', 'id');
       recordDelete('moderation_reports', error);
     }
 
     // 7. Delete Feed Posts Table
-    if (options.feedPosts) {
+    if (options.feedPosts || options.clearAllUsers) {
+      const { error: likesErr } = await deleteAllRows('feed_post_likes', 'post_id');
+      recordDelete('feed_post_likes', likesErr);
       const { error } = await deleteAllRows('feed_posts', 'id');
       recordDelete('feed_posts', error);
     }
@@ -923,31 +1367,42 @@ export async function granularResetSupabaseAdmin(options: {
     }
 
     // 8. Delete Favorites Table
-    if (options.favorites) {
+    if (options.favorites || options.clearAllUsers) {
       const { error } = await deleteAllRows('favorites', 'user_id');
       recordDelete('favorites', error);
     }
 
     // 9. Delete Blocked Users Table
-    if (options.blockedUsers) {
+    if (options.blockedUsers || options.clearAllUsers) {
       const { error } = await deleteAllRows('blocked_users', 'user_id');
       recordDelete('blocked_users', error);
     }
 
     // 10. Delete Creator Goals Table
-    if (options.creatorGoals) {
+    if (options.creatorGoals || options.clearAllUsers) {
       const { error } = await deleteAllRows('creator_goals', 'creator_id');
       recordDelete('creator_goals', error);
     }
 
     // 10a. Delete Creator Analytics / Metrics Table
-    if (options.creatorAnalytics) {
+    if (options.creatorAnalytics || options.clearAllUsers) {
       try {
         const { error } = await deleteAllRows('creator_metrics', 'creator_id');
         recordDelete('creator_metrics', error);
       } catch (err: any) {
         failedOps.push(`creator_metrics: ${err?.message || err}`);
         console.warn('[Supabase Admin Reset] creator_metrics purge exception:', err?.message || err);
+      }
+    }
+
+    // 10a2. Delete Creator Reviews
+    if (options.creatorReviews || options.clearAllUsers) {
+      try {
+        const { error } = await deleteAllRows('creator_reviews', 'id');
+        recordDelete('creator_reviews', error);
+      } catch (err: any) {
+        failedOps.push(`creator_reviews: ${err?.message || err}`);
+        console.warn('[Supabase Admin Reset] creator_reviews purge exception:', err?.message || err);
       }
     }
 
@@ -959,26 +1414,30 @@ export async function granularResetSupabaseAdmin(options: {
           { table: 'language_configs', filter: 'code' },
           { table: 'zodiac_configs', filter: 'key' },
           { table: 'interest_configs', filter: 'id' },
-          { table: 'moderation_reports', filter: 'id' },
+          { table: 'currency_configs', filter: 'code' },
         ];
 
         for (const b of blocks) {
           const { error } = await deleteAllRows(b.table, b.filter);
           recordDelete(b.table, error);
         }
+        if (!options.moderationReports && !options.clearAllUsers) {
+          const { error } = await deleteAllRows('moderation_reports', 'id');
+          recordDelete('moderation_reports', error);
+        }
       } catch (err: any) {
         console.warn('[Supabase Admin Reset] taxonomiesAndFlags purge exception:', err?.message || err);
       }
     }
 
-    // 10b. Delete User Daily Rewards Table
+    // 10c. Delete User Daily Rewards Table
     if (options.clearAllUsers || options.creatorGoals || options.dailyRewardsAndQuests) {
       const { error } = await deleteAllRows('user_daily_rewards', 'user_id');
       recordDelete('user_daily_rewards', error);
     }
 
-    // 11. Reset Financial Balances on Profiles Table
-    if (options.resetBalances) {
+    // 11. Reset Financial Balances on Profiles Table (skip when wiping users)
+    if (options.resetBalances && !options.clearAllUsers) {
       const updates: any = {};
       if (options.resetBalances.callerCoins) updates.coin_balance = 0;
       if (options.resetBalances.creatorEarnings) {
@@ -987,7 +1446,6 @@ export async function granularResetSupabaseAdmin(options: {
         updates.total_calls_hosted = 0;
         updates.total_call_minutes = 0;
       }
-      if (options.resetBalances.vipTiers) updates.vip_tier = 'none';
 
       if (Object.keys(updates).length > 0) {
         const { error } = await (client.from('profiles') as any)
@@ -997,46 +1455,125 @@ export async function granularResetSupabaseAdmin(options: {
       }
     }
 
-    // 12. Delete User Profiles (Cascade order safe)
-    if (options.mockIds && options.mockIds.length > 0) {
-      const { error } = await client.from('profiles').delete().in('id', options.mockIds);
-      recordDelete(`profiles (${options.mockIds.length} mock users)`, error);
-    } else if (options.clearAllUsers) {
-      const { error } = await client.from('profiles').delete().neq('role', 'admin');
-      recordDelete('profiles (all non-admin users)', error);
+    // 12. Delete Auth users then profiles (Auth first so triggers cannot recreate rows)
+    const profileIdsToDelete: string[] =
+      options.mockIds && options.mockIds.length > 0 ? options.mockIds.map(String) : [];
+
+    if (options.clearAllUsers || profileIdsToDelete.length > 0) {
+      let targets: Array<{ id: string; auth_id: string | null }> = [];
+
+      if (options.clearAllUsers) {
+        const { data: nonAdmins, error: listErr } = await client
+          .from('profiles')
+          .select('id, auth_id')
+          .neq('role', 'admin');
+        if (listErr) {
+          failedOps.push(`profiles_list_for_auth_purge: ${listErr.message}`);
+        } else {
+          targets = (nonAdmins || []) as Array<{ id: string; auth_id: string | null }>;
+        }
+      } else {
+        const { data: listed, error: listErr } = await client
+          .from('profiles')
+          .select('id, auth_id')
+          .in('id', profileIdsToDelete);
+        if (listErr) {
+          failedOps.push(`profiles_list_for_auth_purge: ${listErr.message}`);
+          targets = profileIdsToDelete.map((id) => ({ id, auth_id: null }));
+        } else {
+          targets = (listed || []) as Array<{ id: string; auth_id: string | null }>;
+          for (const id of profileIdsToDelete) {
+            if (!targets.some((t) => t.id === id)) targets.push({ id, auth_id: null });
+          }
+        }
+      }
+
+      let authDeleted = 0;
+      for (const row of targets) {
+        const candidates = Array.from(
+          new Set(
+            [row.auth_id, AUTH_UUID_RE.test(row.id) ? row.id : null]
+              .filter(Boolean)
+              .map(String)
+          )
+        );
+        for (const aid of candidates) {
+          try {
+            const { error: authErr } = await client.auth.admin.deleteUser(aid);
+            if (authErr) {
+              const msg = authErr.message || String(authErr);
+              if (/not found|user not found|does not exist/i.test(msg)) {
+                authDeleted++;
+              } else {
+                warnings.push(`Auth delete ${aid}: ${msg}`);
+                console.warn(`[Supabase Admin Reset] Auth delete failed for ${aid}:`, msg);
+              }
+            } else {
+              authDeleted++;
+            }
+          } catch (err: any) {
+            warnings.push(`Auth delete ${aid}: ${err?.message || String(err)}`);
+          }
+        }
+      }
+      if (targets.length > 0) {
+        clearedTables.push(
+          `auth.users (~${authDeleted} deletes for ${targets.length} non-admin profiles)`
+        );
+      }
+
+      if (options.clearAllUsers) {
+        const { error } = await client.from('profiles').delete().neq('role', 'admin');
+        recordDelete('profiles (all non-admin users)', error);
+      } else if (profileIdsToDelete.length > 0) {
+        const { error } = await client.from('profiles').delete().in('id', profileIdsToDelete);
+        recordDelete(`profiles (${profileIdsToDelete.length} users)`, error);
+      }
     }
 
-    // 13. Admin Account Restoration
+    // 13. Admin profile field reset (non-secret only)
+    // Never restore a known weak password or inflate coin_balance.
+    // Password changes must go through authenticated update-password / Supabase Auth.
     if (options.clearAdmin) {
-      const passwordHash = await hashPassword('admin123');
-      await (client.from('profiles') as any).upsert({
-        id: 'admin_user',
-        name: 'Super Admin',
-        email: 'admin@livecall.app',
-        gender: 'male',
-        role: 'admin',
-        password_hash: passwordHash,
-        has_password_set: true,
-        coin_balance: 999999,
-        is_verified: true,
-        online_status: 'online',
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'id' });
-      clearedTables.push('admin_restored');
+      const { data: admins, error: adminLookupErr } = await client
+        .from('profiles')
+        .select('id')
+        .eq('role', 'admin');
+      if (adminLookupErr) {
+        failedOps.push(`admin_profile_reset: ${adminLookupErr.message}`);
+      } else if (admins && admins.length > 0) {
+        for (const admin of admins as { id: string }[]) {
+          const { error: adminUpdateErr } = await (client.from('profiles') as any)
+            .update({
+              name: 'Super Admin',
+              is_verified: true,
+              online_status: 'online',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', admin.id);
+          if (adminUpdateErr) {
+            failedOps.push(`admin_profile_reset(${admin.id}): ${adminUpdateErr.message}`);
+          }
+        }
+        clearedTables.push('admin_profile_fields_reset');
+      } else {
+        clearedTables.push('admin_profile_reset_skipped_no_admin');
+      }
     }
 
     if (failedOps.length > 0) {
       return {
         success: false,
         clearedTables,
+        warnings,
         error: `Some reset operations failed: ${failedOps.join('; ')}`,
       };
     }
 
-    return { success: true, clearedTables };
+    return { success: true, clearedTables, warnings };
   } catch (err: any) {
     console.error('[Supabase Admin Reset] Exception during database reset:', err);
-    return { success: false, clearedTables, error: err.message };
+    return { success: false, clearedTables, warnings, error: err.message };
   }
 }
 
@@ -1099,6 +1636,15 @@ export async function updateUserProfileAdmin(
     if (updates.isOnboarded !== undefined || updates.is_onboarded !== undefined) {
       payload.is_onboarded = Boolean(updates.isOnboarded ?? updates.is_onboarded);
     }
+    if (updates.agreedToTerms !== undefined || updates.agreed_to_terms !== undefined) {
+      payload.agreed_to_terms = Boolean(updates.agreedToTerms ?? updates.agreed_to_terms);
+    }
+    if (updates.agreedToAdultTerms !== undefined || updates.agreed_to_adult_terms !== undefined) {
+      payload.agreed_to_adult_terms = Boolean(updates.agreedToAdultTerms ?? updates.agreed_to_adult_terms);
+    }
+    if (updates.agreedToHostTerms !== undefined || updates.agreed_to_host_terms !== undefined) {
+      payload.agreed_to_host_terms = Boolean(updates.agreedToHostTerms ?? updates.agreed_to_host_terms);
+    }
     if (updates.role !== undefined) {
       payload.role = updates.role === 'female_host' ? 'female_creator' : updates.role;
     }
@@ -1116,9 +1662,6 @@ export async function updateUserProfileAdmin(
     }
     if (updates.onlineStatus !== undefined || updates.online_status !== undefined) {
       payload.online_status = updates.onlineStatus || updates.online_status;
-    }
-    if (updates.vipTier !== undefined || updates.vip_tier !== undefined) {
-      payload.vip_tier = updates.vipTier || updates.vip_tier;
     }
     if (updates.teamLeaderId !== undefined || updates.team_leader_id !== undefined) {
       payload.team_leader_id = updates.teamLeaderId ?? updates.team_leader_id ?? null;
@@ -1209,42 +1752,482 @@ export async function fetchUserDailyRewardsAdmin(userId: string): Promise<{ succ
   }
 }
 
+export function mapDailyRewardsRowToRecord(db: any) {
+  if (!db) return null;
+  return {
+    userId: db.user_id,
+    lastLoginDate: db.last_login_date,
+    streakCount: Number(db.streak_count || 1),
+    streakClaimedDate: db.streak_claimed_date ?? null,
+    tasksDate: db.tasks_date,
+    taskChatFriends: Array.isArray(db.task_chat_friends) ? db.task_chat_friends : [],
+    taskChatClaimed: Boolean(db.task_chat_claimed),
+    taskQuickMatches: Number(db.task_quick_matches || 0),
+    taskQuickMatchClaimed: Boolean(db.task_quick_match_claimed),
+    taskVideoCallSeconds: Number(db.task_video_call_seconds || 0),
+    taskVideoCallClaimed: Boolean(db.task_video_call_claimed),
+    taskMomentInteractions: Number(db.task_moment_interactions || 0),
+    taskMomentClaimed: Boolean(db.task_moment_claimed),
+    taskGiftCount: Number(db.task_gift_count || 0),
+    taskGiftClaimed: Boolean(db.task_gift_claimed),
+    masterChestClaimed: Boolean(db.master_chest_claimed),
+    totalCoinsEarned: Number(db.total_coins_earned || 0),
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
+  };
+}
+
+function blankDailyRewardsRow(userId: string, rewardDay: string) {
+  return {
+    user_id: userId,
+    last_login_date: rewardDay,
+    streak_count: 1,
+    streak_claimed_date: null,
+    tasks_date: rewardDay,
+    task_chat_friends: [],
+    task_chat_claimed: false,
+    task_quick_matches: 0,
+    task_quick_match_claimed: false,
+    task_video_call_seconds: 0,
+    task_video_call_claimed: false,
+    task_moment_interactions: 0,
+    task_moment_claimed: false,
+    task_gift_count: 0,
+    task_gift_claimed: false,
+    master_chest_claimed: false,
+    total_coins_earned: 0,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function shiftRewardDay(day: string, deltaDays: number): string {
+  const d = new Date(`${day}T12:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Ensure reward row exists and apply day rollover for tasks/streak using resolved rewardDay.
+ */
+export async function ensureUserDailyRewardsRolloverAdmin(
+  userId: string,
+  rewardDay: string
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const client = getSupabaseAdmin();
+  if (!client || !userId) return { success: false, error: 'Admin client not available' };
+  try {
+    const existing = await fetchUserDailyRewardsAdmin(userId);
+    if (!existing.success) return existing;
+
+    let row = existing.data;
+    if (!row) {
+      const payload = blankDailyRewardsRow(userId, rewardDay);
+      const { data, error } = await client
+        .from('user_daily_rewards')
+        .upsert(payload, { onConflict: 'user_id' })
+        .select('*')
+        .maybeSingle();
+      if (error) return { success: false, error: error.message };
+      return { success: true, data };
+    }
+
+    const yesterday = shiftRewardDay(rewardDay, -1);
+    let changed = false;
+    const next = { ...row };
+
+    if (next.tasks_date !== rewardDay) {
+      next.tasks_date = rewardDay;
+      next.task_chat_friends = [];
+      next.task_chat_claimed = false;
+      next.task_quick_matches = 0;
+      next.task_quick_match_claimed = false;
+      next.task_video_call_seconds = 0;
+      next.task_video_call_claimed = false;
+      next.task_moment_interactions = 0;
+      next.task_moment_claimed = false;
+      next.task_gift_count = 0;
+      next.task_gift_claimed = false;
+      next.master_chest_claimed = false;
+      changed = true;
+    }
+
+    if (next.last_login_date === yesterday) {
+      if (next.streak_claimed_date === yesterday) {
+        next.streak_count = Number(next.streak_count || 1) >= 7 ? 1 : Number(next.streak_count || 1) + 1;
+      }
+      next.last_login_date = rewardDay;
+      changed = true;
+    } else if (next.last_login_date !== rewardDay) {
+      next.streak_count = 1;
+      next.last_login_date = rewardDay;
+      changed = true;
+    }
+
+    if (!changed) return { success: true, data: row };
+
+    next.updated_at = new Date().toISOString();
+    const { data, error } = await client
+      .from('user_daily_rewards')
+      .upsert(next, { onConflict: 'user_id' })
+      .select('*')
+      .maybeSingle();
+    if (error) return { success: false, error: error.message };
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+const MISSION_BILLING: Record<string, number> = {
+  streak: 1,
+  chat_friends: 2,
+  quick_matches: 3,
+  video_call: 4,
+  moment_interact: 5,
+  send_gift: 6,
+  master_chest: 7,
+};
+
+/**
+ * Atomic claim via SQL RPC when available; falls back to conditional update + ledger uniqueness.
+ */
+export async function claimDailyRewardAdmin(params: {
+  userId: string;
+  claimKind: 'streak' | 'mission' | 'master_chest';
+  missionKey: string | null;
+  rewardDay: string;
+  coins: number;
+}): Promise<{
+  success: boolean;
+  coinsAwarded?: number;
+  coinBalance?: number;
+  record?: any;
+  duplicate?: boolean;
+  error?: string;
+  code?: string;
+}> {
+  const client = getSupabaseAdmin();
+  if (!client) return { success: false, error: 'Admin client not available', code: 'NO_ADMIN' };
+
+  const billingKey =
+    params.claimKind === 'streak'
+      ? 'streak'
+      : params.claimKind === 'master_chest'
+      ? 'master_chest'
+      : String(params.missionKey || '');
+  const billingMinute = MISSION_BILLING[billingKey] || 0;
+  const ledgerType =
+    params.claimKind === 'streak'
+      ? 'REWARD_STREAK'
+      : params.claimKind === 'master_chest'
+      ? 'REWARD_MASTER_CHEST'
+      : 'REWARD_MISSION';
+
+  try {
+    const rpc = await client.rpc('claim_daily_reward_atomic', {
+      p_user_id: params.userId,
+      p_claim_kind: params.claimKind,
+      p_mission_key: params.missionKey,
+      p_reward_day: params.rewardDay,
+      p_coins: Math.max(0, Math.floor(params.coins)),
+      p_ledger_type: ledgerType,
+      p_billing_minute: billingMinute,
+      p_metadata: {
+        missionKey: params.missionKey,
+        rewardDay: params.rewardDay,
+        claimKind: params.claimKind,
+      },
+    });
+
+    if (!rpc.error && rpc.data) {
+      const result = typeof rpc.data === 'string' ? JSON.parse(rpc.data) : rpc.data;
+      if (result?.success) {
+        const refreshed = await fetchUserDailyRewardsAdmin(params.userId);
+        return {
+          success: true,
+          coinsAwarded: Number(result.coins_awarded || 0),
+          coinBalance: Number(result.coin_balance || 0),
+          record: refreshed.data,
+          duplicate: Boolean(result.duplicate),
+        };
+      }
+      return {
+        success: false,
+        error: result?.error_message || 'Claim rejected',
+        code: result?.error_code || 'CLAIM_FAILED',
+        coinBalance: result?.coin_balance != null ? Number(result.coin_balance) : undefined,
+        record: (await fetchUserDailyRewardsAdmin(params.userId)).data,
+      };
+    }
+  } catch {
+    // fall through to conditional update path
+  }
+
+  // Fallback path (RPC missing): conditional flag update + ledger unique insert
+  return claimDailyRewardAdminFallback(params, ledgerType, billingMinute);
+}
+
+async function claimDailyRewardAdminFallback(
+  params: {
+    userId: string;
+    claimKind: 'streak' | 'mission' | 'master_chest';
+    missionKey: string | null;
+    rewardDay: string;
+    coins: number;
+  },
+  ledgerType: string,
+  billingMinute: number
+): Promise<{
+  success: boolean;
+  coinsAwarded?: number;
+  coinBalance?: number;
+  record?: any;
+  duplicate?: boolean;
+  error?: string;
+  code?: string;
+}> {
+  const client = getSupabaseAdmin();
+  if (!client) return { success: false, error: 'Admin client not available', code: 'NO_ADMIN' };
+
+  const callId = `daily_reward:${params.rewardDay}`;
+  const coins = Math.max(0, Math.floor(params.coins));
+
+  try {
+    // Idempotency: existing ledger row
+    const { data: existingLedger } = await client
+      .from('wallet_ledger')
+      .select('id, balance_after')
+      .eq('user_id', params.userId)
+      .eq('call_id', callId)
+      .eq('billing_minute', billingMinute)
+      .eq('transaction_type', ledgerType)
+      .maybeSingle();
+
+    if (existingLedger) {
+      const refreshed = await fetchUserDailyRewardsAdmin(params.userId);
+      const { data: profile } = await client.from('profiles').select('coin_balance').eq('id', params.userId).maybeSingle();
+      return {
+        success: false,
+        code: 'ALREADY_CLAIMED',
+        error: 'Already claimed',
+        coinsAwarded: 0,
+        coinBalance: Number(profile?.coin_balance ?? existingLedger.balance_after ?? 0),
+        record: refreshed.data,
+        duplicate: true,
+      };
+    }
+
+    const ensured = await ensureUserDailyRewardsRolloverAdmin(params.userId, params.rewardDay);
+    if (!ensured.success || !ensured.data) {
+      return { success: false, error: ensured.error || 'Load failed', code: 'LOAD_FAILED' };
+    }
+    const row = ensured.data;
+
+    const patch: Record<string, any> = {
+      updated_at: new Date().toISOString(),
+      total_coins_earned: Number(row.total_coins_earned || 0) + coins,
+    };
+    let filterCol = '';
+    let filterVal: any = false;
+
+    if (params.claimKind === 'streak') {
+      if (row.streak_claimed_date === params.rewardDay) {
+        return { success: false, code: 'ALREADY_CLAIMED', error: 'Already claimed', record: row, duplicate: true };
+      }
+      patch.streak_claimed_date = params.rewardDay;
+      filterCol = 'streak_claimed_date';
+      // only claim if not already today — use neq via or null
+    } else if (params.claimKind === 'master_chest') {
+      if (row.master_chest_claimed) {
+        return { success: false, code: 'ALREADY_CLAIMED', error: 'Already claimed', record: row, duplicate: true };
+      }
+      patch.master_chest_claimed = true;
+      filterCol = 'master_chest_claimed';
+      filterVal = false;
+    } else {
+      const key = params.missionKey;
+      const map: Record<string, { col: string; flag: string }> = {
+        chat_friends: { col: 'task_chat_claimed', flag: 'task_chat_claimed' },
+        quick_matches: { col: 'task_quick_match_claimed', flag: 'task_quick_match_claimed' },
+        video_call: { col: 'task_video_call_claimed', flag: 'task_video_call_claimed' },
+        moment_interact: { col: 'task_moment_claimed', flag: 'task_moment_claimed' },
+        send_gift: { col: 'task_gift_claimed', flag: 'task_gift_claimed' },
+      };
+      const m = key ? map[key] : null;
+      if (!m) return { success: false, error: 'Invalid mission', code: 'INVALID_MISSION' };
+      if (row[m.flag]) {
+        return { success: false, code: 'ALREADY_CLAIMED', error: 'Already claimed', record: row, duplicate: true };
+      }
+      patch[m.col] = true;
+      filterCol = m.col;
+      filterVal = false;
+    }
+
+    let updateQuery = client.from('user_daily_rewards').update(patch).eq('user_id', params.userId);
+    if (params.claimKind === 'streak') {
+      updateQuery = updateQuery.or(`streak_claimed_date.is.null,streak_claimed_date.neq.${params.rewardDay}`);
+    } else {
+      updateQuery = updateQuery.eq(filterCol, filterVal);
+    }
+
+    const { data: updatedRows, error: updErr } = await updateQuery.select('*');
+    if (updErr) return { success: false, error: updErr.message, code: 'UPDATE_FAILED' };
+    if (!updatedRows || updatedRows.length === 0) {
+      const refreshed = await fetchUserDailyRewardsAdmin(params.userId);
+      return {
+        success: false,
+        code: 'ALREADY_CLAIMED',
+        error: 'Already claimed',
+        record: refreshed.data,
+        duplicate: true,
+      };
+    }
+
+    const { data: profile } = await client
+      .from('profiles')
+      .select('coin_balance')
+      .eq('id', params.userId)
+      .maybeSingle();
+    const newBalance = Number(profile?.coin_balance || 0) + coins;
+    const { error: balErr } = await client
+      .from('profiles')
+      .update({ coin_balance: newBalance })
+      .eq('id', params.userId);
+    if (balErr) return { success: false, error: balErr.message, code: 'BALANCE_FAILED' };
+
+    const { error: ledErr } = await client.from('wallet_ledger').insert({
+      user_id: params.userId,
+      call_id: callId,
+      transaction_type: ledgerType,
+      amount: coins,
+      balance_after: newBalance,
+      billing_minute: billingMinute,
+      metadata: {
+        claimKind: params.claimKind,
+        missionKey: params.missionKey,
+        rewardDay: params.rewardDay,
+      },
+    });
+
+    if (ledErr) {
+      // Unique violation → treat as already claimed (another request won the race)
+      if (String(ledErr.message || '').toLowerCase().includes('duplicate') || ledErr.code === '23505') {
+        const refreshed = await fetchUserDailyRewardsAdmin(params.userId);
+        const { data: p2 } = await client.from('profiles').select('coin_balance').eq('id', params.userId).maybeSingle();
+        return {
+          success: false,
+          code: 'ALREADY_CLAIMED',
+          error: 'Already claimed',
+          coinsAwarded: 0,
+          coinBalance: Number(p2?.coin_balance || 0),
+          record: refreshed.data,
+          duplicate: true,
+        };
+      }
+      return { success: false, error: ledErr.message, code: 'LEDGER_FAILED' };
+    }
+
+    return {
+      success: true,
+      coinsAwarded: coins,
+      coinBalance: newBalance,
+      record: updatedRows[0],
+      duplicate: false,
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message, code: 'CLAIM_FAILED' };
+  }
+}
+
+/**
+ * Server-validated progress increments (capped). Never sets claim flags or coin totals from client.
+ */
+export async function applyDailyRewardProgressAdmin(params: {
+  userId: string;
+  rewardDay: string;
+  type: string;
+  receiverId?: string;
+  seconds?: number;
+  missions: Record<string, any>;
+}): Promise<{ success: boolean; data?: any; error?: string; code?: string }> {
+  const client = getSupabaseAdmin();
+  if (!client) return { success: false, error: 'Admin client not available', code: 'NO_ADMIN' };
+
+  try {
+    const ensured = await ensureUserDailyRewardsRolloverAdmin(params.userId, params.rewardDay);
+    if (!ensured.success || !ensured.data) {
+      return { success: false, error: ensured.error || 'Load failed', code: 'LOAD_FAILED' };
+    }
+    const row = { ...ensured.data };
+    const type = params.type;
+
+    if (type === 'chat_friend') {
+      if (row.task_chat_claimed) return { success: true, data: row };
+      const rid = params.receiverId;
+      if (!rid || rid === params.userId) {
+        return { success: false, error: 'Invalid receiverId', code: 'INVALID_INPUT' };
+      }
+      const friends: string[] = Array.isArray(row.task_chat_friends) ? [...row.task_chat_friends] : [];
+      const cap = Math.max(Number(params.missions.chatFriends?.target || 3) * 2, 10);
+      if (!friends.includes(rid) && friends.length < cap) {
+        friends.push(rid);
+        row.task_chat_friends = friends;
+      }
+    } else if (type === 'quick_match') {
+      if (row.task_quick_match_claimed) return { success: true, data: row };
+      const cap = Math.max(Number(params.missions.quickMatches?.target || 10) * 2, 20);
+      row.task_quick_matches = Math.min(cap, Number(row.task_quick_matches || 0) + 1);
+    } else if (type === 'video_call') {
+      // Progress stored in SECONDS; target from config is also seconds.
+      if (row.task_video_call_claimed) return { success: true, data: row };
+      const add = Math.max(0, Math.min(600, Math.floor(Number(params.seconds || 0))));
+      if (add <= 0) return { success: false, error: 'Invalid seconds', code: 'INVALID_INPUT' };
+      const cap = Math.max(Number(params.missions.videoCall?.target || 60) * 3, 3600);
+      row.task_video_call_seconds = Math.min(cap, Number(row.task_video_call_seconds || 0) + add);
+    } else if (type === 'moment') {
+      if (row.task_moment_claimed) return { success: true, data: row };
+      const cap = Math.max(Number(params.missions.momentInteract?.target || 3) * 2, 10);
+      row.task_moment_interactions = Math.min(cap, Number(row.task_moment_interactions || 0) + 1);
+    } else if (type === 'gift') {
+      if (row.task_gift_claimed) return { success: true, data: row };
+      const cap = Math.max(Number(params.missions.sendGift?.target || 1) * 2, 10);
+      row.task_gift_count = Math.min(cap, Number(row.task_gift_count || 0) + 1);
+    } else {
+      return { success: false, error: 'Invalid progress type', code: 'INVALID_TYPE' };
+    }
+
+    row.updated_at = new Date().toISOString();
+    const { data, error } = await client
+      .from('user_daily_rewards')
+      .upsert(row, { onConflict: 'user_id' })
+      .select('*')
+      .maybeSingle();
+    if (error) return { success: false, error: error.message, code: 'UPDATE_FAILED' };
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err.message, code: 'PROGRESS_FAILED' };
+  }
+}
+
 /**
  * Server-Side Admin: Upsert User Daily Rewards State
+ * @deprecated Prefer claim/progress helpers — do not trust client claim flags.
  */
 export async function upsertUserDailyRewardsAdmin(record: any): Promise<{ success: boolean; data?: any; error?: string }> {
   const client = getSupabaseAdmin();
-  if (!client || !record?.userId && !record?.user_id) return { success: false, error: 'Admin client not available' };
+  if (!client || (!record?.userId && !record?.user_id)) return { success: false, error: 'Admin client not available' };
   try {
-    const payload = {
-      user_id: record.userId || record.user_id,
-      last_login_date: record.lastLoginDate || record.last_login_date,
-      streak_count: record.streakCount !== undefined ? record.streakCount : record.streak_count,
-      streak_claimed_date: record.streakClaimedDate !== undefined ? record.streakClaimedDate : record.streak_claimed_date,
-      tasks_date: record.tasksDate || record.tasks_date,
-      task_chat_friends: record.taskChatFriends || record.task_chat_friends || [],
-      task_chat_claimed: record.taskChatClaimed !== undefined ? record.taskChatClaimed : record.task_chat_claimed,
-      task_quick_matches: record.taskQuickMatches !== undefined ? record.taskQuickMatches : record.task_quick_matches,
-      task_quick_match_claimed: record.taskQuickMatchClaimed !== undefined ? record.taskQuickMatchClaimed : record.task_quick_match_claimed,
-      task_video_call_seconds: record.taskVideoCallSeconds !== undefined ? record.taskVideoCallSeconds : record.task_video_call_seconds,
-      task_video_call_claimed: record.taskVideoCallClaimed !== undefined ? record.taskVideoCallClaimed : record.task_video_call_claimed,
-      task_moment_interactions: record.taskMomentInteractions !== undefined ? record.taskMomentInteractions : record.task_moment_interactions,
-      task_moment_claimed: record.taskMomentClaimed !== undefined ? record.taskMomentClaimed : record.task_moment_claimed,
-      task_gift_count: record.taskGiftCount !== undefined ? record.taskGiftCount : record.task_gift_count,
-      task_gift_claimed: record.taskGiftClaimed !== undefined ? record.taskGiftClaimed : record.task_gift_claimed,
-      master_chest_claimed: record.masterChestClaimed !== undefined ? record.masterChestClaimed : record.master_chest_claimed,
-      total_coins_earned: record.totalCoinsEarned !== undefined ? record.totalCoinsEarned : record.total_coins_earned,
-      updated_at: new Date().toISOString(),
-    };
-
-    const { data, error } = await client
-      .from('user_daily_rewards')
-      .upsert(payload, { onConflict: 'user_id' })
-      .select()
-      .maybeSingle();
-
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+    // Hardened: never accept claim booleans / coin totals from arbitrary client upserts.
+    // Only merge safe progress fields onto the existing/ensured row.
+    const userId = record.userId || record.user_id;
+    const rewardDay =
+      record.rewardDay ||
+      record.tasksDate ||
+      record.tasks_date ||
+      new Date().toISOString().slice(0, 10);
+    const ensured = await ensureUserDailyRewardsRolloverAdmin(userId, rewardDay);
+    if (!ensured.success) return ensured;
+    return { success: true, data: ensured.data };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -1321,5 +2304,79 @@ export async function upsertCreatorMetricsAdmin(record: any): Promise<{ success:
   }
 }
 
+/**
+ * Persist a completed call log for platform/admin analytics (bypasses client RLS).
+ * Idempotent on call id so caller + receiver end handlers do not double-count.
+ */
+export async function upsertCallLogAdmin(log: {
+  id: string;
+  callerId: string;
+  receiverId: string;
+  hostId?: string;
+  callerName?: string;
+  hostName?: string;
+  receiverName?: string;
+  startTime?: number | string;
+  endTime?: number | string | null;
+  durationSeconds?: number;
+  coinsSpent?: number;
+  coinsEarned?: number;
+  wasFriendCall?: boolean;
+  status?: string;
+  endReason?: string;
+  teamLeaderId?: string | null;
+  teamLeaderEarnedCoins?: number;
+}): Promise<{ success: boolean; error?: string }> {
+  const client = getSupabaseAdmin();
+  if (!client) return { success: false, error: 'Admin client not available' };
+  if (!log?.id || !log.callerId || !log.receiverId) {
+    return { success: false, error: 'call log id, callerId, and receiverId are required' };
+  }
+
+  try {
+    const startIso =
+      typeof log.startTime === 'string'
+        ? log.startTime
+        : new Date(log.startTime || Date.now()).toISOString();
+    const endIso =
+      log.endTime == null
+        ? new Date().toISOString()
+        : typeof log.endTime === 'string'
+          ? log.endTime
+          : new Date(log.endTime).toISOString();
+
+    const hostId = log.hostId || log.receiverId;
+    const payload = {
+      id: String(log.id),
+      caller_id: String(log.callerId),
+      receiver_id: String(log.receiverId),
+      host_id: String(hostId),
+      caller_name: log.callerName || null,
+      host_name: log.hostName || log.receiverName || null,
+      start_time: startIso,
+      started_at: startIso,
+      end_time: endIso,
+      ended_at: endIso,
+      duration_seconds: Math.max(0, Number(log.durationSeconds) || 0),
+      coins_spent: Math.max(0, Number(log.coinsSpent) || 0),
+      coins_earned: Math.max(0, Number(log.coinsEarned) || 0),
+      was_friend_call: Boolean(log.wasFriendCall),
+      status: log.status || 'completed',
+      end_reason: log.endReason || log.status || 'completed',
+      team_leader_id: log.teamLeaderId || null,
+      team_leader_earned_coins: Math.max(0, Number(log.teamLeaderEarnedCoins) || 0),
+    };
+
+    const { error } = await client.from('call_logs').upsert(payload as any, { onConflict: 'id' });
+    if (error) {
+      console.warn('[Supabase Admin] upsertCallLogAdmin error:', error.message);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.error('[Supabase Admin] upsertCallLogAdmin exception:', err);
+    return { success: false, error: err?.message || 'Failed to upsert call log' };
+  }
+}
 
 

@@ -128,7 +128,6 @@ export interface UserProfile {
 
   // Male Specific
   coinBalance: number;
-  vipTier?: 'none' | 'bronze' | 'silver' | 'gold' | 'diamond';
 
   // Female Specific
   hourlyCoinRate: number; // e.g. 10 coins/min
@@ -176,24 +175,21 @@ export interface UserProfile {
   commissionPercent?: number; // Team Leader commission % (e.g. 10%)
 }
 
+/** Call spending statement (not a payment-gateway purchase invoice). */
 export interface TransactionReceipt {
   id: string;
-  invoiceNumber: string;
+  statementNumber: string;
   userId: string;
   userName: string;
-  packageTitle: string;
-  coinsCredited: number;
-  bonusCoins: number;
+  description: string;
+  hostName?: string;
+  coinsDebited: number;
   amountUSD: number;
-  taxUSD: number;
-  paymentGateway: 'stripe' | 'apple_pay' | 'google_pay' | 'paypal' | 'crypto';
-  transactionHash?: string;
-  status: 'paid' | 'pending' | 'refunded';
+  status: 'completed' | 'missed' | 'declined' | 'rejected' | 'failed' | 'unknown';
   createdAt: string;
-  billingAddress?: string;
-  description?: string;
-  coinsChange?: number;
-  date?: string;
+  callLogId?: string;
+  durationMinutes: number;
+  source: 'call_log';
 }
 
 export interface WalletLedgerEntry {
@@ -224,9 +220,17 @@ export interface CoinPackage {
   title: string;
   coins: number;
   bonusCoins: number;
+  /** Regular / list price (USD). */
   priceUSD: number;
+  /** What the user pays; null/undefined = no discount (pay priceUSD). */
+  discountPriceUSD?: number | null;
+  /** Optional override for approx call minutes; null = compute from total coins / burn rate. */
+  approxCallMinutes?: number | null;
+  /** Optional display override for the saving badge; null = compute from price − discount. */
+  savingLabel?: string | null;
   badgeTag?: string; // 'Best Value', '70% OFF', 'Popular'
   popular?: boolean;
+  orderNum?: number;
 }
 
 export interface VirtualGift {
@@ -273,7 +277,6 @@ export interface AdminActiveCall {
   callerAvatar: string;
   callerCountry: string;
   callerCountryCode?: string;
-  callerVipTier?: string;
   callerCoinBalance: number;
 
   startTime: number;
@@ -311,6 +314,7 @@ export interface IncidentEvidence {
   adminNote?: string;
 }
 
+/** Legacy mid-period withdrawal request. Prefer settlement_batches for new period-end cash-outs. */
 export interface PayoutRequest {
   id: string;
   userId: string;
@@ -319,10 +323,12 @@ export interface PayoutRequest {
   amountCoins: number;
   amountUSD: number;
   payoutMethod: string;
+  /** Client display field; DB column is payout_details (JSONB). */
   accountDetails: string;
   status: 'pending' | 'processing' | 'completed' | 'rejected';
   requestDate: string;
   processedDate?: string;
+  /** Client display field; DB column is admin_notes. */
   adminNote?: string;
   teamLeaderId?: string;
   teamLeaderName?: string;
@@ -402,7 +408,6 @@ export interface ChatMessage {
   friendRequestInfo?: FriendRequest;
   ratingInfo?: {
     callLogId?: string;
-    callDurationSeconds?: number;
     creatorId: string;
     creatorName: string;
     creatorAvatar: string;
@@ -415,8 +420,18 @@ export interface ChatMessage {
     comment?: string;
     tags?: string[];
     isSubmitted?: boolean;
+    callDurationSeconds?: number;
   };
+  /** Authoritative unread flag from messages.is_read (receiver-side). */
+  isRead?: boolean;
+  /** ISO timestamptz from DB; preferred for ordering. */
+  createdAt?: string;
+  /** Display/compat timestamp (ISO or locale string). */
   timestamp: string;
+  /** Optimistic client temp id before server UUID reconcile. */
+  clientTempId?: string;
+  /** Local-only send failure marker. */
+  sendFailed?: boolean;
 }
 
 export interface FeedPost {
@@ -437,15 +452,21 @@ export interface FeedPost {
 export interface SystemSettings {
   coinBurnRatePerMin: number; // Standard Coin Burn Rate - Non-Friends (Coins / Minute), e.g. 120
   coinBurnRateFriendPerMin: number; // Friend Discounted Burn Rate - Friends (Coins / Minute), e.g. 80
-  femaleHostSharePercent: number; // Female Host Share for 1-on-1 Calls (%), e.g. 40 for 40%
+  /** Live weekly host share % on call burns (Economy B). Always used mid-period. */
+  femaleHostSharePercent: number;
+  /** Target host share % applied at period END via true-up if bronze+ met (Economy B / Phase 3). */
+  femaleHostTargetSharePercent: number;
   teamLeaderSharePercent: number; // Team Leader Share for 1-on-1 Calls (%), e.g. 10 for 10%
   giftFemaleHostSharePercent: number; // Female Host Share for Virtual Gifts (%), e.g. 70 for 70%
   giftTeamLeaderSharePercent: number; // Team Leader Share for Virtual Gifts (%), e.g. 10 for 10%
   enableVirtualGifts?: boolean; // Master toggle for virtual gifts system
-  femalePayoutRatioUSD: number; // Female Coin-to-USD Payout Ratio ($ USD per Coin Earned), e.g. 0.008
+  femalePayoutRatioUSD: number; // LEGACY synced to coinUsdPeg — prefer coinUsdPeg
   minPayoutThresholdUSD: number; // Minimum Withdrawal Threshold ($ USD), e.g. 50
-  femaleEarningRatePerMin?: number; // Legacy raw number fallback (derived: burnRate * femaleHostSharePercent / 100)
-  coinToUSDRatio: number; // e.g. 100 coins = $1.00 USD (0.01 per coin)
+  /** @deprecated Derived display only (burn × host%). Not used by burn path. */
+  femaleEarningRatePerMin?: number;
+  coinToUSDRatio: number; // LEGACY synced to coinUsdPeg — prefer coinUsdPeg
+  /** Fixed Peg: USD per coin for host/TL/platform (canonical Phase 1). e.g. 0.003 = $3 / 1000 coins */
+  coinUsdPeg: number;
   enableRegularFemaleCoinEarning?: boolean; // When false, only Team Leader created female hosts can earn coins; regular female users have all coin earning options hidden
   aiNudityShieldEnabled: boolean;
   screenRecordingProtection: boolean;
@@ -459,7 +480,7 @@ export interface SystemSettings {
   // LiveKit Advanced Quality & Encoding Configuration
   livekitCaptureResolution?: '1080p' | '720p' | '480p' | '4k';
   livekitMaxBitrateKbps?: number; // e.g. 3000 kbps for 1080p
-  livekitMaxFramerate?: number; // e.g. 30 or 60 fps
+  livekitMaxFramerate?: number; // clamped client-side to 24–30 (admin 60 → 30)
   livekitSimulcastEnabled?: boolean;
   livekitAdaptiveStream?: boolean;
   livekitDynacast?: boolean;
@@ -505,6 +526,10 @@ export interface SystemSettings {
   creatorTargetGoldHours?: number;
   creatorTargetGoldCoins?: number;
   creatorTargetGoldBonusUSD?: number;
+  /** UTC HH:mm when Financial Module period close may run (default 00:00). */
+  periodCloseUtcTime?: string;
+  /** When true, period-end settlement batches are the intended cash-out path. */
+  settlementEnabled?: boolean;
   peakHoursStart?: string;
   peakHoursEnd?: string;
   peakHoursEnabled?: boolean;
@@ -656,16 +681,6 @@ export interface QuickMatchItem {
   giftsExchangedCoins?: number;
 }
 
-export interface VIPPlan {
-  id: 'bronze' | 'silver' | 'gold' | 'diamond';
-  name: string;
-  priceMonthlyUSD: number;
-  dailyFreeCoins: number;
-  callDiscountPercent: number;
-  badge: string;
-  features: string[];
-}
-
 export interface HomeBanner {
   id: string;
   title: string;
@@ -675,7 +690,7 @@ export interface HomeBanner {
   imageUrl: string;
   ctaText: string;
   actionType: 'tab' | 'modal' | 'external' | 'policy';
-  actionTarget: string; // e.g. 'discovery', 'swipe', 'moments', 'store', 'vip', 'match', or policy id / url
+  actionTarget: string; // e.g. 'discovery', 'swipe', 'moments', 'store', 'match', or policy id / url
   active: boolean;
   order: number;
   bgGradient?: string;
@@ -739,9 +754,12 @@ export interface InfraSystemConfig {
 
 export interface ResetDataOptions {
   // 1. Users & Accounts
+  /** @deprecated Gender-wide demo purges removed — ignored by reset engine */
   mockFemaleCreators?: boolean;
+  /** @deprecated Gender-wide demo purges removed — ignored by reset engine */
   mockMaleCallers?: boolean;
   adminAccount?: boolean;
+  /** When true: delete ALL non-admin users (clearAllUsers). Requires ALLOW_FACTORY_RESET. */
   customUsers?: boolean;
   teamLeaderAgencies?: boolean;
 
@@ -753,7 +771,8 @@ export interface ResetDataOptions {
   // 3. Coins & Wallet Balances
   userCoins?: boolean;
   creatorEarnings?: boolean;
-  vipTiers?: boolean;
+  /** Purge wallet_ledger rows (also implied server-side by callLogs / coins / clearAllUsers). */
+  walletLedger?: boolean;
 
   // 4. Transactions & Store
   payoutRequests?: boolean;

@@ -45,7 +45,6 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     online_status TEXT NOT NULL DEFAULT 'online' CHECK (online_status IN ('online', 'busy', 'offline', 'in_call')),
     role TEXT NOT NULL DEFAULT 'male_user' CHECK (role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user', 'admin', 'team_leader', 'agency_manager')),
     coin_balance BIGINT NOT NULL DEFAULT 50,
-    vip_tier TEXT NOT NULL DEFAULT 'none' CHECK (vip_tier IN ('none', 'bronze', 'silver', 'gold', 'diamond')),
     hourly_coin_rate INT NOT NULL DEFAULT 10,
     earnings_coins BIGINT NOT NULL DEFAULT 0,
     total_lifetime_earned_usd NUMERIC NOT NULL DEFAULT 0,
@@ -74,11 +73,14 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     team_leader_note TEXT,
     password_hash TEXT,
     has_password_set BOOLEAN DEFAULT false,
+    last_seen_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Ensure all updated columns exist if table was previously created
+ALTER TABLE public.profiles DROP COLUMN IF EXISTS vip_tier;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS auth_id UUID REFERENCES auth.users(id) ON DELETE SET NULL;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS interested_in TEXT[] DEFAULT '{}';
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
@@ -166,9 +168,10 @@ CREATE TABLE IF NOT EXISTS public.messages (
     media_url TEXT,
     media_type TEXT,
     media_storage_key TEXT,
-    type TEXT NOT NULL CHECK (type IN ('text', 'image', 'video', 'voice', 'gift', 'friend_request')) DEFAULT 'text',
+    type TEXT NOT NULL CHECK (type IN ('text', 'image', 'video', 'voice', 'gift', 'friend_request', 'call_rating', 'system')) DEFAULT 'text',
     gift_info JSONB,
     friend_request_info JSONB,
+    rating_info JSONB,
     is_read BOOLEAN NOT NULL DEFAULT false,
     read_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -176,6 +179,30 @@ CREATE TABLE IF NOT EXISTS public.messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON public.messages(sender_id, receiver_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON public.messages(receiver_id, is_read) WHERE is_read = false;
+
+-- Evolve messages type CHECK + rating_info for durable call-rating request cards
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'messages' AND column_name = 'type'
+  ) THEN
+    ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_type_check;
+    ALTER TABLE public.messages
+      ADD CONSTRAINT messages_type_check
+      CHECK (type IN ('text', 'image', 'video', 'voice', 'gift', 'friend_request', 'call_rating', 'system'));
+  END IF;
+END $$;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS rating_info JSONB;
+
+-- Soft-hide clear chat: per-user conversation watermark (does NOT delete peer copy)
+CREATE TABLE IF NOT EXISTS public.message_conversation_clears (
+    user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    other_user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    cleared_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, other_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_conversation_clears_user ON public.message_conversation_clears(user_id);
 
 -- ============================================================================
 -- 4. CALL LOGS TABLE (1-on-1 WebRTC & LiveKit billed sessions)
@@ -251,6 +278,13 @@ CREATE INDEX IF NOT EXISTS idx_friend_requests_users ON public.friend_requests(s
 -- ============================================================================
 -- 6. PAYOUT REQUESTS TABLE (Creator & Agency earnings withdrawals)
 -- ============================================================================
+-- LEGACY mid-period withdrawal queue.
+-- Financial Module source of truth going forward: settlement_periods / settlement_batches /
+-- settlement_line_items / financial_ledger (period-end payouts only). Keep this table for
+-- historical reads; do not write new settlement obligations here.
+-- Column drift vs some React mappers:
+--   schema: payout_details (JSONB), admin_notes, status includes 'approved'
+--   legacy clients: account_details, admin_note, user_name, user_email (not DB columns)
 CREATE TABLE IF NOT EXISTS public.payout_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
@@ -274,6 +308,15 @@ ALTER TABLE public.payout_requests ADD COLUMN IF NOT EXISTS team_leader_name TEX
 CREATE INDEX IF NOT EXISTS idx_payout_requests_user ON public.payout_requests(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_payout_requests_team_leader ON public.payout_requests(team_leader_id);
 
+COMMENT ON TABLE public.payout_requests IS
+  'LEGACY read-only historical withdrawal requests. Cash-out is settlement_batches only (Phase 7). No new inserts; do not approve against settlements (double-pay risk).';
+
+-- Phase 7: block client inserts/updates on legacy payout_requests (settlement batches are SoT)
+DROP POLICY IF EXISTS "owner insert payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "authenticated insert payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "admin update payout_requests" ON public.payout_requests;
+DROP POLICY IF EXISTS "authenticated update payout_requests" ON public.payout_requests;
+-- SELECT policies remain (owner/admin) for historical read-only views.
 -- ============================================================================
 -- 7. TAXONOMY CONFIGURATIONS TABLES (Countries, Languages, Zodiac Signs, Interests)
 -- ============================================================================
@@ -320,6 +363,23 @@ CREATE TABLE IF NOT EXISTS public.interest_configs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Store display currencies (canonical package prices remain USD)
+CREATE TABLE IF NOT EXISTS public.currency_configs (
+    code VARCHAR(8) PRIMARY KEY,
+    name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    rate_from_usd NUMERIC NOT NULL DEFAULT 1,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    order_num INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.currency_configs ADD COLUMN IF NOT EXISTS rate_from_usd NUMERIC NOT NULL DEFAULT 1;
+ALTER TABLE public.currency_configs ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE public.currency_configs ADD COLUMN IF NOT EXISTS order_num INT NOT NULL DEFAULT 0;
+ALTER TABLE public.currency_configs ADD COLUMN IF NOT EXISTS symbol TEXT;
+ALTER TABLE public.currency_configs ADD COLUMN IF NOT EXISTS name TEXT;
+
 -- ============================================================================
 -- 8. SYSTEM CONFIGS TABLE (Global economy rates, R2, SMTP, AI moderation)
 -- ============================================================================
@@ -328,7 +388,9 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     coin_burn_rate_per_min INT DEFAULT 120,
     coin_burn_rate_friend_per_min INT DEFAULT 80,
     female_earning_rate_per_min INT DEFAULT 48,
-    female_host_share_percent NUMERIC DEFAULT 40,
+    -- Call burn shares (Phase 2): base vs target-met host %. Platform = 100 − host − TL (display).
+    female_host_share_percent NUMERIC DEFAULT 30,
+    female_host_target_share_percent NUMERIC DEFAULT 40,
     team_leader_share_percent NUMERIC DEFAULT 10,
     gift_female_host_share_percent NUMERIC DEFAULT 70,
     gift_team_leader_share_percent NUMERIC DEFAULT 10,
@@ -341,8 +403,12 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     flag_sizes_json TEXT DEFAULT '',
     show_dev_persona_bar BOOLEAN DEFAULT false,
     enable_regular_female_coin_earning BOOLEAN DEFAULT false,
-    coin_to_usd_ratio NUMERIC DEFAULT 0.01,
-    female_payout_ratio_usd NUMERIC DEFAULT 0.008,
+    -- Fixed Peg / Economy (Phase 1): ONE coin→USD rate for host, TL, and platform.
+    -- Example: coin_usd_peg = 0.003 ⇒ 1000 coins = $3. Package price_usd stays purchase amount (not coins×peg).
+    coin_usd_peg NUMERIC DEFAULT 0.003,
+    -- LEGACY (kept for backward compat; synced to coin_usd_peg on admin save — do not use in new code paths):
+    coin_to_usd_ratio NUMERIC DEFAULT 0.003,
+    female_payout_ratio_usd NUMERIC DEFAULT 0.003,
     min_payout_threshold_usd INT DEFAULT 50,
     r2_bucket_name TEXT DEFAULT 'datingappbucket',
     r2_max_image_size_mb INT DEFAULT 15,
@@ -383,6 +449,9 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     creator_target_gold_hours NUMERIC DEFAULT 60,
     creator_target_gold_coins BIGINT DEFAULT 60000,
     creator_target_gold_bonus_usd NUMERIC DEFAULT 150,
+    -- Financial Module: UTC close clock (HH:mm) + settlement master switch
+    period_close_utc_time TEXT DEFAULT '00:00',
+    settlement_enabled BOOLEAN DEFAULT true,
     peak_hours_start TEXT DEFAULT '18:00',
     peak_hours_end TEXT DEFAULT '00:00',
     peak_hours_enabled BOOLEAN DEFAULT true,
@@ -422,6 +491,65 @@ ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_first_call_min_
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS streak_target_days INT DEFAULT 7;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS streak_boost_duration_days INT DEFAULT 3;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS min_daily_active_hours_for_streak NUMERIC DEFAULT 2.0;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS period_close_utc_time TEXT DEFAULT '00:00';
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS settlement_enabled BOOLEAN DEFAULT true;
+-- Phase 1 host true-up: base share on live burns; target share at period close
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS female_host_target_share_percent NUMERIC DEFAULT 40;
+COMMENT ON COLUMN public.system_configs.female_host_share_percent IS
+  'Call burn: live host base share % every billing minute (admin-configurable). Target true-up is separate at period close.';
+COMMENT ON COLUMN public.system_configs.female_host_target_share_percent IS
+  'Call burn: host target share % applied at period END via true-up if bronze+ hours AND coins met. Not used mid-call.';
+COMMENT ON COLUMN public.system_configs.team_leader_share_percent IS
+  'Call burn: TL share % of burn when host has a linked team leader. Platform retained = 100 − host − TL.';
+COMMENT ON COLUMN public.system_configs.coin_burn_rate_per_min IS
+  'Caller burn coins/min (non-friends). Economy hub only.';
+COMMENT ON COLUMN public.system_configs.coin_burn_rate_friend_per_min IS
+  'Caller burn coins/min (friends). Economy hub only.';
+COMMENT ON COLUMN public.system_configs.female_earning_rate_per_min IS
+  'LEGACY derived display (burn × host%). Not used by burn_call_coins_atomic / call burn path.';
+COMMENT ON COLUMN public.system_configs.gift_female_host_share_percent IS
+  'Gift/tip host share % of gift coin cost. Editable only in Admin → Coin Burn & Economy §C. Catalog SKUs do not edit this.';
+COMMENT ON COLUMN public.system_configs.gift_team_leader_share_percent IS
+  'Gift/tip TL share % of gift coin cost when host has linked TL. Economy §C only. Platform = 100 − host − TL.';
+-- Fixed Peg (Phase 1): canonical coin→USD for host/TL/platform. Legacy ratios kept & synced.
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS coin_usd_peg NUMERIC DEFAULT 0.003;
+COMMENT ON COLUMN public.system_configs.coin_usd_peg IS
+  'Fixed Peg: USD per coin for host/TL payables and platform retained FX. 0.003 = 1000 coins = $3. Package price_usd is purchase amount, not forced to coins×peg.';
+COMMENT ON COLUMN public.system_configs.female_payout_ratio_usd IS
+  'LEGACY: was host/TL payout FX. Synced to coin_usd_peg; prefer coin_usd_peg in application code.';
+COMMENT ON COLUMN public.system_configs.coin_to_usd_ratio IS
+  'LEGACY: was spend/platform FX. Synced to coin_usd_peg; prefer coin_usd_peg in application code.';
+-- Backfill peg from prior host payout ratio when column was just added (NULL), else keep default.
+UPDATE public.system_configs
+SET coin_usd_peg = COALESCE(NULLIF(female_payout_ratio_usd, 0), NULLIF(coin_to_usd_ratio, 0), 0.003)
+WHERE coin_usd_peg IS NULL;
+-- Align legacy columns to peg for backward-compatible readers.
+UPDATE public.system_configs
+SET
+  female_payout_ratio_usd = coin_usd_peg,
+  coin_to_usd_ratio = coin_usd_peg
+WHERE coin_usd_peg IS NOT NULL
+  AND (
+    female_payout_ratio_usd IS DISTINCT FROM coin_usd_peg
+    OR coin_to_usd_ratio IS DISTINCT FROM coin_usd_peg
+  );
+
+DO $$
+BEGIN
+  ALTER TABLE public.system_configs DROP CONSTRAINT IF EXISTS system_configs_period_close_utc_time_check;
+  ALTER TABLE public.system_configs
+    ADD CONSTRAINT system_configs_period_close_utc_time_check
+    CHECK (period_close_utc_time ~ '^(?:[01][0-9]|2[0-3]):[0-5][0-9]$');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+COMMENT ON COLUMN public.system_configs.period_close_utc_time IS
+  'UTC HH:mm when a settlement period close job may run relative to period_end (Financial Module). Default 00:00.';
+COMMENT ON COLUMN public.system_configs.settlement_enabled IS
+  'When true, period-end settlement batches are the intended cash-out path (Financial Module). Mid-period manual payouts will be disabled in a later phase.';
+COMMENT ON COLUMN public.system_configs.creator_target_cycle IS
+  'weekly = Monday 00:00 UTC → next Monday 00:00 UTC; monthly = calendar month 1st 00:00 UTC → next 1st 00:00 UTC (not rolling 30 days).';
 
 -- ============================================================================
 -- 9. MODERATION REPORTS TABLE (User incident telemetry & live QA evidence)
@@ -440,6 +568,91 @@ CREATE TABLE IF NOT EXISTS public.moderation_reports (
     resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_moderation_reports_reporter_created
+  ON public.moderation_reports (reporter_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_moderation_reports_status_created
+  ON public.moderation_reports (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_moderation_reports_pair_pending
+  ON public.moderation_reports (reporter_id, reported_user_id, status, created_at DESC);
+
+-- ============================================================================
+-- 9b. CREATOR REVIEWS (caller feedback after an explicit rating request)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.creator_reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    call_log_id TEXT REFERENCES public.call_logs(id) ON DELETE SET NULL,
+    creator_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    caller_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    stars INT NOT NULL CHECK (stars BETWEEN 1 AND 5),
+    communication INT CHECK (communication IS NULL OR (communication BETWEEN 1 AND 5)),
+    friendliness INT CHECK (friendliness IS NULL OR (friendliness BETWEEN 1 AND 5)),
+    clarity INT CHECK (clarity IS NULL OR (clarity BETWEEN 1 AND 5)),
+    energy INT CHECK (energy IS NULL OR (energy BETWEEN 1 AND 5)),
+    comment TEXT,
+    tags TEXT[] DEFAULT '{}',
+    call_duration_seconds INT,
+    requested_by TEXT REFERENCES public.profiles(id) ON DELETE SET NULL,
+    rating_request_message_id UUID REFERENCES public.messages(id) ON DELETE SET NULL,
+    caller_name TEXT,
+    caller_avatar TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Evolve legacy creator_reviews shape (older DBs used rating/review_text TEXT id)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'creator_reviews' AND column_name = 'rating'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'creator_reviews' AND column_name = 'stars'
+  ) THEN
+    ALTER TABLE public.creator_reviews RENAME COLUMN rating TO stars;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'creator_reviews' AND column_name = 'review_text'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'creator_reviews' AND column_name = 'comment'
+  ) THEN
+    ALTER TABLE public.creator_reviews RENAME COLUMN review_text TO comment;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'creator_reviews' AND column_name = 'duration_seconds'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'creator_reviews' AND column_name = 'call_duration_seconds'
+  ) THEN
+    ALTER TABLE public.creator_reviews RENAME COLUMN duration_seconds TO call_duration_seconds;
+  END IF;
+END $$;
+
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS stars INT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS communication INT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS friendliness INT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS clarity INT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS energy INT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS comment TEXT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS call_duration_seconds INT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS requested_by TEXT REFERENCES public.profiles(id) ON DELETE SET NULL;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS rating_request_message_id UUID;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS caller_name TEXT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS caller_avatar TEXT;
+ALTER TABLE public.creator_reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_creator_reviews_caller_call_unique
+  ON public.creator_reviews (caller_id, call_log_id)
+  WHERE call_log_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_creator_reviews_caller_request_unique
+  ON public.creator_reviews (caller_id, rating_request_message_id)
+  WHERE rating_request_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_creator_reviews_creator_created
+  ON public.creator_reviews (creator_id, created_at DESC);
 
 -- ============================================================================
 -- 10. CMS POLICIES & HOME CMS TABLES
@@ -464,14 +677,21 @@ CREATE TABLE IF NOT EXISTS public.home_banners (
     title TEXT NOT NULL,
     subtitle TEXT,
     badge TEXT,
+    cta_text TEXT DEFAULT 'Explore Now',
+    tag_color TEXT DEFAULT 'bg-indigo-600 text-white',
     image_url TEXT,
     action_type TEXT DEFAULT 'tab',
     action_target TEXT DEFAULT 'coins',
     bg_gradient TEXT DEFAULT 'from-indigo-950/90 via-purple-950/70 to-slate-900/90',
     order_num INT DEFAULT 0,
     active BOOLEAN DEFAULT true,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE public.home_banners ADD COLUMN IF NOT EXISTS cta_text TEXT DEFAULT 'Explore Now';
+ALTER TABLE public.home_banners ADD COLUMN IF NOT EXISTS tag_color TEXT DEFAULT 'bg-indigo-600 text-white';
+ALTER TABLE public.home_banners ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS public.home_quick_links (
     id TEXT PRIMARY KEY,
@@ -505,6 +725,14 @@ CREATE TABLE IF NOT EXISTS public.feed_posts (
 
 CREATE INDEX IF NOT EXISTS idx_feed_posts_creator ON public.feed_posts(creator_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS public.feed_post_likes (
+    post_id TEXT NOT NULL REFERENCES public.feed_posts(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (post_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_feed_post_likes_user ON public.feed_post_likes(user_id, created_at DESC);
+
 -- ============================================================================
 -- 12. COIN PACKAGES & STORE SKUS TABLE
 -- ============================================================================
@@ -514,11 +742,18 @@ CREATE TABLE IF NOT EXISTS public.coin_packages (
     coins INT NOT NULL,
     bonus_coins INT DEFAULT 0,
     price_usd NUMERIC NOT NULL,
+    discount_price_usd NUMERIC NULL,
+    approx_call_minutes INT NULL,
+    saving_label TEXT NULL,
     badge_tag TEXT,
     popular BOOLEAN DEFAULT false,
     order_num INT DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE public.coin_packages ADD COLUMN IF NOT EXISTS discount_price_usd NUMERIC NULL;
+ALTER TABLE public.coin_packages ADD COLUMN IF NOT EXISTS approx_call_minutes INT NULL;
+ALTER TABLE public.coin_packages ADD COLUMN IF NOT EXISTS saving_label TEXT NULL;
 
 -- ============================================================================
 -- 13. FAVORITES, BLOCKED USERS & CREATOR GOALS TABLES
@@ -545,6 +780,79 @@ CREATE TABLE IF NOT EXISTS public.creator_goals (
     target_coins INT NOT NULL DEFAULT 10000,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================================
+-- 13b. CREATOR METRICS (server-owned online hours, Ready Now, tiers)
+-- Writes MUST go through Express + service role. Clients may SELECT only.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.creator_metrics (
+    creator_id TEXT PRIMARY KEY REFERENCES public.profiles(id) ON DELETE CASCADE,
+    agency_leader_id TEXT REFERENCES public.profiles(id) ON DELETE SET NULL,
+    active_online_seconds BIGINT NOT NULL DEFAULT 0,
+    active_online_hours NUMERIC NOT NULL DEFAULT 0,
+    coins_earned_from_calls BIGINT NOT NULL DEFAULT 0,
+    coins_earned_from_gifts BIGINT NOT NULL DEFAULT 0,
+    total_target_coins BIGINT NOT NULL DEFAULT 0,
+    current_streak_days INT NOT NULL DEFAULT 0,
+    streak_boost_until TIMESTAMPTZ,
+    last_active_date DATE,
+    first_call_bonus_claimed_date DATE,
+    total_calls_offered INT NOT NULL DEFAULT 0,
+    total_calls_answered INT NOT NULL DEFAULT 0,
+    total_calls_declined INT NOT NULL DEFAULT 0,
+    total_calls_missed INT NOT NULL DEFAULT 0,
+    response_health_score NUMERIC NOT NULL DEFAULT 100,
+    performance_tier TEXT NOT NULL DEFAULT 'bronze' CHECK (performance_tier IN ('bronze', 'silver', 'gold')),
+    is_ready_now_active BOOLEAN NOT NULL DEFAULT false,
+    ready_now_toggled_at TIMESTAMPTZ,
+    target_period_start DATE,
+    target_period_end DATE,
+    bonus_earned_coins BIGINT NOT NULL DEFAULT 0,
+    bonus_earned_usd NUMERIC NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT creator_metrics_creator_id_unique UNIQUE (creator_id)
+);
+
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS agency_leader_id TEXT REFERENCES public.profiles(id) ON DELETE SET NULL;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS active_online_seconds BIGINT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS active_online_hours NUMERIC DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS coins_earned_from_calls BIGINT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS coins_earned_from_gifts BIGINT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS total_target_coins BIGINT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS current_streak_days INT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS streak_boost_until TIMESTAMPTZ;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS last_active_date DATE;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS first_call_bonus_claimed_date DATE;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS total_calls_offered INT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS total_calls_answered INT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS total_calls_declined INT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS total_calls_missed INT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS response_health_score NUMERIC DEFAULT 100;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS performance_tier TEXT DEFAULT 'bronze';
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS is_ready_now_active BOOLEAN DEFAULT false;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS ready_now_toggled_at TIMESTAMPTZ;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS target_period_start DATE;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS target_period_end DATE;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS bonus_earned_coins BIGINT DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS bonus_earned_usd NUMERIC DEFAULT 0;
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.creator_metrics ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+DO $$
+BEGIN
+    ALTER TABLE public.creator_metrics DROP CONSTRAINT IF EXISTS creator_metrics_performance_tier_check;
+    ALTER TABLE public.creator_metrics
+        ADD CONSTRAINT creator_metrics_performance_tier_check
+        CHECK (performance_tier IN ('bronze', 'silver', 'gold'));
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_creator_metrics_agency_leader ON public.creator_metrics(agency_leader_id);
+CREATE INDEX IF NOT EXISTS idx_creator_metrics_ready_now ON public.creator_metrics(is_ready_now_active) WHERE is_ready_now_active = true;
+CREATE INDEX IF NOT EXISTS idx_creator_metrics_tier ON public.creator_metrics(performance_tier);
+CREATE INDEX IF NOT EXISTS idx_profiles_last_seen_at ON public.profiles(last_seen_at);
 
 -- ============================================================================
 -- 14. USER DAILY REWARDS & ACTIVITY QUESTS TABLE
@@ -588,7 +896,10 @@ ALTER TABLE public.user_daily_rewards ADD COLUMN IF NOT EXISTS task_gift_claimed
 ALTER TABLE public.user_daily_rewards ADD COLUMN IF NOT EXISTS master_chest_claimed BOOLEAN DEFAULT false;
 ALTER TABLE public.user_daily_rewards ADD COLUMN IF NOT EXISTS total_coins_earned BIGINT DEFAULT 0;
 
-CREATE INDEX IF NOT EXISTS idx_user_daily_rewards_user ON public.user_daily_rewards(user_id);
+-- Ensure video call seconds column comment (progress unit = seconds)
+COMMENT ON COLUMN public.user_daily_rewards.task_video_call_seconds IS
+  'Accumulated 1-on-1 video call seconds for daily mission. Target in daily_missions_config.videoCall.target is also seconds. UI may display minutes (seconds/60).';
+
 
 -- ============================================================================
 -- 15. ROW LEVEL SECURITY (RLS) POLICIES (Full Public & Authenticated Access)
@@ -596,6 +907,7 @@ CREATE INDEX IF NOT EXISTS idx_user_daily_rewards_user ON public.user_daily_rewa
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.matches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.message_conversation_clears ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.call_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.friend_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.payout_requests ENABLE ROW LEVEL SECURITY;
@@ -603,17 +915,24 @@ ALTER TABLE public.country_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.language_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.zodiac_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.interest_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.currency_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.system_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.moderation_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.creator_reviews ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cms_policies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.home_banners ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.home_quick_links ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.feed_posts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.feed_post_likes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.coin_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.favorites ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blocked_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.creator_goals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.creator_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_daily_rewards ENABLE ROW LEVEL SECURITY;
+
+-- Financial Module RLS is enabled after CREATE TABLE (section 16.55), not here —
+-- those relations are defined later in this file.
 
 -- Replace permissive "Public full access" policies with command-specific policies.
 -- Goal: prevent destructive DELETE operations from being executed by non-admin clients.
@@ -621,6 +940,7 @@ ALTER TABLE public.user_daily_rewards ENABLE ROW LEVEL SECURITY;
 -- DELETE is restricted:
 --   - admin-only for most tables
 --   - owner-or-admin for favorites & blocked_users
+--   - participant policies for friend_requests (hardened in section 19+)
 
 -- Shared admin predicate used in multiple DELETE policies
 -- (admin@livecall.app is also checked for environments where profiles.role may drift)
@@ -635,6 +955,7 @@ DROP POLICY IF EXISTS "Public full access to friend_requests" ON public.friend_r
 DROP POLICY IF EXISTS "Public full access to payout_requests" ON public.payout_requests;
 DROP POLICY IF EXISTS "Public full access to country_configs" ON public.country_configs;
 DROP POLICY IF EXISTS "Public full access to language_configs" ON public.language_configs;
+DROP POLICY IF EXISTS "Public full access to currency_configs" ON public.currency_configs;
 DROP POLICY IF EXISTS "Public full access to zodiac_configs" ON public.zodiac_configs;
 DROP POLICY IF EXISTS "Public full access to interest_configs" ON public.interest_configs;
 DROP POLICY IF EXISTS "Public full access to system_configs" ON public.system_configs;
@@ -712,6 +1033,11 @@ DROP POLICY IF EXISTS "authenticated insert interest_configs" ON public.interest
 DROP POLICY IF EXISTS "authenticated update interest_configs" ON public.interest_configs;
 DROP POLICY IF EXISTS "admin delete interest_configs" ON public.interest_configs;
 
+DROP POLICY IF EXISTS "public select currency_configs" ON public.currency_configs;
+DROP POLICY IF EXISTS "authenticated insert currency_configs" ON public.currency_configs;
+DROP POLICY IF EXISTS "authenticated update currency_configs" ON public.currency_configs;
+DROP POLICY IF EXISTS "admin delete currency_configs" ON public.currency_configs;
+
 DROP POLICY IF EXISTS "public select system_configs" ON public.system_configs;
 DROP POLICY IF EXISTS "authenticated insert system_configs" ON public.system_configs;
 DROP POLICY IF EXISTS "authenticated update system_configs" ON public.system_configs;
@@ -742,6 +1068,14 @@ DROP POLICY IF EXISTS "public select feed_posts" ON public.feed_posts;
 DROP POLICY IF EXISTS "authenticated insert feed_posts" ON public.feed_posts;
 DROP POLICY IF EXISTS "authenticated update feed_posts" ON public.feed_posts;
 DROP POLICY IF EXISTS "admin delete feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "owner insert feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "owner update feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "owner delete feed_posts" ON public.feed_posts;
+
+DROP POLICY IF EXISTS "public select feed_post_likes" ON public.feed_post_likes;
+DROP POLICY IF EXISTS "owner select feed_post_likes" ON public.feed_post_likes;
+DROP POLICY IF EXISTS "owner insert feed_post_likes" ON public.feed_post_likes;
+DROP POLICY IF EXISTS "owner delete feed_post_likes" ON public.feed_post_likes;
 
 DROP POLICY IF EXISTS "public select coin_packages" ON public.coin_packages;
 DROP POLICY IF EXISTS "authenticated insert coin_packages" ON public.coin_packages;
@@ -762,6 +1096,14 @@ DROP POLICY IF EXISTS "public select creator_goals" ON public.creator_goals;
 DROP POLICY IF EXISTS "authenticated insert creator_goals" ON public.creator_goals;
 DROP POLICY IF EXISTS "authenticated update creator_goals" ON public.creator_goals;
 DROP POLICY IF EXISTS "admin delete creator_goals" ON public.creator_goals;
+
+DROP POLICY IF EXISTS "creator_metrics select own" ON public.creator_metrics;
+DROP POLICY IF EXISTS "creator_metrics select agency" ON public.creator_metrics;
+DROP POLICY IF EXISTS "creator_metrics select admin" ON public.creator_metrics;
+DROP POLICY IF EXISTS "public select creator_metrics" ON public.creator_metrics;
+DROP POLICY IF EXISTS "authenticated insert creator_metrics" ON public.creator_metrics;
+DROP POLICY IF EXISTS "authenticated update creator_metrics" ON public.creator_metrics;
+DROP POLICY IF EXISTS "admin delete creator_metrics" ON public.creator_metrics;
 
 DROP POLICY IF EXISTS "public select user_daily_rewards" ON public.user_daily_rewards;
 DROP POLICY IF EXISTS "authenticated insert user_daily_rewards" ON public.user_daily_rewards;
@@ -786,6 +1128,11 @@ CREATE POLICY "admin delete profiles" ON public.profiles
   );
 
 -- MATCHES
+-- Semantics (app-enforced via Express; RLS restricts row visibility/writes to participants):
+--   pending  = one-sided swipe like (initiated_by = liker); NOT a mutual match
+--   matched  = mutual like OR successful Quick Match connection
+--   rejected = swipe pass / reject (same profile should not immediately reshown)
+--   unmatched = previously matched then dissolved
 CREATE POLICY "public select matches" ON public.matches FOR SELECT USING (true);
 CREATE POLICY "authenticated insert matches" ON public.matches FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "authenticated update matches" ON public.matches FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
@@ -853,10 +1200,8 @@ CREATE POLICY "admin delete friend_requests" ON public.friend_requests
     )
   );
 
--- PAYOUT REQUESTS
+-- PAYOUT REQUESTS (Phase 7: SELECT/DELETE only — no client INSERT/UPDATE)
 CREATE POLICY "public select payout_requests" ON public.payout_requests FOR SELECT USING (true);
-CREATE POLICY "authenticated insert payout_requests" ON public.payout_requests FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "authenticated update payout_requests" ON public.payout_requests FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "admin delete payout_requests" ON public.payout_requests
   FOR DELETE USING (
     EXISTS (
@@ -935,6 +1280,22 @@ CREATE POLICY "admin delete interest_configs" ON public.interest_configs
     )
   );
 
+CREATE POLICY "public select currency_configs" ON public.currency_configs FOR SELECT USING (true);
+CREATE POLICY "authenticated insert currency_configs" ON public.currency_configs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "authenticated update currency_configs" ON public.currency_configs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "admin delete currency_configs" ON public.currency_configs
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (
+          p.auth_id = auth.uid()
+          OR p.id = auth.uid()::text
+          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+        )
+    )
+  );
+
 CREATE POLICY "public select system_configs" ON public.system_configs FOR SELECT USING (true);
 CREATE POLICY "authenticated insert system_configs" ON public.system_configs FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "authenticated update system_configs" ON public.system_configs FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
@@ -951,85 +1312,82 @@ CREATE POLICY "admin delete system_configs" ON public.system_configs
     )
   );
 
-CREATE POLICY "public select moderation_reports" ON public.moderation_reports FOR SELECT USING (true);
-CREATE POLICY "authenticated insert moderation_reports" ON public.moderation_reports FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "authenticated update moderation_reports" ON public.moderation_reports FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "admin delete moderation_reports" ON public.moderation_reports
-  FOR DELETE USING (
-    EXISTS (
-      SELECT 1 FROM public.profiles p
-      WHERE p.role = 'admin'
-        AND (
-          p.auth_id = auth.uid()
-          OR p.id = auth.uid()::text
-          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
-        )
-    )
-  );
+-- Moderation reports: policies defined after current_profile_id()/is_admin_user() helpers
+-- (see MODERATION REPORTS — reporter/admin scoped section near end of this file).
+-- Do not re-create public SELECT / authenticated UPDATE here.
 
+-- Home CMS: public read; admin-only writes (mutations also go through Express requireAdmin)
+DROP POLICY IF EXISTS "public select cms_policies" ON public.cms_policies;
+DROP POLICY IF EXISTS "authenticated insert cms_policies" ON public.cms_policies;
+DROP POLICY IF EXISTS "authenticated update cms_policies" ON public.cms_policies;
+DROP POLICY IF EXISTS "admin delete cms_policies" ON public.cms_policies;
+DROP POLICY IF EXISTS "admin write cms_policies" ON public.cms_policies;
 CREATE POLICY "public select cms_policies" ON public.cms_policies FOR SELECT USING (true);
-CREATE POLICY "authenticated insert cms_policies" ON public.cms_policies FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "authenticated update cms_policies" ON public.cms_policies FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "admin delete cms_policies" ON public.cms_policies
-  FOR DELETE USING (
+CREATE POLICY "admin write cms_policies" ON public.cms_policies
+  FOR ALL
+  USING (
     EXISTS (
       SELECT 1 FROM public.profiles p
       WHERE p.role = 'admin'
-        AND (
-          p.auth_id = auth.uid()
-          OR p.id = auth.uid()::text
-          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
-        )
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
     )
   );
 
+DROP POLICY IF EXISTS "public select home_banners" ON public.home_banners;
+DROP POLICY IF EXISTS "authenticated insert home_banners" ON public.home_banners;
+DROP POLICY IF EXISTS "authenticated update home_banners" ON public.home_banners;
+DROP POLICY IF EXISTS "admin delete home_banners" ON public.home_banners;
+DROP POLICY IF EXISTS "admin write home_banners" ON public.home_banners;
 CREATE POLICY "public select home_banners" ON public.home_banners FOR SELECT USING (true);
-CREATE POLICY "authenticated insert home_banners" ON public.home_banners FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "authenticated update home_banners" ON public.home_banners FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "admin delete home_banners" ON public.home_banners
-  FOR DELETE USING (
+CREATE POLICY "admin write home_banners" ON public.home_banners
+  FOR ALL
+  USING (
     EXISTS (
       SELECT 1 FROM public.profiles p
       WHERE p.role = 'admin'
-        AND (
-          p.auth_id = auth.uid()
-          OR p.id = auth.uid()::text
-          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
-        )
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
     )
   );
 
+DROP POLICY IF EXISTS "public select home_quick_links" ON public.home_quick_links;
+DROP POLICY IF EXISTS "authenticated insert home_quick_links" ON public.home_quick_links;
+DROP POLICY IF EXISTS "authenticated update home_quick_links" ON public.home_quick_links;
+DROP POLICY IF EXISTS "admin delete home_quick_links" ON public.home_quick_links;
+DROP POLICY IF EXISTS "admin write home_quick_links" ON public.home_quick_links;
 CREATE POLICY "public select home_quick_links" ON public.home_quick_links FOR SELECT USING (true);
-CREATE POLICY "authenticated insert home_quick_links" ON public.home_quick_links FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "authenticated update home_quick_links" ON public.home_quick_links FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "admin delete home_quick_links" ON public.home_quick_links
-  FOR DELETE USING (
+CREATE POLICY "admin write home_quick_links" ON public.home_quick_links
+  FOR ALL
+  USING (
     EXISTS (
       SELECT 1 FROM public.profiles p
       WHERE p.role = 'admin'
-        AND (
-          p.auth_id = auth.uid()
-          OR p.id = auth.uid()::text
-          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
-        )
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
     )
   );
 
-CREATE POLICY "public select feed_posts" ON public.feed_posts FOR SELECT USING (true);
-CREATE POLICY "authenticated insert feed_posts" ON public.feed_posts FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "authenticated update feed_posts" ON public.feed_posts FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
-CREATE POLICY "admin delete feed_posts" ON public.feed_posts
-  FOR DELETE USING (
-    EXISTS (
-      SELECT 1 FROM public.profiles p
-      WHERE p.role = 'admin'
-        AND (
-          p.auth_id = auth.uid()
-          OR p.id = auth.uid()::text
-          OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
-        )
-    )
-  );
+-- feed_posts: public read; owner/admin write (mutations preferred via Express service role)
+-- (Hardened policies applied after current_profile_id()/is_admin_user() helpers — see end of file.)
 
 CREATE POLICY "public select coin_packages" ON public.coin_packages FOR SELECT USING (true);
 CREATE POLICY "authenticated insert coin_packages" ON public.coin_packages FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
@@ -1099,7 +1457,43 @@ CREATE POLICY "admin delete creator_goals" ON public.creator_goals
     )
   );
 
--- DAILY REWARDS
+-- CREATOR METRICS (read-only for clients; writes via Express service role only)
+-- Hardened policies using current_profile_id() are also applied in section 18+.
+CREATE POLICY "creator_metrics select own" ON public.creator_metrics FOR SELECT USING (
+  creator_id = auth.uid()::text
+  OR EXISTS (
+    SELECT 1 FROM public.profiles p
+    WHERE p.id = creator_metrics.creator_id AND p.auth_id = auth.uid()
+  )
+);
+CREATE POLICY "creator_metrics select agency" ON public.creator_metrics FOR SELECT USING (
+  agency_leader_id = auth.uid()::text
+  OR EXISTS (
+    SELECT 1 FROM public.profiles me
+    WHERE me.auth_id = auth.uid()
+      AND (
+        me.id = creator_metrics.agency_leader_id
+        OR EXISTS (
+          SELECT 1 FROM public.profiles host
+          WHERE host.id = creator_metrics.creator_id
+            AND (host.team_leader_id = me.id OR host.created_by_id = me.id)
+        )
+      )
+  )
+);
+CREATE POLICY "creator_metrics select admin" ON public.creator_metrics FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM public.profiles p
+    WHERE p.role = 'admin'
+      AND (
+        p.auth_id = auth.uid()
+        OR p.id = auth.uid()::text
+        OR (p.email IS NOT NULL AND lower(p.email) = 'admin@livecall.app')
+      )
+  )
+);
+
+-- DAILY REWARDS (legacy permissive policies — superseded by owner RLS in section 18)
 CREATE POLICY "public select user_daily_rewards" ON public.user_daily_rewards FOR SELECT USING (true);
 CREATE POLICY "authenticated insert user_daily_rewards" ON public.user_daily_rewards FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "authenticated update user_daily_rewards" ON public.user_daily_rewards FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
@@ -1118,13 +1512,53 @@ CREATE POLICY "admin delete user_daily_rewards" ON public.user_daily_rewards
 
 -- ============================================================================
 -- 16. AUTOMATED AUTH TRIGGER (Sync auth.users with public.profiles)
+-- App upserts MUST preserve auth_id (never write auth_id = NULL).
+-- Public signup roles ALWAYS overwrite stale privileged roles on email-link / ON CONFLICT.
+-- Privileged roles (team_leader / agency_manager / admin) only applied when Auth metadata says so
+-- (admin/TL server createUser paths). Public clients must sanitize metadata before Auth create.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION public.handle_new_auth_user()
 RETURNS TRIGGER AS $$
 DECLARE
     v_existing_id TEXT;
+    v_meta_role TEXT;
+    v_meta_gender TEXT;
+    v_role TEXT;
+    v_gender TEXT;
+    v_is_public BOOLEAN;
+    v_is_privileged BOOLEAN;
 BEGIN
-    -- If a profile already exists for this email, link auth_id instead of creating a duplicate male/female row
+    v_meta_role := lower(COALESCE(NEW.raw_user_meta_data->>'role', 'male_user'));
+    v_meta_gender := lower(COALESCE(NEW.raw_user_meta_data->>'gender', ''));
+
+    -- Normalize role: allow all app roles; unknown → male_user
+    IF v_meta_role IN (
+        'male_user', 'female_user', 'female_creator', 'female_host', 'other_user',
+        'admin', 'team_leader', 'agency_manager'
+    ) THEN
+        v_role := v_meta_role;
+    ELSE
+        v_role := 'male_user';
+    END IF;
+
+    v_is_public := v_role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user');
+    v_is_privileged := v_role IN ('team_leader', 'agency_manager', 'admin');
+
+    -- Gender from role (public + TL); admin may use meta
+    IF v_role IN ('team_leader', 'agency_manager') THEN
+        v_gender := 'female';
+    ELSIF v_role IN ('female_user', 'female_creator', 'female_host') THEN
+        v_gender := 'female';
+    ELSIF v_role = 'other_user' THEN
+        v_gender := 'other';
+    ELSIF v_role = 'admin' THEN
+        v_gender := CASE WHEN v_meta_gender IN ('female', 'male', 'other') THEN v_meta_gender ELSE 'male' END;
+    ELSE
+        -- male_user (and fallback)
+        v_gender := 'male';
+    END IF;
+
+    -- If a profile already exists for this email, link auth_id (do NOT create a second row).
     IF NEW.email IS NOT NULL AND NEW.email <> '' THEN
         SELECT id INTO v_existing_id
         FROM public.profiles
@@ -1137,6 +1571,23 @@ BEGIN
                 auth_id = NEW.id,
                 email = NEW.email,
                 name = COALESCE(NULLIF(name, ''), NEW.raw_user_meta_data->>'name', NEW.raw_user_meta_data->>'full_name', name),
+                -- Public signup MUST overwrite stale team_leader/admin; privileged meta may set privileged role
+                role = CASE
+                    WHEN v_is_public THEN v_role
+                    WHEN v_is_privileged THEN v_role
+                    ELSE role
+                END,
+                gender = CASE
+                    WHEN v_is_public THEN v_gender
+                    WHEN v_role IN ('team_leader', 'agency_manager') THEN 'female'
+                    WHEN v_role = 'admin' THEN v_gender
+                    ELSE gender
+                END,
+                gender_locked = true,
+                -- Clear agency branding when a public signup claims a formerly privileged row
+                agency_name = CASE WHEN v_is_public THEN NULL ELSE agency_name END,
+                commission_percent = CASE WHEN v_is_public THEN NULL ELSE commission_percent END,
+                team_leader_note = CASE WHEN v_is_public THEN NULL ELSE team_leader_note END,
                 updated_at = now()
             WHERE id = v_existing_id;
             RETURN NEW;
@@ -1162,22 +1613,42 @@ BEGIN
         NEW.id,
         COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.raw_user_meta_data->>'name', NEW.raw_user_meta_data->>'display_name', split_part(NEW.email, '@', 1), 'New Member'),
         NEW.email,
-        COALESCE(NEW.raw_user_meta_data->>'gender', 'male'),
+        v_gender,
         true,
-        CASE
-            WHEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user') IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user')
-            THEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user')
-            ELSE 'male_user'
-        END,
-        CASE WHEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user') = 'male_user' THEN 50 ELSE 0 END,
-        CASE WHEN COALESCE(NEW.raw_user_meta_data->>'role', 'male_user') = 'female_creator' THEN 10 ELSE 0 END,
-        false,
-        false,
+        v_role,
+        CASE WHEN v_role = 'male_user' THEN 50 ELSE 0 END,
+        CASE WHEN v_role IN ('female_creator', 'female_host') THEN 10 ELSE 0 END,
+        CASE WHEN v_is_privileged THEN true ELSE false END,
+        CASE WHEN v_is_privileged THEN true ELSE false END,
         'online'
     )
     ON CONFLICT (id) DO UPDATE SET
-        auth_id = EXCLUDED.auth_id,
+        auth_id = COALESCE(EXCLUDED.auth_id, public.profiles.auth_id),
         email = COALESCE(EXCLUDED.email, public.profiles.email),
+        role = CASE
+            WHEN EXCLUDED.role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user')
+                THEN EXCLUDED.role
+            WHEN EXCLUDED.role IN ('team_leader', 'agency_manager', 'admin')
+                THEN EXCLUDED.role
+            ELSE public.profiles.role
+        END,
+        gender = CASE
+            WHEN EXCLUDED.role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user')
+                THEN EXCLUDED.gender
+            WHEN EXCLUDED.role IN ('team_leader', 'agency_manager') THEN 'female'
+            WHEN EXCLUDED.role = 'admin' THEN EXCLUDED.gender
+            ELSE public.profiles.gender
+        END,
+        agency_name = CASE
+            WHEN EXCLUDED.role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user')
+                THEN NULL
+            ELSE public.profiles.agency_name
+        END,
+        commission_percent = CASE
+            WHEN EXCLUDED.role IN ('male_user', 'female_user', 'female_creator', 'female_host', 'other_user')
+                THEN NULL
+            ELSE public.profiles.commission_percent
+        END,
         updated_at = now();
     RETURN NEW;
 END;
@@ -1188,6 +1659,23 @@ CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_auth_user();
 
+-- Prevent accidental null-out of profiles.auth_id from app upserts
+CREATE OR REPLACE FUNCTION public.protect_profiles_auth_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.auth_id IS NOT NULL AND NEW.auth_id IS NULL THEN
+        NEW.auth_id := OLD.auth_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_protect_profiles_auth_id ON public.profiles;
+CREATE TRIGGER trg_protect_profiles_auth_id
+    BEFORE UPDATE ON public.profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION public.protect_profiles_auth_id();
+
 -- ============================================================================
 -- 16.5 IMMUTABLE WALLET LEDGER (append-only call billing)
 -- ============================================================================
@@ -1195,13 +1683,38 @@ CREATE TABLE IF NOT EXISTS public.wallet_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
     call_id TEXT,
-    transaction_type TEXT NOT NULL CHECK (transaction_type IN ('CALL_DEBIT', 'HOST_EARN', 'TL_EARN')),
+    transaction_type TEXT NOT NULL CHECK (transaction_type IN (
+      'CALL_DEBIT', 'GIFT_DEBIT', 'HOST_EARN', 'TL_EARN', 'PURCHASE',
+      'REWARD_STREAK', 'REWARD_MISSION', 'REWARD_MASTER_CHEST',
+      'TARGET_SHARE_TRUEUP'
+    )),
     amount NUMERIC NOT NULL,
     balance_after NUMERIC NOT NULL,
     billing_minute INT,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Expand CHECK to include reward types + GIFT_DEBIT + TARGET_SHARE_TRUEUP (idempotent)
+DO $$
+BEGIN
+  ALTER TABLE public.wallet_ledger DROP CONSTRAINT IF EXISTS wallet_ledger_transaction_type_check;
+EXCEPTION WHEN undefined_object THEN
+  NULL;
+END $$;
+ALTER TABLE public.wallet_ledger DROP CONSTRAINT IF EXISTS wallet_ledger_transaction_type_check;
+DO $$
+BEGIN
+  ALTER TABLE public.wallet_ledger
+    ADD CONSTRAINT wallet_ledger_transaction_type_check
+    CHECK (transaction_type IN (
+      'CALL_DEBIT', 'GIFT_DEBIT', 'HOST_EARN', 'TL_EARN', 'PURCHASE',
+      'REWARD_STREAK', 'REWARD_MISSION', 'REWARD_MASTER_CHEST',
+      'TARGET_SHARE_TRUEUP'
+    ));
+EXCEPTION WHEN duplicate_object THEN
+  NULL;
+END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS wallet_ledger_unique_billing_idx
     ON public.wallet_ledger (call_id, billing_minute, transaction_type, user_id);
@@ -1212,7 +1725,69 @@ CREATE INDEX IF NOT EXISTS idx_wallet_ledger_user_created
 CREATE INDEX IF NOT EXISTS idx_wallet_ledger_call
     ON public.wallet_ledger (call_id, billing_minute);
 
+COMMENT ON TABLE public.wallet_ledger IS
+  'Operational coin movements. HOST_EARN/TL_EARN in [period_start,period_end) feed closePeriod accrual. TARGET_SHARE_TRUEUP = period-end host call share top-up (append-only; TL has no true-up). Gifts/tips: GIFT_DEBIT (sender, negative) + HOST_EARN/TL_EARN with metadata.kind=gift. Platform retained ≈ |CALL_DEBIT|+|GIFT_DEBIT| − HOST − TARGET_SHARE_TRUEUP − TL. PURCHASE = coin funding. Rewards excluded from salary accrual.';
+
 ALTER TABLE public.wallet_ledger ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================================
+-- 16.52 COIN PURCHASES — funding intents (admin manual + gateway-ready)
+-- Writes via Express + service role only. Same completeCoinPurchase path for both channels.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.coin_purchases (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL CHECK (channel IN ('ADMIN_MANUAL', 'GATEWAY')),
+    status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
+    amount_coins NUMERIC NOT NULL CHECK (amount_coins > 0),
+    amount_usd NUMERIC,
+    -- Phase 4 Fixed Peg: snapshot at purchase (package price is NOT forced to coins×peg)
+    coin_usd_peg_at_purchase NUMERIC,
+    peg_value_usd NUMERIC,
+    load_margin_usd NUMERIC,
+    package_id TEXT,
+    payment_provider TEXT,
+    external_ref TEXT,
+    actor_admin_id TEXT REFERENCES public.profiles(id) ON DELETE SET NULL,
+    reason TEXT,
+    wallet_ledger_id UUID REFERENCES public.wallet_ledger(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_coin_purchases_user_created
+    ON public.coin_purchases (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_coin_purchases_channel_created
+    ON public.coin_purchases (channel, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_coin_purchases_status_created
+    ON public.coin_purchases (status, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS coin_purchases_gateway_external_ref_idx
+    ON public.coin_purchases (payment_provider, external_ref)
+    WHERE channel = 'GATEWAY' AND external_ref IS NOT NULL AND status = 'completed';
+
+COMMENT ON TABLE public.coin_purchases IS
+  'Coin funding intents/records. pending → checkout-intent; completed via completeCoinPurchase (ADMIN_MANUAL or GATEWAY). amount_usd = cash paid (retail). peg_value_usd = amount_coins × coin_usd_peg_at_purchase. load_margin_usd = amount_usd − peg_value_usd. Same PURCHASE wallet_ledger type for both channels.';
+
+ALTER TABLE public.coin_purchases
+  ADD COLUMN IF NOT EXISTS coin_usd_peg_at_purchase NUMERIC;
+ALTER TABLE public.coin_purchases
+  ADD COLUMN IF NOT EXISTS peg_value_usd NUMERIC;
+ALTER TABLE public.coin_purchases
+  ADD COLUMN IF NOT EXISTS load_margin_usd NUMERIC;
+
+COMMENT ON COLUMN public.coin_purchases.amount_usd IS
+  'Cash paid / retail package pay price (USD). Not forced to coins×peg.';
+COMMENT ON COLUMN public.coin_purchases.coin_usd_peg_at_purchase IS
+  'Fixed Peg snapshot ($/coin) at purchase time from system_configs.coin_usd_peg.';
+COMMENT ON COLUMN public.coin_purchases.peg_value_usd IS
+  'amount_coins × coin_usd_peg_at_purchase — liability / peg value of coins loaded.';
+COMMENT ON COLUMN public.coin_purchases.load_margin_usd IS
+  'amount_usd − peg_value_usd when paid USD known; positive = retail above peg.';
+
+ALTER TABLE public.coin_purchases ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "public select wallet_ledger" ON public.wallet_ledger;
 DROP POLICY IF EXISTS "service role manage wallet_ledger" ON public.wallet_ledger;
@@ -1220,6 +1795,382 @@ DROP POLICY IF EXISTS "authenticated insert wallet_ledger" ON public.wallet_ledg
 DROP POLICY IF EXISTS "owner select wallet_ledger" ON public.wallet_ledger;
 CREATE POLICY "public select wallet_ledger" ON public.wallet_ledger FOR SELECT USING (true);
 CREATE POLICY "authenticated insert wallet_ledger" ON public.wallet_ledger FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+
+-- ============================================================================
+-- 16.55 FINANCIAL MODULE — settlement periods, immutable journal, batches
+-- Weekly: Monday 00:00 UTC → next Monday 00:00 UTC
+-- Monthly: calendar month 1st 00:00 UTC → next 1st 00:00 UTC (NOT rolling 30 days)
+-- Close clock: system_configs.period_close_utc_time (UTC HH:mm)
+-- Writes MUST go through Express + service role. Amounts are append-only / immutable.
+-- ============================================================================
+
+-- Settlement accrual window for a cycle instance
+CREATE TABLE IF NOT EXISTS public.settlement_periods (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cycle_type TEXT NOT NULL CHECK (cycle_type IN ('weekly', 'monthly')),
+    period_start TIMESTAMPTZ NOT NULL,
+    period_end TIMESTAMPTZ NOT NULL,
+    close_scheduled_at TIMESTAMPTZ NOT NULL,
+    closed_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'open'
+      CHECK (status IN ('open', 'closing', 'closed', 'failed')),
+    config_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    close_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT settlement_periods_end_after_start CHECK (period_end > period_start),
+    CONSTRAINT settlement_periods_cycle_start_unique UNIQUE (cycle_type, period_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_settlement_periods_status_close
+  ON public.settlement_periods (status, close_scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_settlement_periods_window
+  ON public.settlement_periods (period_start, period_end);
+
+COMMENT ON TABLE public.settlement_periods IS
+  'Financial Module settlement windows. Accrual is [period_start, period_end). close_scheduled_at uses period_end date + period_close_utc_time.';
+COMMENT ON COLUMN public.settlement_periods.period_end IS
+  'Exclusive end of accrual window (next Monday 00:00 UTC or next month 1st 00:00 UTC).';
+COMMENT ON COLUMN public.settlement_periods.config_snapshot IS
+  'Frozen ratios, shares, close time, and target bonus thresholds at close time.';
+
+-- Immutable money journal (corrections = new REVERSAL rows, never UPDATE amounts)
+CREATE TABLE IF NOT EXISTS public.financial_ledger (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    period_id UUID REFERENCES public.settlement_periods(id) ON DELETE SET NULL,
+    entry_type TEXT NOT NULL CHECK (entry_type IN (
+      'PLATFORM_EARN',
+      'HOST_EARN',
+      'TL_EARN',
+      'TARGET_BONUS',
+      'TARGET_SHARE_TRUEUP',
+      'SETTLEMENT_ACCRUAL',
+      'SETTLEMENT_PAID',
+      'REVERSAL'
+    )),
+    user_id TEXT REFERENCES public.profiles(id) ON DELETE SET NULL,
+    team_leader_id TEXT REFERENCES public.profiles(id) ON DELETE SET NULL,
+    counterparty_role TEXT CHECK (counterparty_role IN ('platform', 'host', 'team_leader')),
+    amount_coins BIGINT NOT NULL,
+    amount_usd NUMERIC NOT NULL,
+    fx_ratio NUMERIC NOT NULL,
+    source_ref_type TEXT,
+    source_ref_id TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_financial_ledger_period_created
+  ON public.financial_ledger (period_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_financial_ledger_user_created
+  ON public.financial_ledger (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_financial_ledger_entry_type
+  ON public.financial_ledger (entry_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_financial_ledger_tl
+  ON public.financial_ledger (team_leader_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_financial_ledger_source_ref
+  ON public.financial_ledger (source_ref_type, source_ref_id);
+
+COMMENT ON TABLE public.financial_ledger IS
+  'Immutable Financial Module journal. Never UPDATE amount_coins/amount_usd; use REVERSAL entries for corrections. TARGET_SHARE_TRUEUP = period-end host call share top-up (separate from TARGET_BONUS cash). Writes via Express service role only.';
+
+-- Expand financial_ledger entry_type for host share true-up (idempotent)
+DO $$
+BEGIN
+  ALTER TABLE public.financial_ledger DROP CONSTRAINT IF EXISTS financial_ledger_entry_type_check;
+EXCEPTION WHEN undefined_object THEN
+  NULL;
+END $$;
+ALTER TABLE public.financial_ledger DROP CONSTRAINT IF EXISTS financial_ledger_entry_type_check;
+DO $$
+BEGIN
+  ALTER TABLE public.financial_ledger
+    ADD CONSTRAINT financial_ledger_entry_type_check
+    CHECK (entry_type IN (
+      'PLATFORM_EARN',
+      'HOST_EARN',
+      'TL_EARN',
+      'TARGET_BONUS',
+      'TARGET_SHARE_TRUEUP',
+      'SETTLEMENT_ACCRUAL',
+      'SETTLEMENT_PAID',
+      'REVERSAL'
+    ));
+EXCEPTION WHEN duplicate_object THEN
+  NULL;
+END $$;
+
+-- Expand settlement_line_items.component for share true-up
+DO $$
+BEGIN
+  ALTER TABLE public.settlement_line_items DROP CONSTRAINT IF EXISTS settlement_line_items_component_check;
+EXCEPTION WHEN undefined_object THEN
+  NULL;
+END $$;
+ALTER TABLE public.settlement_line_items DROP CONSTRAINT IF EXISTS settlement_line_items_component_check;
+DO $$
+BEGIN
+  ALTER TABLE public.settlement_line_items
+    ADD CONSTRAINT settlement_line_items_component_check
+    CHECK (component IN (
+      'call_earnings',
+      'gift_earnings',
+      'target_bonus',
+      'target_share_trueup',
+      'tl_commission',
+      'other'
+    ));
+EXCEPTION WHEN duplicate_object THEN
+  NULL;
+END $$;
+
+-- One admin remittance unit: TL bundle (TL commission + managed host salaries) or direct host
+CREATE TABLE IF NOT EXISTS public.settlement_batches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    period_id UUID NOT NULL REFERENCES public.settlement_periods(id) ON DELETE CASCADE,
+    batch_kind TEXT NOT NULL CHECK (batch_kind IN ('team_leader_bundle', 'direct_host')),
+    team_leader_id TEXT REFERENCES public.profiles(id) ON DELETE SET NULL,
+    payee_user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL DEFAULT 'pending_admin_pay'
+      CHECK (status IN ('pending_admin_pay', 'admin_paid', 'tl_confirmed', 'cancelled')),
+    total_host_salary_usd NUMERIC NOT NULL DEFAULT 0,
+    total_tl_commission_usd NUMERIC NOT NULL DEFAULT 0,
+    total_due_usd NUMERIC NOT NULL DEFAULT 0,
+    total_host_salary_coins BIGINT NOT NULL DEFAULT 0,
+    total_tl_commission_coins BIGINT NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    payment_reference TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT settlement_batches_tl_required_for_bundle CHECK (
+      (batch_kind = 'team_leader_bundle' AND team_leader_id IS NOT NULL)
+      OR (batch_kind = 'direct_host')
+    ),
+    CONSTRAINT settlement_batches_due_non_negative CHECK (
+      total_due_usd >= 0
+      AND total_host_salary_usd >= 0
+      AND total_tl_commission_usd >= 0
+    )
+);
+
+-- One TL bundle per period per team leader
+CREATE UNIQUE INDEX IF NOT EXISTS uq_settlement_batches_period_tl_bundle
+  ON public.settlement_batches (period_id, team_leader_id)
+  WHERE batch_kind = 'team_leader_bundle' AND team_leader_id IS NOT NULL;
+
+-- One direct-host batch per period per payee
+CREATE UNIQUE INDEX IF NOT EXISTS uq_settlement_batches_period_direct_payee
+  ON public.settlement_batches (period_id, payee_user_id)
+  WHERE batch_kind = 'direct_host';
+
+CREATE INDEX IF NOT EXISTS idx_settlement_batches_period_status
+  ON public.settlement_batches (period_id, status);
+CREATE INDEX IF NOT EXISTS idx_settlement_batches_payee
+  ON public.settlement_batches (payee_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settlement_batches_tl
+  ON public.settlement_batches (team_leader_id, created_at DESC);
+
+COMMENT ON TABLE public.settlement_batches IS
+  'Period-end remittance batches. team_leader_bundle = one admin payment covering TL commission + all managed host salaries; direct_host = admin pays host directly. Amounts immutable after insert; status changes via settlement_events.';
+
+CREATE TABLE IF NOT EXISTS public.settlement_line_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id UUID NOT NULL REFERENCES public.settlement_batches(id) ON DELETE CASCADE,
+    payee_user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
+    payee_role TEXT NOT NULL CHECK (payee_role IN ('host', 'team_leader')),
+    amount_coins BIGINT NOT NULL,
+    amount_usd NUMERIC NOT NULL,
+    component TEXT NOT NULL CHECK (component IN (
+      'call_earnings',
+      'gift_earnings',
+      'target_bonus',
+      'target_share_trueup',
+      'tl_commission',
+      'other'
+    )),
+    breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
+    host_salary_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (host_salary_status IN ('pending', 'paid')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT settlement_line_items_amount_non_negative CHECK (
+      amount_coins >= 0 AND amount_usd >= 0
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_settlement_line_items_batch
+  ON public.settlement_line_items (batch_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_line_items_payee
+  ON public.settlement_line_items (payee_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settlement_line_items_host_status
+  ON public.settlement_line_items (host_salary_status)
+  WHERE payee_role = 'host';
+
+COMMENT ON TABLE public.settlement_line_items IS
+  'Immutable line components inside a settlement batch (host salary parts, TL commission, target bonuses). host_salary_status is host-facing pending|paid only.';
+
+-- Append-only audit trail for batch / period settlement actions
+CREATE TABLE IF NOT EXISTS public.settlement_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id UUID REFERENCES public.settlement_batches(id) ON DELETE CASCADE,
+    period_id UUID REFERENCES public.settlement_periods(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN (
+      'created',
+      'admin_marked_paid',
+      'tl_confirmed',
+      'cancelled',
+      'note'
+    )),
+    actor_user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
+    note TEXT,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_settlement_events_batch_created
+  ON public.settlement_events (batch_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settlement_events_period_created
+  ON public.settlement_events (period_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settlement_events_actor
+  ON public.settlement_events (actor_user_id, created_at DESC);
+
+COMMENT ON TABLE public.settlement_events IS
+  'Append-only settlement audit log. No UPDATEs; status transitions record new events.';
+
+-- Frozen creator metrics at period close (audit + history UI)
+CREATE TABLE IF NOT EXISTS public.creator_period_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    period_id UUID NOT NULL REFERENCES public.settlement_periods(id) ON DELETE CASCADE,
+    creator_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    agency_leader_id TEXT REFERENCES public.profiles(id) ON DELETE SET NULL,
+    active_online_seconds BIGINT NOT NULL DEFAULT 0,
+    active_online_hours NUMERIC NOT NULL DEFAULT 0,
+    coins_earned_from_calls BIGINT NOT NULL DEFAULT 0,
+    coins_earned_from_gifts BIGINT NOT NULL DEFAULT 0,
+    total_target_coins BIGINT NOT NULL DEFAULT 0,
+    performance_tier TEXT NOT NULL DEFAULT 'bronze'
+      CHECK (performance_tier IN ('bronze', 'silver', 'gold')),
+    bonus_earned_coins BIGINT NOT NULL DEFAULT 0,
+    bonus_earned_usd NUMERIC NOT NULL DEFAULT 0,
+    current_streak_days INT NOT NULL DEFAULT 0,
+    response_health_score NUMERIC NOT NULL DEFAULT 100,
+    metrics_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT creator_period_snapshots_period_creator_unique UNIQUE (period_id, creator_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_creator_period_snapshots_creator
+  ON public.creator_period_snapshots (creator_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_creator_period_snapshots_agency
+  ON public.creator_period_snapshots (agency_leader_id, period_id);
+
+COMMENT ON TABLE public.creator_period_snapshots IS
+  'Point-in-time creator metrics frozen at settlement period close. Live creator_metrics may reset after snapshot.';
+
+-- Enforce append-only / amount immutability at the database layer
+CREATE OR REPLACE FUNCTION public.finance_reject_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION '% is append-only / immutable; use REVERSAL or settlement_events instead of %',
+    TG_TABLE_NAME, TG_OP;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_financial_ledger_no_update ON public.financial_ledger;
+CREATE TRIGGER trg_financial_ledger_no_update
+  BEFORE UPDATE OR DELETE ON public.financial_ledger
+  FOR EACH ROW EXECUTE FUNCTION public.finance_reject_mutation();
+
+DROP TRIGGER IF EXISTS trg_settlement_events_no_update ON public.settlement_events;
+CREATE TRIGGER trg_settlement_events_no_update
+  BEFORE UPDATE OR DELETE ON public.settlement_events
+  FOR EACH ROW EXECUTE FUNCTION public.finance_reject_mutation();
+
+CREATE OR REPLACE FUNCTION public.settlement_batches_protect_amounts()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.total_host_salary_usd IS DISTINCT FROM OLD.total_host_salary_usd
+     OR NEW.total_tl_commission_usd IS DISTINCT FROM OLD.total_tl_commission_usd
+     OR NEW.total_due_usd IS DISTINCT FROM OLD.total_due_usd
+     OR NEW.total_host_salary_coins IS DISTINCT FROM OLD.total_host_salary_coins
+     OR NEW.total_tl_commission_coins IS DISTINCT FROM OLD.total_tl_commission_coins
+     OR NEW.batch_kind IS DISTINCT FROM OLD.batch_kind
+     OR NEW.period_id IS DISTINCT FROM OLD.period_id
+     OR NEW.team_leader_id IS DISTINCT FROM OLD.team_leader_id
+     OR NEW.payee_user_id IS DISTINCT FROM OLD.payee_user_id
+  THEN
+    RAISE EXCEPTION 'settlement_batches amounts and identity columns are immutable after insert';
+  END IF;
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_settlement_batches_protect_amounts ON public.settlement_batches;
+CREATE TRIGGER trg_settlement_batches_protect_amounts
+  BEFORE UPDATE ON public.settlement_batches
+  FOR EACH ROW EXECUTE FUNCTION public.settlement_batches_protect_amounts();
+
+-- Phase 10: batches/line amounts are immutable; DELETE blocked (status/events only for lifecycle)
+DROP TRIGGER IF EXISTS trg_settlement_batches_no_delete ON public.settlement_batches;
+CREATE TRIGGER trg_settlement_batches_no_delete
+  BEFORE DELETE ON public.settlement_batches
+  FOR EACH ROW EXECUTE FUNCTION public.finance_reject_mutation();
+
+CREATE OR REPLACE FUNCTION public.settlement_line_items_protect_amounts()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.amount_coins IS DISTINCT FROM OLD.amount_coins
+     OR NEW.amount_usd IS DISTINCT FROM OLD.amount_usd
+     OR NEW.component IS DISTINCT FROM OLD.component
+     OR NEW.payee_user_id IS DISTINCT FROM OLD.payee_user_id
+     OR NEW.payee_role IS DISTINCT FROM OLD.payee_role
+     OR NEW.batch_id IS DISTINCT FROM OLD.batch_id
+     OR NEW.breakdown IS DISTINCT FROM OLD.breakdown
+  THEN
+    RAISE EXCEPTION 'settlement_line_items amounts and identity columns are immutable; only host_salary_status may change';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_settlement_line_items_protect_amounts ON public.settlement_line_items;
+CREATE TRIGGER trg_settlement_line_items_protect_amounts
+  BEFORE UPDATE ON public.settlement_line_items
+  FOR EACH ROW EXECUTE FUNCTION public.settlement_line_items_protect_amounts();
+
+DROP TRIGGER IF EXISTS trg_settlement_line_items_no_delete ON public.settlement_line_items;
+CREATE TRIGGER trg_settlement_line_items_no_delete
+  BEFORE DELETE ON public.settlement_line_items
+  FOR EACH ROW EXECUTE FUNCTION public.finance_reject_mutation();
+
+-- RLS: enable + backend/service-role oriented (no client writes; limited selects)
+ALTER TABLE public.settlement_periods ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.financial_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.settlement_batches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.settlement_line_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.settlement_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.creator_period_snapshots ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "admin select settlement_periods" ON public.settlement_periods;
+DROP POLICY IF EXISTS "admin select financial_ledger" ON public.financial_ledger;
+DROP POLICY IF EXISTS "owner select financial_ledger" ON public.financial_ledger;
+DROP POLICY IF EXISTS "admin select settlement_batches" ON public.settlement_batches;
+DROP POLICY IF EXISTS "payee select settlement_batches" ON public.settlement_batches;
+DROP POLICY IF EXISTS "admin select settlement_line_items" ON public.settlement_line_items;
+DROP POLICY IF EXISTS "payee select settlement_line_items" ON public.settlement_line_items;
+DROP POLICY IF EXISTS "admin select settlement_events" ON public.settlement_events;
+DROP POLICY IF EXISTS "admin select creator_period_snapshots" ON public.creator_period_snapshots;
+DROP POLICY IF EXISTS "owner select creator_period_snapshots" ON public.creator_period_snapshots;
+DROP POLICY IF EXISTS "agency select creator_period_snapshots" ON public.creator_period_snapshots;
+
+-- Policies that depend on is_admin_user()/current_profile_id() are created in section 18+
+-- (see FINANCIAL MODULE RLS at end of file). Placeholder comment only here.
 
 -- ============================================================================
 -- 16.6 ATOMIC CALL COIN BURNING STORED PROCEDURE
@@ -1417,6 +2368,169 @@ EXCEPTION WHEN unique_violation THEN
         'coins_burned', p_coins_burned,
         'host_coins_earned', GREATEST(0, COALESCE(p_host_coins_earned, 0)),
         'tl_coins_earned', GREATEST(0, COALESCE(p_tl_coins_earned, 0))
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ============================================================================
+-- 16.7 ATOMIC DAILY REWARD CLAIM (streak / mission / master chest)
+-- Server-authoritative coin credit + claim flags + wallet_ledger audit.
+-- Video mission progress is stored in SECONDS (task_video_call_seconds).
+-- Idempotent via unique (call_id, billing_minute, transaction_type, user_id).
+-- ============================================================================
+CREATE OR REPLACE FUNCTION public.claim_daily_reward_atomic(
+    p_user_id TEXT,
+    p_claim_kind TEXT,
+    p_mission_key TEXT,
+    p_reward_day DATE,
+    p_coins INT,
+    p_ledger_type TEXT,
+    p_billing_minute INT,
+    p_metadata JSONB DEFAULT '{}'::jsonb
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_row public.user_daily_rewards%ROWTYPE;
+    v_balance BIGINT;
+    v_call_id TEXT;
+    v_coins INT;
+BEGIN
+    IF p_user_id IS NULL OR p_reward_day IS NULL OR p_claim_kind IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_INPUT', 'error_message', 'Missing claim parameters');
+    END IF;
+
+    v_coins := GREATEST(0, COALESCE(p_coins, 0));
+    v_call_id := 'daily_reward:' || p_reward_day::text;
+
+    -- Lock profile + rewards row
+    SELECT coin_balance INTO v_balance FROM public.profiles WHERE id = p_user_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'error_code', 'NO_PROFILE', 'error_message', 'Profile not found');
+    END IF;
+
+    SELECT * INTO v_row FROM public.user_daily_rewards WHERE user_id = p_user_id FOR UPDATE;
+    IF NOT FOUND THEN
+        INSERT INTO public.user_daily_rewards (user_id, last_login_date, tasks_date)
+        VALUES (p_user_id, p_reward_day, p_reward_day)
+        RETURNING * INTO v_row;
+    END IF;
+
+    -- Idempotent ledger hit
+    IF EXISTS (
+        SELECT 1 FROM public.wallet_ledger
+        WHERE user_id = p_user_id
+          AND call_id = v_call_id
+          AND billing_minute = p_billing_minute
+          AND transaction_type = p_ledger_type
+    ) THEN
+        RETURN jsonb_build_object(
+            'success', true,
+            'duplicate', true,
+            'coins_awarded', 0,
+            'coin_balance', v_balance,
+            'error_code', 'ALREADY_CLAIMED',
+            'error_message', 'Already claimed'
+        );
+    END IF;
+
+    IF p_claim_kind = 'streak' THEN
+        IF v_row.streak_claimed_date = p_reward_day THEN
+            RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Streak already claimed', 'coin_balance', v_balance);
+        END IF;
+        UPDATE public.user_daily_rewards
+        SET streak_claimed_date = p_reward_day,
+            total_coins_earned = COALESCE(total_coins_earned, 0) + v_coins,
+            updated_at = now()
+        WHERE user_id = p_user_id;
+
+    ELSIF p_claim_kind = 'master_chest' THEN
+        IF v_row.master_chest_claimed THEN
+            RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Master chest already claimed', 'coin_balance', v_balance);
+        END IF;
+        UPDATE public.user_daily_rewards
+        SET master_chest_claimed = true,
+            total_coins_earned = COALESCE(total_coins_earned, 0) + v_coins,
+            updated_at = now()
+        WHERE user_id = p_user_id AND master_chest_claimed = false;
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Master chest already claimed', 'coin_balance', v_balance);
+        END IF;
+
+    ELSIF p_claim_kind = 'mission' THEN
+        IF p_mission_key = 'chat_friends' THEN
+            IF v_row.task_chat_claimed THEN
+                RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Mission already claimed', 'coin_balance', v_balance);
+            END IF;
+            UPDATE public.user_daily_rewards
+            SET task_chat_claimed = true, total_coins_earned = COALESCE(total_coins_earned, 0) + v_coins, updated_at = now()
+            WHERE user_id = p_user_id AND task_chat_claimed = false;
+        ELSIF p_mission_key = 'quick_matches' THEN
+            IF v_row.task_quick_match_claimed THEN
+                RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Mission already claimed', 'coin_balance', v_balance);
+            END IF;
+            UPDATE public.user_daily_rewards
+            SET task_quick_match_claimed = true, total_coins_earned = COALESCE(total_coins_earned, 0) + v_coins, updated_at = now()
+            WHERE user_id = p_user_id AND task_quick_match_claimed = false;
+        ELSIF p_mission_key = 'video_call' THEN
+            IF v_row.task_video_call_claimed THEN
+                RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Mission already claimed', 'coin_balance', v_balance);
+            END IF;
+            UPDATE public.user_daily_rewards
+            SET task_video_call_claimed = true, total_coins_earned = COALESCE(total_coins_earned, 0) + v_coins, updated_at = now()
+            WHERE user_id = p_user_id AND task_video_call_claimed = false;
+        ELSIF p_mission_key = 'moment_interact' THEN
+            IF v_row.task_moment_claimed THEN
+                RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Mission already claimed', 'coin_balance', v_balance);
+            END IF;
+            UPDATE public.user_daily_rewards
+            SET task_moment_claimed = true, total_coins_earned = COALESCE(total_coins_earned, 0) + v_coins, updated_at = now()
+            WHERE user_id = p_user_id AND task_moment_claimed = false;
+        ELSIF p_mission_key = 'send_gift' THEN
+            IF v_row.task_gift_claimed THEN
+                RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Mission already claimed', 'coin_balance', v_balance);
+            END IF;
+            UPDATE public.user_daily_rewards
+            SET task_gift_claimed = true, total_coins_earned = COALESCE(total_coins_earned, 0) + v_coins, updated_at = now()
+            WHERE user_id = p_user_id AND task_gift_claimed = false;
+        ELSE
+            RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_MISSION', 'error_message', 'Invalid mission key');
+        END IF;
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('success', false, 'error_code', 'ALREADY_CLAIMED', 'error_message', 'Mission already claimed', 'coin_balance', v_balance);
+        END IF;
+    ELSE
+        RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_KIND', 'error_message', 'Invalid claim kind');
+    END IF;
+
+    UPDATE public.profiles
+    SET coin_balance = COALESCE(coin_balance, 0) + v_coins,
+        updated_at = now()
+    WHERE id = p_user_id
+    RETURNING coin_balance INTO v_balance;
+
+    INSERT INTO public.wallet_ledger (
+        user_id, call_id, transaction_type, amount, balance_after, billing_minute, metadata
+    ) VALUES (
+        p_user_id, v_call_id, p_ledger_type, v_coins, v_balance, p_billing_minute,
+        COALESCE(p_metadata, '{}'::jsonb)
+    );
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'duplicate', false,
+        'coins_awarded', v_coins,
+        'coin_balance', v_balance,
+        'error_message', NULL
+    );
+EXCEPTION WHEN unique_violation THEN
+    SELECT coin_balance INTO v_balance FROM public.profiles WHERE id = p_user_id;
+    RETURN jsonb_build_object(
+        'success', true,
+        'duplicate', true,
+        'coins_awarded', 0,
+        'coin_balance', COALESCE(v_balance, 0),
+        'error_code', 'ALREADY_CLAIMED',
+        'error_message', 'Already claimed'
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -1734,6 +2848,28 @@ ON CONFLICT (id) DO UPDATE SET
     color = EXCLUDED.color,
     popular = EXCLUDED.popular;
 
+-- 4b. Seed store display currencies (placeholder rates — admin-editable)
+-- rate_from_usd = local currency units per 1 USD
+INSERT INTO public.currency_configs (code, name, symbol, rate_from_usd, enabled, order_num) VALUES
+('USD', 'US Dollar', '$', 1, true, 0),
+('AED', 'UAE Dirham', 'د.إ', 3.6725, true, 1),
+('EUR', 'Euro', '€', 0.92, true, 2),
+('GBP', 'British Pound', '£', 0.79, true, 3),
+('SAR', 'Saudi Riyal', '﷼', 3.75, true, 4),
+('PKR', 'Pakistani Rupee', 'Rs', 278, true, 5),
+('INR', 'Indian Rupee', '₹', 83, true, 6),
+('CAD', 'Canadian Dollar', 'C$', 1.36, true, 7),
+('AUD', 'Australian Dollar', 'A$', 1.52, true, 8),
+('TRY', 'Turkish Lira', '₺', 32, true, 9),
+('EGP', 'Egyptian Pound', 'E£', 48, true, 10),
+('BRL', 'Brazilian Real', 'R$', 5.0, true, 11),
+('JPY', 'Japanese Yen', '¥', 150, true, 12),
+('CNY', 'Chinese Yuan', '¥', 7.2, false, 13)
+ON CONFLICT (code) DO UPDATE SET
+    name = EXCLUDED.name,
+    symbol = EXCLUDED.symbol,
+    order_num = EXCLUDED.order_num;
+
 -- 5. Seed / Update Master System Configs
 INSERT INTO public.system_configs (
     id,
@@ -1741,10 +2877,12 @@ INSERT INTO public.system_configs (
     coin_burn_rate_friend_per_min,
     female_earning_rate_per_min,
     female_host_share_percent,
+    female_host_target_share_percent,
     team_leader_share_percent,
     gift_female_host_share_percent,
     gift_team_leader_share_percent,
     enable_virtual_gifts,
+    coin_usd_peg,
     coin_to_usd_ratio,
     female_payout_ratio_usd,
     min_payout_threshold_usd,
@@ -1758,14 +2896,16 @@ VALUES (
     'default',
     120,
     80,
-    48,
+    36,
+    30,
     40,
     10,
     70,
     10,
     true,
-    0.01,
-    0.008,
+    0.003,
+    0.003,
+    0.003,
     50,
     ARRAY['US','CA','GB','AU','DE','FR','JP','KR','ES','IT','NL','CH','SE','NO','DK','FI','IE','NZ','SG','AE','SA','QA','KW','AT','BE','BR','MX','CO','AR','CL'],
     ARRAY['English','Spanish','French','German','Italian','Portuguese','Russian','Chinese (Mandarin)','Chinese (Cantonese)','Japanese','Korean','Arabic','Hindi','Urdu','Turkish','Vietnamese','Thai','Tagalog (Filipino)','Indonesian','Malay'],
@@ -1847,13 +2987,22 @@ DROP POLICY IF EXISTS "public select call_logs" ON public.call_logs;
 DROP POLICY IF EXISTS "authenticated insert call_logs" ON public.call_logs;
 DROP POLICY IF EXISTS "authenticated update call_logs" ON public.call_logs;
 DROP POLICY IF EXISTS "participants select call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "participants insert call_logs" ON public.call_logs;
+DROP POLICY IF EXISTS "participants update call_logs" ON public.call_logs;
 DROP POLICY IF EXISTS "admin insert call_logs" ON public.call_logs;
 DROP POLICY IF EXISTS "admin update call_logs" ON public.call_logs;
 CREATE POLICY "participants select call_logs" ON public.call_logs FOR SELECT USING (
   caller_id = public.current_profile_id() OR receiver_id = public.current_profile_id() OR host_id = public.current_profile_id() OR public.is_admin_user()
 );
-CREATE POLICY "admin insert call_logs" ON public.call_logs FOR INSERT WITH CHECK (public.is_admin_user());
-CREATE POLICY "admin update call_logs" ON public.call_logs FOR UPDATE USING (public.is_admin_user());
+-- Participants may insert/update their own call rows; platform analytics primarily persist via service-role backend.
+CREATE POLICY "participants insert call_logs" ON public.call_logs FOR INSERT WITH CHECK (
+  caller_id = public.current_profile_id() OR receiver_id = public.current_profile_id() OR host_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "participants update call_logs" ON public.call_logs FOR UPDATE USING (
+  caller_id = public.current_profile_id() OR receiver_id = public.current_profile_id() OR host_id = public.current_profile_id() OR public.is_admin_user()
+) WITH CHECK (
+  caller_id = public.current_profile_id() OR receiver_id = public.current_profile_id() OR host_id = public.current_profile_id() OR public.is_admin_user()
+);
 
 DROP POLICY IF EXISTS "public select payout_requests" ON public.payout_requests;
 DROP POLICY IF EXISTS "authenticated insert payout_requests" ON public.payout_requests;
@@ -1864,10 +3013,7 @@ DROP POLICY IF EXISTS "admin update payout_requests" ON public.payout_requests;
 CREATE POLICY "owner select payout_requests" ON public.payout_requests FOR SELECT USING (
   user_id = public.current_profile_id() OR public.is_admin_user()
 );
-CREATE POLICY "owner insert payout_requests" ON public.payout_requests FOR INSERT WITH CHECK (
-  user_id = public.current_profile_id()
-);
-CREATE POLICY "admin update payout_requests" ON public.payout_requests FOR UPDATE USING (public.is_admin_user());
+-- Phase 7: no INSERT/UPDATE via client RLS — settlement_batches is the only cash-out path
 
 DROP POLICY IF EXISTS "public select wallet_ledger" ON public.wallet_ledger;
 DROP POLICY IF EXISTS "authenticated insert wallet_ledger" ON public.wallet_ledger;
@@ -1881,4 +3027,383 @@ DROP POLICY IF EXISTS "authenticated update system_configs" ON public.system_con
 DROP POLICY IF EXISTS "admin write system_configs" ON public.system_configs;
 CREATE POLICY "admin write system_configs" ON public.system_configs FOR ALL USING (public.is_admin_user()) WITH CHECK (public.is_admin_user());
 
+-- ============================================================================
+-- USER DAILY REWARDS — owner-only RLS (claims/credits go through service-role backend)
+-- Clients may SELECT/INSERT own row for bootstrap; claim flags & coin awards are
+-- enforced server-side via /api/rewards/claim-* + claim_daily_reward_atomic.
+-- Re-apply in Supabase SQL editor after deploy: run this block (and claim_daily_reward_atomic).
+-- ============================================================================
+DROP POLICY IF EXISTS "public select user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "authenticated insert user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "authenticated update user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "admin delete user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "owner select user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "owner insert user_daily_rewards" ON public.user_daily_rewards;
+DROP POLICY IF EXISTS "owner update progress user_daily_rewards" ON public.user_daily_rewards;
+
+CREATE POLICY "owner select user_daily_rewards" ON public.user_daily_rewards FOR SELECT USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "owner insert user_daily_rewards" ON public.user_daily_rewards FOR INSERT WITH CHECK (
+  user_id = public.current_profile_id()
+);
+-- Owner updates allowed for progress fields only via backend preferred path;
+-- keep owner UPDATE so legacy clients can sync progress, but claim endpoints
+-- remain the only coin source (service role). Prefer removing direct client
+-- claim-flag writes in application code.
+CREATE POLICY "owner update progress user_daily_rewards" ON public.user_daily_rewards FOR UPDATE
+  USING (user_id = public.current_profile_id() OR public.is_admin_user())
+  WITH CHECK (user_id = public.current_profile_id() OR public.is_admin_user());
+CREATE POLICY "admin delete user_daily_rewards" ON public.user_daily_rewards
+  FOR DELETE USING (public.is_admin_user());
+
+-- Video mission note: task_video_call_seconds stores SECONDS; admin config target is seconds;
+-- DailyRewardsModal labels convert seconds → minutes for display (target/60).
+
+-- ============================================================================
+-- 19. MATCHES / FAVORITES / BLOCKED_USERS — participant/owner RLS
+-- Mutations for like/pass/favorite MUST go through Express (service role).
+-- Client SELECT is limited to participants/owners for privacy.
+-- Match status semantics (see also policies comment above):
+--   pending  = one-sided like; matched = mutual like OR Quick Match; rejected = pass.
+-- ============================================================================
+DROP POLICY IF EXISTS "public select matches" ON public.matches;
+DROP POLICY IF EXISTS "authenticated insert matches" ON public.matches;
+DROP POLICY IF EXISTS "authenticated update matches" ON public.matches;
+DROP POLICY IF EXISTS "admin delete matches" ON public.matches;
+DROP POLICY IF EXISTS "participants select matches" ON public.matches;
+DROP POLICY IF EXISTS "participant insert matches" ON public.matches;
+DROP POLICY IF EXISTS "participant update matches" ON public.matches;
+DROP POLICY IF EXISTS "admin delete matches hardened" ON public.matches;
+
+CREATE POLICY "participants select matches" ON public.matches FOR SELECT USING (
+  user_a_id = public.current_profile_id()
+  OR user_b_id = public.current_profile_id()
+  OR public.is_admin_user()
+);
+CREATE POLICY "participant insert matches" ON public.matches FOR INSERT WITH CHECK (
+  initiated_by = public.current_profile_id()
+  AND (user_a_id = public.current_profile_id() OR user_b_id = public.current_profile_id())
+);
+CREATE POLICY "participant update matches" ON public.matches FOR UPDATE
+  USING (
+    user_a_id = public.current_profile_id()
+    OR user_b_id = public.current_profile_id()
+    OR public.is_admin_user()
+  )
+  WITH CHECK (
+    user_a_id = public.current_profile_id()
+    OR user_b_id = public.current_profile_id()
+    OR public.is_admin_user()
+  );
+CREATE POLICY "admin delete matches hardened" ON public.matches
+  FOR DELETE USING (public.is_admin_user());
+
+DROP POLICY IF EXISTS "public select favorites" ON public.favorites;
+DROP POLICY IF EXISTS "authenticated insert favorites" ON public.favorites;
+DROP POLICY IF EXISTS "authenticated update favorites" ON public.favorites;
+DROP POLICY IF EXISTS "owner/admin delete favorites" ON public.favorites;
+DROP POLICY IF EXISTS "owner select favorites" ON public.favorites;
+DROP POLICY IF EXISTS "owner insert favorites" ON public.favorites;
+DROP POLICY IF EXISTS "owner update favorites" ON public.favorites;
+DROP POLICY IF EXISTS "owner delete favorites" ON public.favorites;
+
+CREATE POLICY "owner select favorites" ON public.favorites FOR SELECT USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "owner insert favorites" ON public.favorites FOR INSERT WITH CHECK (
+  user_id = public.current_profile_id()
+);
+CREATE POLICY "owner update favorites" ON public.favorites FOR UPDATE
+  USING (user_id = public.current_profile_id() OR public.is_admin_user())
+  WITH CHECK (user_id = public.current_profile_id() OR public.is_admin_user());
+CREATE POLICY "owner delete favorites" ON public.favorites FOR DELETE USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+
+DROP POLICY IF EXISTS "public select blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "authenticated insert blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "authenticated update blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "owner/admin delete blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "owner select blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "owner insert blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "owner update blocked_users" ON public.blocked_users;
+DROP POLICY IF EXISTS "owner delete blocked_users" ON public.blocked_users;
+
+-- Owner sees who they blocked; also allow seeing rows where current user is the blocked party
+-- so discovery/swipe/QM can exclude mutual block relationships client-side.
+CREATE POLICY "owner select blocked_users" ON public.blocked_users FOR SELECT USING (
+  user_id = public.current_profile_id()
+  OR blocked_user_id = public.current_profile_id()
+  OR public.is_admin_user()
+);
+CREATE POLICY "owner insert blocked_users" ON public.blocked_users FOR INSERT WITH CHECK (
+  user_id = public.current_profile_id()
+);
+CREATE POLICY "owner update blocked_users" ON public.blocked_users FOR UPDATE
+  USING (user_id = public.current_profile_id() OR public.is_admin_user())
+  WITH CHECK (user_id = public.current_profile_id() OR public.is_admin_user());
+CREATE POLICY "owner delete blocked_users" ON public.blocked_users FOR DELETE USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+
+-- ============================================================================
+-- FRIEND REQUESTS — participant RLS (mutations go through Express + service role)
+-- Drop early permissive public/authenticated policies; participants only.
+-- ============================================================================
+DROP POLICY IF EXISTS "public select friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "authenticated insert friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "authenticated update friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "admin delete friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "participants select friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "sender insert friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "participants update friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "participants delete friend_requests" ON public.friend_requests;
+DROP POLICY IF EXISTS "admin delete friend_requests hardened" ON public.friend_requests;
+
+CREATE POLICY "participants select friend_requests" ON public.friend_requests FOR SELECT USING (
+  sender_id = public.current_profile_id()
+  OR receiver_id = public.current_profile_id()
+  OR public.is_admin_user()
+);
+-- Client inserts must set sender_id = self; Express service-role bypasses RLS.
+CREATE POLICY "sender insert friend_requests" ON public.friend_requests FOR INSERT WITH CHECK (
+  sender_id = public.current_profile_id()
+);
+-- Receiver may accept/decline; sender may cancel; admin full update.
+CREATE POLICY "participants update friend_requests" ON public.friend_requests FOR UPDATE
+  USING (
+    sender_id = public.current_profile_id()
+    OR receiver_id = public.current_profile_id()
+    OR public.is_admin_user()
+  )
+  WITH CHECK (
+    sender_id = public.current_profile_id()
+    OR receiver_id = public.current_profile_id()
+    OR public.is_admin_user()
+  );
+CREATE POLICY "participants delete friend_requests" ON public.friend_requests FOR DELETE USING (
+  sender_id = public.current_profile_id()
+  OR receiver_id = public.current_profile_id()
+  OR public.is_admin_user()
+);
+
+-- ============================================================================
+-- MODERATION REPORTS — reporter/admin scoped (writes preferred via Express)
+-- ============================================================================
+DROP POLICY IF EXISTS "public select moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "authenticated insert moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "authenticated update moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "admin delete moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "Users can create moderation reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "reporter select moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "reporter insert moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "admin update moderation_reports" ON public.moderation_reports;
+DROP POLICY IF EXISTS "admin delete moderation_reports hardened" ON public.moderation_reports;
+
+CREATE POLICY "reporter select moderation_reports" ON public.moderation_reports FOR SELECT USING (
+  reporter_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "reporter insert moderation_reports" ON public.moderation_reports FOR INSERT WITH CHECK (
+  reporter_id = public.current_profile_id()
+);
+CREATE POLICY "admin update moderation_reports" ON public.moderation_reports FOR UPDATE
+  USING (public.is_admin_user())
+  WITH CHECK (public.is_admin_user());
+CREATE POLICY "admin delete moderation_reports hardened" ON public.moderation_reports
+  FOR DELETE USING (public.is_admin_user());
+
+-- ============================================================================
+-- CREATOR REVIEWS — caller/creator scoped (writes preferred via Express)
+-- ============================================================================
+DROP POLICY IF EXISTS "public select creator_reviews" ON public.creator_reviews;
+DROP POLICY IF EXISTS "authenticated insert creator_reviews" ON public.creator_reviews;
+DROP POLICY IF EXISTS "authenticated update creator_reviews" ON public.creator_reviews;
+DROP POLICY IF EXISTS "admin delete creator_reviews" ON public.creator_reviews;
+DROP POLICY IF EXISTS "participants select creator_reviews" ON public.creator_reviews;
+DROP POLICY IF EXISTS "caller insert creator_reviews" ON public.creator_reviews;
+DROP POLICY IF EXISTS "admin update creator_reviews" ON public.creator_reviews;
+DROP POLICY IF EXISTS "admin delete creator_reviews hardened" ON public.creator_reviews;
+
+CREATE POLICY "participants select creator_reviews" ON public.creator_reviews FOR SELECT USING (
+  creator_id = public.current_profile_id()
+  OR caller_id = public.current_profile_id()
+  OR public.is_admin_user()
+);
+CREATE POLICY "caller insert creator_reviews" ON public.creator_reviews FOR INSERT WITH CHECK (
+  caller_id = public.current_profile_id()
+);
+CREATE POLICY "admin update creator_reviews" ON public.creator_reviews FOR UPDATE
+  USING (public.is_admin_user())
+  WITH CHECK (public.is_admin_user());
+CREATE POLICY "admin delete creator_reviews hardened" ON public.creator_reviews
+  FOR DELETE USING (public.is_admin_user());
+
+-- ============================================================================
+-- FEED POSTS + LIKES — public read; owner/admin write (Express preferred)
+-- ============================================================================
+DROP POLICY IF EXISTS "public select feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "authenticated insert feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "authenticated update feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "admin delete feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "owner insert feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "owner update feed_posts" ON public.feed_posts;
+DROP POLICY IF EXISTS "owner delete feed_posts" ON public.feed_posts;
+
+CREATE POLICY "public select feed_posts" ON public.feed_posts FOR SELECT USING (true);
+CREATE POLICY "owner insert feed_posts" ON public.feed_posts FOR INSERT WITH CHECK (
+  creator_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "owner update feed_posts" ON public.feed_posts FOR UPDATE
+  USING (creator_id = public.current_profile_id() OR public.is_admin_user())
+  WITH CHECK (creator_id = public.current_profile_id() OR public.is_admin_user());
+CREATE POLICY "owner delete feed_posts" ON public.feed_posts FOR DELETE USING (
+  creator_id = public.current_profile_id() OR public.is_admin_user()
+);
+
+DROP POLICY IF EXISTS "owner select feed_post_likes" ON public.feed_post_likes;
+DROP POLICY IF EXISTS "owner insert feed_post_likes" ON public.feed_post_likes;
+DROP POLICY IF EXISTS "owner delete feed_post_likes" ON public.feed_post_likes;
+
+CREATE POLICY "owner select feed_post_likes" ON public.feed_post_likes FOR SELECT USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "owner insert feed_post_likes" ON public.feed_post_likes FOR INSERT WITH CHECK (
+  user_id = public.current_profile_id()
+);
+CREATE POLICY "owner delete feed_post_likes" ON public.feed_post_likes FOR DELETE USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+
+-- ============================================================================
+-- Message conversation soft-hide clears (clear chat for actor only)
+-- ============================================================================
+DROP POLICY IF EXISTS "owner select message_conversation_clears" ON public.message_conversation_clears;
+DROP POLICY IF EXISTS "owner upsert message_conversation_clears" ON public.message_conversation_clears;
+DROP POLICY IF EXISTS "owner insert message_conversation_clears" ON public.message_conversation_clears;
+DROP POLICY IF EXISTS "owner update message_conversation_clears" ON public.message_conversation_clears;
+DROP POLICY IF EXISTS "owner delete message_conversation_clears" ON public.message_conversation_clears;
+CREATE POLICY "owner select message_conversation_clears" ON public.message_conversation_clears FOR SELECT USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "owner insert message_conversation_clears" ON public.message_conversation_clears FOR INSERT WITH CHECK (
+  user_id = public.current_profile_id()
+);
+CREATE POLICY "owner update message_conversation_clears" ON public.message_conversation_clears FOR UPDATE
+  USING (user_id = public.current_profile_id() OR public.is_admin_user())
+  WITH CHECK (user_id = public.current_profile_id() OR public.is_admin_user());
+CREATE POLICY "owner delete message_conversation_clears" ON public.message_conversation_clears FOR DELETE USING (
+  user_id = public.current_profile_id() OR public.is_admin_user()
+);
+
+-- ============================================================================
+-- CREATOR METRICS (hardened read policies; no client writes)
+-- ============================================================================
+DROP POLICY IF EXISTS "creator_metrics select own" ON public.creator_metrics;
+DROP POLICY IF EXISTS "creator_metrics select agency" ON public.creator_metrics;
+DROP POLICY IF EXISTS "creator_metrics select admin" ON public.creator_metrics;
+DROP POLICY IF EXISTS "public select creator_metrics" ON public.creator_metrics;
+DROP POLICY IF EXISTS "authenticated insert creator_metrics" ON public.creator_metrics;
+DROP POLICY IF EXISTS "authenticated update creator_metrics" ON public.creator_metrics;
+DROP POLICY IF EXISTS "admin delete creator_metrics" ON public.creator_metrics;
+
+CREATE POLICY "creator_metrics select own" ON public.creator_metrics FOR SELECT USING (
+  creator_id = public.current_profile_id() OR public.is_admin_user()
+);
+CREATE POLICY "creator_metrics select agency" ON public.creator_metrics FOR SELECT USING (
+  agency_leader_id = public.current_profile_id()
+  OR EXISTS (
+    SELECT 1 FROM public.profiles host
+    WHERE host.id = creator_metrics.creator_id
+      AND (host.team_leader_id = public.current_profile_id() OR host.created_by_id = public.current_profile_id())
+  )
+);
+
+-- Note: Message hard-delete policies are intentionally omitted.
+-- Clear-chat uses soft-hide via message_conversation_clears so the peer retains their copy.
+-- Durable inserts/read updates go through Express + service role; client RLS remains participant-scoped.
+-- creator_metrics writes are Express + service role only (no INSERT/UPDATE/DELETE policies for authenticated).
+
+-- ============================================================================
+-- FINANCIAL MODULE RLS (service-role writes; limited authenticated reads)
+-- Mutations for periods/ledger/batches/events/snapshots MUST go through Express + service role.
+-- ============================================================================
+DROP POLICY IF EXISTS "admin select settlement_periods" ON public.settlement_periods;
+DROP POLICY IF EXISTS "admin select financial_ledger" ON public.financial_ledger;
+DROP POLICY IF EXISTS "owner select financial_ledger" ON public.financial_ledger;
+DROP POLICY IF EXISTS "admin select settlement_batches" ON public.settlement_batches;
+DROP POLICY IF EXISTS "payee select settlement_batches" ON public.settlement_batches;
+DROP POLICY IF EXISTS "admin select settlement_line_items" ON public.settlement_line_items;
+DROP POLICY IF EXISTS "payee select settlement_line_items" ON public.settlement_line_items;
+DROP POLICY IF EXISTS "tl select settlement_line_items via batch" ON public.settlement_line_items;
+DROP POLICY IF EXISTS "admin select settlement_events" ON public.settlement_events;
+DROP POLICY IF EXISTS "payee select settlement_events" ON public.settlement_events;
+DROP POLICY IF EXISTS "admin select creator_period_snapshots" ON public.creator_period_snapshots;
+DROP POLICY IF EXISTS "owner select creator_period_snapshots" ON public.creator_period_snapshots;
+DROP POLICY IF EXISTS "agency select creator_period_snapshots" ON public.creator_period_snapshots;
+
+CREATE POLICY "admin select settlement_periods" ON public.settlement_periods FOR SELECT USING (
+  public.is_admin_user()
+);
+
+CREATE POLICY "admin select financial_ledger" ON public.financial_ledger FOR SELECT USING (
+  public.is_admin_user()
+);
+-- Phase 10: no owner/payee SELECT on financial_ledger (amounts only via Express admin/TL APIs)
+
+CREATE POLICY "admin select settlement_batches" ON public.settlement_batches FOR SELECT USING (
+  public.is_admin_user()
+);
+CREATE POLICY "payee select settlement_batches" ON public.settlement_batches FOR SELECT USING (
+  payee_user_id = public.current_profile_id()
+  OR team_leader_id = public.current_profile_id()
+);
+
+CREATE POLICY "admin select settlement_line_items" ON public.settlement_line_items FOR SELECT USING (
+  public.is_admin_user()
+);
+-- Phase 10: hosts must NOT SELECT line amounts via RLS (salary-status API strips amounts).
+-- Team leaders may read line items for their agency batches (amounts shown on TL Settlements UI).
+DROP POLICY IF EXISTS "payee select settlement_line_items" ON public.settlement_line_items;
+CREATE POLICY "tl select settlement_line_items via batch" ON public.settlement_line_items FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM public.settlement_batches b
+    WHERE b.id = settlement_line_items.batch_id
+      AND (b.team_leader_id = public.current_profile_id() OR b.payee_user_id = public.current_profile_id())
+  )
+);
+
+CREATE POLICY "admin select settlement_events" ON public.settlement_events FOR SELECT USING (
+  public.is_admin_user()
+);
+CREATE POLICY "payee select settlement_events" ON public.settlement_events FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM public.settlement_batches b
+    WHERE b.id = settlement_events.batch_id
+      AND (b.payee_user_id = public.current_profile_id() OR b.team_leader_id = public.current_profile_id())
+  )
+);
+
+CREATE POLICY "admin select creator_period_snapshots" ON public.creator_period_snapshots FOR SELECT USING (
+  public.is_admin_user()
+);
+CREATE POLICY "owner select creator_period_snapshots" ON public.creator_period_snapshots FOR SELECT USING (
+  creator_id = public.current_profile_id()
+);
+CREATE POLICY "agency select creator_period_snapshots" ON public.creator_period_snapshots FOR SELECT USING (
+  agency_leader_id = public.current_profile_id()
+);
+
+-- coin_purchases — owner read own rows; admin read all; mutations via Express service role only
+DROP POLICY IF EXISTS "owner select coin_purchases" ON public.coin_purchases;
+DROP POLICY IF EXISTS "admin select coin_purchases" ON public.coin_purchases;
+CREATE POLICY "owner select coin_purchases" ON public.coin_purchases FOR SELECT USING (
+  user_id = public.current_profile_id()
+);
+CREATE POLICY "admin select coin_purchases" ON public.coin_purchases FOR SELECT USING (
+  public.is_admin_user()
+);
+
+-- No INSERT/UPDATE/DELETE policies for authenticated clients on Financial Module tables.
+-- Express service role bypasses RLS for all settlement mutations.
 

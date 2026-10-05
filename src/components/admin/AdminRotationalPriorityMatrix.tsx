@@ -128,6 +128,7 @@ export const AdminRotationalPriorityMatrix: React.FC = () => {
       peakHoursEnd: systemSettings.peakHoursEnd,
       peakHoursEnabled: systemSettings.peakHoursEnabled,
       weights,
+      targetThresholds: systemSettings,
     });
   }, [femaleHosts, creatorMetricsMap, systemSettings, weights]);
 

@@ -1,4 +1,4 @@
-import { SystemSettings, CoinPackage, VirtualGift, VIPPlan, HomeBanner, PolicyDocument, HomeQuickLink, UserProfile, CreatorReview } from '../types';
+import { SystemSettings, CoinPackage, VirtualGift, HomeBanner, PolicyDocument, HomeQuickLink, UserProfile, CreatorReview } from '../types';
 
 export const INITIAL_CREATOR_REVIEWS: CreatorReview[] = [];
 
@@ -19,11 +19,10 @@ export const DEFAULT_ADMIN_USER: UserProfile = {
   spokenLanguages: ['English'],
   tags: ['Admin', 'Security', 'Compliance'],
   interests: ['System Architecture', 'Live Stream Quality', 'Security'],
-  coinBalance: 999999,
+  coinBalance: 0,
   hourlyCoinRate: 10,
   earningsCoins: 0,
   totalLifetimeEarnedUSD: 0,
-  vipTier: 'diamond',
   onlineStatus: 'online',
   isVerified: true,
   createdAt: new Date().toISOString(),
@@ -50,7 +49,6 @@ export const DEFAULT_TEAM_LEADER_USER: UserProfile = {
   hourlyCoinRate: 12,
   earningsCoins: 12450,
   totalLifetimeEarnedUSD: 3420,
-  vipTier: 'diamond',
   onlineStatus: 'online',
   isVerified: true,
   agencyName: 'Aurora Talent Management',
@@ -61,15 +59,17 @@ export const DEFAULT_TEAM_LEADER_USER: UserProfile = {
 export const INITIAL_SYSTEM_SETTINGS: SystemSettings = {
   coinBurnRatePerMin: 120, // Standard Coin Burn Rate - Non-Friends (Coins / Minute)
   coinBurnRateFriendPerMin: 80, // Friend Discounted Burn Rate - Friends (Coins / Minute)
-  femaleHostSharePercent: 40, // Female Host Share (%) (40% of coin burn goes to host)
-  teamLeaderSharePercent: 10, // Team Leader Share (%) (10% override commission to TL)
+  femaleHostSharePercent: 30, // Live call burn host base share % (true-up at period end)
+  femaleHostTargetSharePercent: 40, // Effective host share % after period-end true-up if bronze+ met
+  teamLeaderSharePercent: 10, // Team Leader Share (%) of coin burn
   giftFemaleHostSharePercent: 70, // Female Host Share for Virtual Gifts (%) (70% of gift coin value to host)
   giftTeamLeaderSharePercent: 10, // Team Leader Share for Virtual Gifts (%) (10% override commission to TL)
   enableVirtualGifts: true, // Master switch for Virtual Gifts
-  femalePayoutRatioUSD: 0.008, // Female Coin-to-USD Payout Ratio ($ USD per Coin Earned)
+  coinUsdPeg: 0.003, // Fixed Peg: $ USD per coin (1000 coins = $3)
+  femalePayoutRatioUSD: 0.003, // LEGACY synced to coinUsdPeg
   minPayoutThresholdUSD: 50, // Minimum Withdrawal Threshold ($ USD)
-  femaleEarningRatePerMin: 48, // 40% of 120 = 48 coins/min
-  coinToUSDRatio: 0.01, // 1 coin = $0.01 USD
+  femaleEarningRatePerMin: 36, // LEGACY derived display only (not used by burn)
+  coinToUSDRatio: 0.003, // LEGACY synced to coinUsdPeg
   enableRegularFemaleCoinEarning: false, // Coin earning disabled for regular female users by default; reserved for Team Leader created female hosts
   aiNudityShieldEnabled: true,
   screenRecordingProtection: true,
@@ -78,8 +78,9 @@ export const INITIAL_SYSTEM_SETTINGS: SystemSettings = {
   defaultTheme: 'dark',
   videoQualityProfile: 'high_720p',
   livekitCaptureResolution: '720p',
-  livekitMaxBitrateKbps: 3500,
-  livekitMaxFramerate: 60,
+  // ~2200 kbps @ 720p30 — clear talking-head without mobile encoder backlog
+  livekitMaxBitrateKbps: 2200,
+  livekitMaxFramerate: 30,
   livekitSimulcastEnabled: true,
   livekitAdaptiveStream: true,
   livekitDynacast: true,
@@ -163,55 +164,16 @@ export const VIRTUAL_GIFTS: VirtualGift[] = [
   { id: 'g_heart', name: 'Love Box', coinCost: 50, icon: '💖', animationType: 'heart', color: 'from-red-500 to-pink-500', isActive: true, category: 'Romantic' },
   { id: 'g_ring', name: 'Diamond Ring', coinCost: 200, icon: '💍', animationType: 'ring', color: 'from-blue-400 to-cyan-500', isActive: true, category: 'Luxury' },
   { id: 'g_crown', name: 'Royal Crown', coinCost: 500, icon: '👑', animationType: 'crown', color: 'from-amber-400 to-yellow-500', isActive: true, category: 'Luxury' },
-  { id: 'g_car', name: 'Sports Car', coinCost: 1000, icon: '🏎️', animationType: 'car', color: 'from-amber-400 to-orange-500', isActive: true, category: 'VIP' },
-  { id: 'g_yacht', name: 'Luxury Yacht', coinCost: 2500, icon: '🛥️', animationType: 'yacht', color: 'from-indigo-500 to-purple-600', isActive: true, category: 'VIP' },
+  { id: 'g_car', name: 'Sports Car', coinCost: 1000, icon: '🏎️', animationType: 'car', color: 'from-amber-400 to-orange-500', isActive: true, category: 'Luxury' },
+  { id: 'g_yacht', name: 'Luxury Yacht', coinCost: 2500, icon: '🛥️', animationType: 'yacht', color: 'from-indigo-500 to-purple-600', isActive: true, category: 'Luxury' },
   { id: 'g_rocket', name: 'Cosmic Rocket', coinCost: 5000, icon: '🚀', animationType: 'rocket', color: 'from-purple-600 to-pink-600', isActive: true, category: 'Legendary' },
-];
-
-export const VIP_PLANS: VIPPlan[] = [
-  {
-    id: 'bronze',
-    name: 'Bronze VIP',
-    priceMonthlyUSD: 9.99,
-    dailyFreeCoins: 15,
-    callDiscountPercent: 5,
-    badge: '🥉 Bronze',
-    features: ['15 Free Daily Coins', '5% Off Call Coin Rates', 'VIP Profile Badge', 'Priority Match Queue']
-  },
-  {
-    id: 'silver',
-    name: 'Silver VIP',
-    priceMonthlyUSD: 24.99,
-    dailyFreeCoins: 40,
-    callDiscountPercent: 10,
-    badge: '🥈 Silver',
-    features: ['40 Free Daily Coins', '10% Off Call Coin Rates', 'Silver Glow Avatar Frame', 'Direct Instant Messaging Unlocked']
-  },
-  {
-    id: 'gold',
-    name: 'Gold VIP',
-    priceMonthlyUSD: 49.99,
-    dailyFreeCoins: 100,
-    callDiscountPercent: 20,
-    badge: '🥇 Gold',
-    features: ['100 Free Daily Coins', '20% Off Call Rates', 'Gold Crown Badge', 'Exclusive VIP Gift Animations', 'Free Auto-Translate in Chat']
-  },
-  {
-    id: 'diamond',
-    name: 'Diamond VIP',
-    priceMonthlyUSD: 99.99,
-    dailyFreeCoins: 250,
-    callDiscountPercent: 30,
-    badge: '💎 Diamond',
-    features: ['250 Free Daily Coins', '30% Off Call Rates', 'Diamond Animated Aura', 'Priority Match Queue', 'Dedicated 24/7 VIP Concierge']
-  }
 ];
 
 export const INITIAL_HOME_BANNERS: HomeBanner[] = [
   {
     id: 'banner_live_dating',
     title: 'Experience Genuine 1-on-1 Video Moments',
-    subtitle: 'Connect with verified creators and matches around the globe in ultra-low latency HD video.',
+    subtitle: 'Connect with creators and matches around the globe in HD video calls.',
     tagText: '🔥 TRENDING NOW',
     tagColor: 'bg-rose-500 text-white',
     imageUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=1200',
@@ -225,7 +187,7 @@ export const INITIAL_HOME_BANNERS: HomeBanner[] = [
   {
     id: 'banner_quick_roulette',
     title: 'Instant Video Roulette Matching',
-    subtitle: 'Skip the endless texting. Spin the live wheel to meet interesting people instantly with real-time translation.',
+    subtitle: 'Skip endless texting. Jump into a live match and meet someone new in seconds.',
     tagText: '⚡ QUICK RADAR',
     tagColor: 'bg-amber-400 text-slate-950',
     imageUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=1200',
@@ -237,23 +199,23 @@ export const INITIAL_HOME_BANNERS: HomeBanner[] = [
     bgGradient: 'from-amber-950/90 via-rose-950/60 to-slate-900/90',
   },
   {
-    id: 'banner_vip_club',
-    title: 'Unlock VIP Elite Privileges',
-    subtitle: 'Enjoy up to 30% discount on video calls, exclusive profile badges, and daily bonus coin chests.',
-    tagText: '💎 VIP EXCLUSIVE',
+    id: 'banner_coin_store',
+    title: 'Top Up Your Coin Balance',
+    subtitle: 'Unlock longer video calls and send gifts with coin packages built for every budget.',
+    tagText: '💰 COIN STORE',
     tagColor: 'bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950',
     imageUrl: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&q=80&w=1200',
-    ctaText: 'Upgrade to VIP',
+    ctaText: 'Open Coin Store',
     actionType: 'modal',
-    actionTarget: 'vip',
+    actionTarget: 'store',
     active: true,
     order: 3,
     bgGradient: 'from-amber-900/90 via-purple-950/70 to-slate-900/90',
   },
   {
     id: 'banner_creator_earnings',
-    title: 'Earn Real Cash As a Verified Host',
-    subtitle: 'Get paid per minute for your video calls with automatic instant withdrawals to Bank or Crypto.',
+    title: 'Earn As a Verified Host',
+    subtitle: 'Get paid for completed video calls. Request payouts through supported methods after verification.',
     tagText: '💰 CREATOR REWARDS',
     tagColor: 'bg-emerald-500 text-slate-950',
     imageUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=1200',
@@ -266,9 +228,9 @@ export const INITIAL_HOME_BANNERS: HomeBanner[] = [
   },
   {
     id: 'banner_safety_first',
-    title: 'Your Privacy & Safety Is Protected',
-    subtitle: 'Zero tolerance for harassment, automatic real-time AI nudity shield, and anti-screenshot technology.',
-    tagText: '🛡️ 100% SAFE PLATFORM',
+    title: 'Your Privacy & Safety Matters',
+    subtitle: 'Zero tolerance for harassment. Use Block & Report anytime — our team reviews safety reports.',
+    tagText: '🛡️ SAFETY CENTER',
     tagColor: 'bg-indigo-500 text-white',
     imageUrl: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&q=80&w=1200',
     ctaText: 'Read Safety Policy',
@@ -287,46 +249,46 @@ export const INITIAL_POLICY_DOCUMENTS: PolicyDocument[] = [
     title: 'Community Safety & Anti-Harassment Policy',
     category: 'safety',
     icon: 'ShieldCheck',
-    summary: 'Our strict community rules against hate speech, harassment, non-consensual behavior, and inappropriate content.',
-    lastUpdated: 'August 2026',
+    summary: 'Community rules against hate speech, harassment, non-consensual behavior, and inappropriate content.',
+    lastUpdated: 'September 2026',
     order: 1,
     isFeaturedOnHome: true,
     content: `
 ### 1. Zero Tolerance for Harassment & Bullying
-LIVECALL VIP is dedicated to maintaining a respectful, welcoming, and safe space for all users. We enforce a zero-tolerance policy regarding:
+Minglecall is dedicated to maintaining a respectful, welcoming, and safe space for all users. We enforce a zero-tolerance policy regarding:
 * Bullying, verbal intimidation, blackmail, or stalking.
 * Discrimination based on race, ethnicity, religion, disability, gender, or sexual orientation.
 * Requesting unauthorized off-platform payments, personal financial data, or home addresses.
 
-### 2. AI Real-Time Content Moderation
-* All video calls are guarded by active server-side ML analysis that detects non-consensual explicit conduct and immediately blurs video feeds.
-* Violators receive instant temporary suspensions, and severe infractions result in permanent device and hardware ID bans.
+### 2. Content Moderation
+* We review reports and may suspend or permanently ban accounts that violate these rules.
+* Severe violations may result in permanent account termination.
 
-### 3. Immediate Reporting & Blocking
-* Every profile, chat, and active call features a one-tap **Block & Report** button.
-* Our 24/7 human moderation review team investigates reports within 5 minutes.
+### 3. Reporting & Blocking
+* Every profile, chat, and active call features a **Block & Report** option.
+* Our moderation team reviews reports as quickly as capacity allows.
     `.trim(),
   },
   {
     id: 'policy_privacy',
     slug: 'privacy-data-protection',
-    title: 'Privacy Policy & End-to-End Encryption',
+    title: 'Privacy Policy & Data Protection',
     category: 'privacy',
     icon: 'Lock',
-    summary: 'How your personal data, video feeds, and account credentials are encrypted and shielded from third parties.',
-    lastUpdated: 'August 2026',
+    summary: 'How personal data, video sessions, and account credentials are handled on the platform.',
+    lastUpdated: 'September 2026',
     order: 2,
     isFeaturedOnHome: true,
     content: `
 ### 1. Data Collection & Minimization
-We collect only the minimum necessary data required to operate real-time signaling, matchmaking, and financial payouts. We never sell your personal data or phone number to marketing advertisers.
+We collect only the minimum necessary data required to operate matchmaking, messaging, calls, and payouts. We do not sell your personal data to marketing advertisers.
 
 ### 2. Video Stream Security
-* All 1-on-1 video call streams run over secure WebRTC / TLS / DTLS peer-to-peer or encrypted SFU pipelines.
-* Live video streams are never recorded or stored on our platform servers unless flagged for severe safety reviews.
+* 1-on-1 video call streams use encrypted WebRTC transport (DTLS/SRTP).
+* Live video is not recorded or stored on our servers unless required for a specific safety investigation.
 
-### 3. Anti-Screenshot & Screen Recording Shield
-* The mobile and web application utilizes hardware-level DRM protection and overlay shields to prevent screenshot capture of creators' private feeds.
+### 3. Screenshots & Screen Recording
+* We cannot guarantee that other participants will never capture their screen. Treat every call as potentially visible to the other person and report misuse.
     `.trim(),
   },
   {
@@ -335,8 +297,8 @@ We collect only the minimum necessary data required to operate real-time signali
     title: 'Terms of Service & 18+ Age Verification',
     category: 'terms',
     icon: 'FileText',
-    summary: 'The contractual terms governing user accounts, eligibility requirements, and platform guidelines.',
-    lastUpdated: 'August 2026',
+    summary: 'Contractual terms governing user accounts, eligibility requirements, and platform guidelines.',
+    lastUpdated: 'September 2026',
     order: 3,
     isFeaturedOnHome: true,
     content: `
@@ -344,11 +306,11 @@ We collect only the minimum necessary data required to operate real-time signali
 You must be at least eighteen (18) years of age or the age of legal majority in your jurisdiction to create an account, purchase coins, or participate in video calls. Minors are strictly prohibited.
 
 ### 2. User Accounts & Verification
-* Users agree to provide truthful information. Impersonation of another person or celebrity is grounds for immediate termination.
-* Female creator verification requires government-issued photo ID authentication prior to coin monetization and cash withdrawals.
+* Users agree to provide truthful information. Impersonation is grounds for termination.
+* Hosts requesting payouts may be asked to complete identity verification before funds are released.
 
 ### 3. Account Termination
-LIVECALL VIP reserves the right to suspend or terminate any account that violates our safety policies or engages in fraudulent activity.
+We reserve the right to suspend or terminate any account that violates safety policies or engages in fraudulent activity.
     `.trim(),
   },
   {
@@ -357,23 +319,21 @@ LIVECALL VIP reserves the right to suspend or terminate any account that violate
     title: 'Coin Economy, Virtual Gifts & Refund Policy',
     category: 'coins',
     icon: 'Coins',
-    summary: 'Guidelines for purchasing coins, gifting virtual items, burn rate mechanics, and refund terms.',
-    lastUpdated: 'August 2026',
+    summary: 'Guidelines for purchasing coins, gifting virtual items, burn rates, and refund terms.',
+    lastUpdated: 'September 2026',
     order: 4,
     isFeaturedOnHome: true,
     content: `
 ### 1. Coin Purchasing & Virtual Assets
-* Coins are virtual utility tokens used exclusively within the LIVECALL VIP platform to initiate video calls and send animated virtual gifts.
-* Coins have no cash value outside the platform for standard male users and cannot be transferred to secondary exchanges.
+* Coins are virtual utility tokens used within the platform to initiate video calls and send virtual gifts.
+* Coins have no cash value outside the platform for standard consumer users and cannot be transferred to secondary exchanges.
 
-### 2. Standard vs. Friend Burn Rates
-* Standard 1-on-1 video calls burn **10 coins / minute**.
-* Once a mutual friend connection is established, the call discount activates at **5 coins / minute** (50% savings).
-* VIP subscribers receive additional tiered coin discounts up to 30%.
+### 2. Call Burn Rates
+* Call rates are shown in-app before and during a call and may vary by host, friendship status, or promotions.
 
 ### 3. Refund Policy
-* Consumed coins used during completed video calls or delivered virtual gifts are non-refundable.
-* If a technical disruption causes an abnormal disconnection within the first 10 seconds of a call, unspent coins are instantly restored to your balance.
+* Consumed coins used during completed video calls or delivered virtual gifts are generally non-refundable.
+* If a technical disruption causes an abnormal disconnection near the start of a call, unused coins may be restored at our discretion.
     `.trim(),
   },
   {
@@ -382,38 +342,37 @@ LIVECALL VIP reserves the right to suspend or terminate any account that violate
     title: 'Creator Earnings & Payout Guidelines',
     category: 'creators',
     icon: 'Sparkles',
-    summary: 'Everything verified female hosts need to know about earning coins, conversion ratios, and weekly cashouts.',
-    lastUpdated: 'August 2026',
+    summary: 'How verified hosts earn coins, track balances, and request payouts.',
+    lastUpdated: 'September 2026',
     order: 5,
     isFeaturedOnHome: true,
     content: `
-### 1. Revenue Share & Split
-* Verified female creators earn **6 coins per minute** of completed 1-on-1 video calls, plus **70% of all received virtual gifts**.
-* Earning ratios are transparently tracked in the live **Earnings Dashboard**.
+### 1. Revenue Share
+* Verified hosts earn coins from completed eligible calls and shared gift revenue as configured in admin settings.
+* Earnings are tracked in the **Earnings Dashboard**.
 
 ### 2. Payout Methods & Thresholds
-* Payout exchange rate: **1 coin earned = $0.008 USD**.
-* Minimum payout withdrawal threshold is **$50.00 USD**.
-* Supported payout options: Direct Bank Wire (ACH/SWIFT), PayPal, Stripe, and Crypto (USDT TRC20/ERC20).
-* Payout requests are verified and disbursed by the financial administration within 24–48 business hours.
+* Conversion rates and minimum payout thresholds are shown in the payout request flow.
+* Supported payout methods depend on your region and verification status.
+* Payout requests are reviewed by administration; processing times vary and are not guaranteed as same-day.
     `.trim(),
   },
   {
     id: 'policy_moderation',
-    slug: 'ai-moderation-guidelines',
-    title: 'Real-Time AI Moderation & Dispute Resolution',
+    slug: 'moderation-guidelines',
+    title: 'Moderation & Dispute Resolution',
     category: 'moderation',
     icon: 'UserCheck',
-    summary: 'Transparent overview of automated AI safety guards, dispute filing, and human moderation appeals.',
-    lastUpdated: 'August 2026',
+    summary: 'How safety reports, account holds, and appeals are handled.',
+    lastUpdated: 'September 2026',
     order: 6,
     isFeaturedOnHome: false,
     content: `
-### 1. Automated Detection Mechanics
-We utilize low-latency computer vision and acoustic models to detect harmful behavior, aggressive conduct, and non-consensual visual exposure in real time.
+### 1. Moderation Process
+We review user reports and may take action including warnings, temporary holds, or permanent bans.
 
 ### 2. Appeals Process
-If your account or payout was temporarily paused due to an automated flag and you believe it was in error, you may file an appeal by contacting support or through the Admin Support portal.
+If your account or payout was paused and you believe it was in error, contact support through the in-app support options or admin channels available to your role.
     `.trim(),
   },
 ];
@@ -444,13 +403,13 @@ export const INITIAL_HOME_QUICK_LINKS: HomeQuickLink[] = [
     active: true,
   },
   {
-    id: 'link_vip_club',
-    title: 'VIP Pass',
-    subtitle: 'Exclusive Perks',
-    icon: 'Crown',
-    badge: '30% OFF',
-    actionType: 'modal',
-    actionTarget: 'vip',
+    id: 'link_discovery',
+    title: 'Discover',
+    subtitle: 'Browse Creators',
+    icon: 'Globe',
+    badge: 'LIVE',
+    actionType: 'tab',
+    actionTarget: 'discovery',
     colorGradient: 'from-yellow-400 to-amber-600',
     order: 3,
     active: true,
@@ -460,7 +419,7 @@ export const INITIAL_HOME_QUICK_LINKS: HomeQuickLink[] = [
     title: 'Get Coins',
     subtitle: 'Refill Balance',
     icon: 'Coins',
-    badge: '+20% BONUS',
+    badge: 'STORE',
     actionType: 'modal',
     actionTarget: 'store',
     colorGradient: 'from-emerald-400 to-teal-600',
@@ -472,7 +431,7 @@ export const INITIAL_HOME_QUICK_LINKS: HomeQuickLink[] = [
     title: 'Moments Feed',
     subtitle: 'Creator Stories',
     icon: 'Sparkles',
-    badge: 'LIVE',
+    badge: 'FEED',
     actionType: 'tab',
     actionTarget: 'moments',
     colorGradient: 'from-blue-500 to-indigo-600',
@@ -482,9 +441,9 @@ export const INITIAL_HOME_QUICK_LINKS: HomeQuickLink[] = [
   {
     id: 'link_safety_policy',
     title: 'Safety Center',
-    subtitle: 'Verified & Shielded',
+    subtitle: 'Policies & Reporting',
     icon: 'ShieldCheck',
-    badge: 'SECURE',
+    badge: 'INFO',
     actionType: 'policy',
     actionTarget: 'policy_safety',
     colorGradient: 'from-indigo-500 to-cyan-600',

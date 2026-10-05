@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import confetti from 'canvas-confetti';
 
 interface MegaGiftOverlayProps {
@@ -16,10 +16,15 @@ export const MegaGiftOverlay: React.FC<MegaGiftOverlayProps> = ({
   cost,
   onComplete,
 }) => {
+  // Keep latest callback without re-arming the dismiss timer on every parent re-render
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+
   useEffect(() => {
     // Trigger confetti explosions based on animation type
     if (animationType === 'rocket' || animationType === 'yacht' || animationType === 'car') {
-      // Big explosion
       confetti({
         particleCount: 120,
         spread: 100,
@@ -48,7 +53,6 @@ export const MegaGiftOverlay: React.FC<MegaGiftOverlayProps> = ({
       };
       frame();
     } else {
-      // Standard confetti burst
       confetti({
         particleCount: 60,
         spread: 70,
@@ -57,15 +61,16 @@ export const MegaGiftOverlay: React.FC<MegaGiftOverlayProps> = ({
       });
     }
 
-    const timer = setTimeout(() => {
-      onComplete();
-    }, 3000);
+    const timer = window.setTimeout(() => {
+      onCompleteRef.current();
+    }, 2800);
 
-    return () => clearTimeout(timer);
-  }, [animationType, onComplete]);
+    return () => window.clearTimeout(timer);
+    // Only restart FX when the gift animation identity changes — not when parent re-renders
+  }, [animationType, giftName, giftIcon, cost]);
 
   return (
-    <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center p-4">
+    <div className="absolute inset-0 z-[60] pointer-events-none flex items-center justify-center p-4">
       <div className="relative animate-bounce bg-slate-900/90 border-2 border-pink-500 rounded-3xl p-6 shadow-2xl backdrop-blur-md flex flex-col items-center text-center space-y-2 max-w-sm">
         <div className="text-7xl animate-pulse">{giftIcon}</div>
         <h2 className="text-xl font-extrabold text-white tracking-tight">MEGA GIFT SENT!</h2>

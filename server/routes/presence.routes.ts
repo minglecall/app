@@ -4,89 +4,104 @@ import { requireAuth } from '../middleware/auth';
 import {
   upsertProfileAdmin,
   isSupabaseAdminConfigured,
-  updateUserStatusAdmin,
   upsertCreatorMetricsAdmin,
 } from '../supabaseAdmin';
 
 export function createPresenceRouter(ctx: ServerRuntime): Router {
   const router = Router();
   const {
-    presenceMap,
-    userLastSeen,
-    connectedSockets,
-    serverUsers,
     getFormattedPresence,
     broadcastPresence,
     broadcastUsers,
+    applyPresenceHeartbeat,
+    getAuthoritativeStatus,
   } = ctx;
 
-  // Dedicated Presence REST Endpoint
+  // Dedicated Presence REST Endpoint — client may request online|offline only
   router.post('/', requireAuth, async (req, res) => {
     try {
       const userId = String((req as any).profileId || (req as any).user?.id || '');
       const { status } = req.body;
-      if (!userId || !status) {
-        return res.status(400).json({ success: false, error: 'userId and status required' });
+      if (!userId) {
+        return res.status(400).json({ success: false, error: 'userId required' });
       }
 
-      if (status === 'offline') {
-        userLastSeen.delete(userId);
-      } else {
-        userLastSeen.set(userId, Date.now());
-      }
-      presenceMap.set(userId, status);
-      const u = serverUsers.get(userId);
-      if (u) u.onlineStatus = status;
-
-      broadcastPresence();
-      broadcastUsers();
-
-      if (isSupabaseAdminConfigured()) {
-        // Await so logout clients can wait for DB write before clearing the session
-        await updateUserStatusAdmin(userId, status);
+      if (status === 'busy') {
+        return res.status(400).json({
+          success: false,
+          error: 'Client cannot set busy; busy is derived from active calls.',
+          status: getAuthoritativeStatus(userId),
+        });
       }
 
-      return res.json({ success: true, presence: getFormattedPresence() });
+      const requested =
+        status === 'offline' ? 'offline' : status === 'online' || !status ? 'online' : null;
+      if (!requested) {
+        return res.status(400).json({ success: false, error: 'status must be online or offline' });
+      }
+
+      const result = applyPresenceHeartbeat(userId, requested, {
+        persistStatus: true,
+        fromUnload: requested === 'offline',
+      });
+
+      if (result.changed) {
+        broadcastPresence();
+        broadcastUsers();
+      }
+
+      return res.json({
+        success: true,
+        status: result.status,
+        presence: getFormattedPresence(),
+      });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  // Dedicated Presence Heartbeat REST Endpoint
-  // Lightweight liveness ping — persists status to Supabase when provided
+  // Lightweight liveness ping — status transitions only hit DB
   router.post('/heartbeat', requireAuth, (req, res) => {
     try {
       const userId = String((req as any).profileId || (req as any).user?.id || '');
       const { status } = req.body;
-      if (userId) {
-        if (status === 'offline') {
-          userLastSeen.delete(userId);
-          presenceMap.set(userId, 'offline');
-          const u = serverUsers.get(userId);
-          if (u) u.onlineStatus = 'offline';
-          if (isSupabaseAdminConfigured()) {
-            // Fire-and-await would block heartbeat; offline must still hit DB
-            void updateUserStatusAdmin(userId, 'offline');
-          }
-        } else if (status) {
-          userLastSeen.set(userId, Date.now());
-          presenceMap.set(userId, status);
-          const u = serverUsers.get(userId);
-          if (u) u.onlineStatus = status;
-          if (isSupabaseAdminConfigured()) {
-            updateUserStatusAdmin(userId, status).catch(() => {});
-          }
-        } else {
-          userLastSeen.set(userId, Date.now());
-        }
+      if (!userId) {
+        return res.status(400).json({ success: false, error: 'userId required' });
       }
-      return res.json({ success: true, presence: getFormattedPresence() });
+
+      if (status === 'busy') {
+        return res.status(400).json({
+          success: false,
+          error: 'Client cannot set busy; busy is derived from active calls.',
+          status: getAuthoritativeStatus(userId),
+        });
+      }
+
+      const requested =
+        status === 'offline' ? 'offline' : status === 'online' || !status ? 'online' : null;
+      if (status && !requested) {
+        return res.status(400).json({ success: false, error: 'status must be online or offline' });
+      }
+
+      const result = applyPresenceHeartbeat(userId, requested || 'online', {
+        persistStatus: true,
+      });
+
+      if (result.changed) {
+        broadcastPresence();
+        broadcastUsers();
+      }
+
+      return res.json({
+        success: true,
+        status: result.status,
+        presence: getFormattedPresence(),
+      });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  // Dedicated Presence GET Endpoint
   router.get('/', requireAuth, (req, res) => {
     return res.json({ success: true, presence: getFormattedPresence() });
   });
@@ -102,12 +117,23 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
     getFormattedCreatorMetrics,
     broadcastCreatorMetrics,
     broadcastUsers,
+    accrueCreatorOnlineTime,
+    toggleReadyNowForCreator,
+    getFirstCallBonusAmounts,
   } = ctx;
 
   router.get('/metrics', requireAuth, async (req, res) => {
     try {
       const creatorId = req.query.creatorId as string | undefined;
+      const selfId = String((req as any).profileId || (req as any).user?.id || '');
       if (creatorId) {
+        // Non-admins may only fetch self (agency lists use full map from WS/admin)
+        const role = (req as any).profile?.role;
+        const allowed =
+          creatorId === selfId || role === 'admin' || role === 'team_leader' || role === 'agency_manager';
+        if (!allowed) {
+          return res.status(403).json({ success: false, error: 'Forbidden' });
+        }
         const metric = creatorMetricsMap.get(creatorId);
         return res.json({ success: true, metric: metric || null });
       }
@@ -117,111 +143,34 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  // POST Creator Heartbeat (Active Online Hours Tracking)
+  // Server-owned accrual nudge — ignores body.secondsIncrement
   router.post('/heartbeat', requireAuth, async (req, res) => {
     try {
       const creatorId = String((req as any).profileId || (req as any).user?.id || '');
-      const { secondsIncrement, agencyLeaderId } = req.body;
       if (!creatorId) {
         return res.status(400).json({ success: false, error: 'creatorId is required' });
       }
 
-      const inc = Number(secondsIncrement || 60);
-      const existing = creatorMetricsMap.get(creatorId) || {
-        creatorId,
-        agencyLeaderId,
-        activeOnlineSeconds: 0,
-        activeOnlineHours: 0,
-        coinsEarnedFromCalls: 0,
-        coinsEarnedFromGifts: 0,
-        totalTargetCoins: 0,
-        currentStreakDays: 1,
-        totalCallsOffered: 0,
-        totalCallsAnswered: 0,
-        totalCallsDeclined: 0,
-        totalCallsMissed: 0,
-        responseHealthScore: 100,
-        performanceTier: 'bronze',
-        isReadyNowActive: false,
-        bonusEarnedCoins: 0,
-        bonusEarnedUSD: 0,
-        lastActiveDate: new Date().toISOString().split('T')[0],
-      };
+      const metrics = accrueCreatorOnlineTime(creatorId, { forcePersist: false });
+      const result = metrics || creatorMetricsMap.get(creatorId) || null;
 
-      const newSecs = (existing.activeOnlineSeconds || 0) + inc;
-      const newHours = Number((newSecs / 3600).toFixed(2));
-      const totalCoins = (existing.coinsEarnedFromCalls || 0) + (existing.coinsEarnedFromGifts || 0);
-
-      // Dual-Metric Tier Calculation: Bronze (20h + 5k), Silver (40h + 20k), Gold (60h + 60k)
-      let tier: 'bronze' | 'silver' | 'gold' = 'bronze';
-      if (newHours >= 60 && totalCoins >= 60000) {
-        tier = 'gold';
-      } else if (newHours >= 40 && totalCoins >= 20000) {
-        tier = 'silver';
-      }
-
-      const updatedMetrics = {
-        ...existing,
-        creatorId,
-        agencyLeaderId: agencyLeaderId || existing.agencyLeaderId,
-        activeOnlineSeconds: newSecs,
-        activeOnlineHours: newHours,
-        totalTargetCoins: totalCoins,
-        performanceTier: tier,
-        lastActiveDate: new Date().toISOString().split('T')[0],
-        updatedAt: new Date().toISOString(),
-      };
-
-      creatorMetricsMap.set(creatorId, updatedMetrics);
-
-      if (isSupabaseAdminConfigured()) {
-        await upsertCreatorMetricsAdmin(updatedMetrics);
-      }
-
-      broadcastCreatorMetrics();
-
-      return res.json({ success: true, metrics: updatedMetrics });
+      return res.json({ success: true, metrics: result });
     } catch (err: any) {
       console.error('Error in POST /api/creator/heartbeat:', err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  // POST Toggle Ready Now Boost
-  router.post('/ready-now-toggle', async (req, res) => {
+  // Ready Now — authenticated; creatorId always from session
+  router.post('/ready-now-toggle', requireAuth, async (req, res) => {
     try {
-      const { creatorId, isReadyNow } = req.body;
+      const creatorId = String((req as any).profileId || (req as any).user?.id || '');
       if (!creatorId) {
-        return res.status(400).json({ success: false, error: 'creatorId is required' });
+        return res.status(401).json({ success: false, error: 'Authentication required' });
       }
 
-      const existing = creatorMetricsMap.get(creatorId) || {
-        creatorId,
-        activeOnlineSeconds: 0,
-        activeOnlineHours: 0,
-        coinsEarnedFromCalls: 0,
-        coinsEarnedFromGifts: 0,
-        totalTargetCoins: 0,
-        currentStreakDays: 1,
-        totalCallsOffered: 0,
-        totalCallsAnswered: 0,
-        responseHealthScore: 100,
-        performanceTier: 'bronze',
-      };
-
-      const updated = {
-        ...existing,
-        isReadyNowActive: Boolean(isReadyNow),
-        readyNowToggledAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      creatorMetricsMap.set(creatorId, updated);
-
-      if (isSupabaseAdminConfigured()) {
-        await upsertCreatorMetricsAdmin(updated);
-      }
-
+      const { isReadyNow } = req.body;
+      const updated = toggleReadyNowForCreator(creatorId, Boolean(isReadyNow));
       broadcastCreatorMetrics();
 
       return res.json({ success: true, metrics: updated });
@@ -231,7 +180,7 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  // POST Record Call Offer / Answer / Decline / Miss Event
+  // Record Call Offer / Answer / Decline / Miss Event
   router.post('/call-offer', requireAuth, async (req, res) => {
     try {
       const creatorId = String((req as any).profileId || (req as any).user?.id || '');
@@ -264,8 +213,14 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
         existing.totalCallsMissed = (existing.totalCallsMissed || 0) + 1;
       }
 
-      const totalOff = Math.max(1, existing.totalCallsOffered || (existing.totalCallsAnswered + existing.totalCallsDeclined + existing.totalCallsMissed));
-      existing.responseHealthScore = Number((( (existing.totalCallsAnswered || 0) / totalOff) * 100).toFixed(1));
+      const totalOff = Math.max(
+        1,
+        existing.totalCallsOffered ||
+          existing.totalCallsAnswered + existing.totalCallsDeclined + existing.totalCallsMissed
+      );
+      existing.responseHealthScore = Number(
+        (((existing.totalCallsAnswered || 0) / totalOff) * 100).toFixed(1)
+      );
       existing.updatedAt = new Date().toISOString();
 
       creatorMetricsMap.set(creatorId, existing);
@@ -283,15 +238,15 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  // POST Claim Daily First Call Bonus
+  // Claim Daily First Call Bonus — amounts from system_configs when available
   router.post('/first-call-bonus', requireAuth, async (req, res) => {
     try {
       const creatorId = String((req as any).profileId || (req as any).user?.id || '');
       if (!creatorId) {
         return res.status(400).json({ success: false, error: 'creatorId is required' });
       }
-      const bonusCoins = 100;
-      const bonusUSD = 1;
+
+      const { coins: bonusCoins, usd: bonusUSD } = await getFirstCallBonusAmounts();
 
       const todayStr = new Date().toISOString().split('T')[0];
       const existing = creatorMetricsMap.get(creatorId) || {
@@ -302,11 +257,15 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
       };
 
       if (existing.firstCallBonusClaimedDate === todayStr) {
-        return res.json({ success: false, message: 'Daily first call bonus already claimed today.', alreadyClaimed: true });
+        return res.json({
+          success: false,
+          message: 'Daily first call bonus already claimed today.',
+          alreadyClaimed: true,
+        });
       }
 
       const coinsToAdd = Number(bonusCoins || 100);
-      const usdToAdd = Number(bonusUSD || 1.00);
+      const usdToAdd = Number(bonusUSD || 1.0);
 
       existing.firstCallBonusClaimedDate = todayStr;
       existing.bonusEarnedCoins = (existing.bonusEarnedCoins || 0) + coinsToAdd;
@@ -315,11 +274,12 @@ export function createCreatorRouter(ctx: ServerRuntime): Router {
 
       creatorMetricsMap.set(creatorId, existing);
 
-      // Update creator profile earnings_coins so it is immediately withdrawable
       const user = serverUsers.get(creatorId);
       if (user) {
         user.earningsCoins = (user.earningsCoins || 0) + coinsToAdd;
-        user.totalLifetimeEarnedUSD = Number(((user.totalLifetimeEarnedUSD || 0) + usdToAdd).toFixed(2));
+        user.totalLifetimeEarnedUSD = Number(
+          ((user.totalLifetimeEarnedUSD || 0) + usdToAdd).toFixed(2)
+        );
         if (isSupabaseAdminConfigured()) {
           await upsertProfileAdmin(user);
         }

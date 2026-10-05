@@ -89,13 +89,13 @@ export function PasswordStrengthField({
           aria-describedby={showStrengthUi ? `${meterId} ${checklistId}` : undefined}
           className={
             inputClassName ||
-            'w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500 disabled:opacity-50'
+            'w-full bg-app-input border border-hairline rounded-xl pl-10 pr-10 py-2.5 text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-rose-500 disabled:opacity-50'
           }
         />
         <button
           type="button"
           onClick={() => setVisible((v) => !v)}
-          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-app-muted hover:text-app-heading transition-colors"
           title={visible ? 'Hide password' : 'Show password'}
           aria-label={visible ? 'Hide password' : 'Show password'}
         >
@@ -114,7 +114,7 @@ export function PasswordStrengthField({
                 </span>
               </div>
               <div
-                className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden"
+                className="w-full h-1.5 bg-app-input rounded-full overflow-hidden"
                 role="progressbar"
                 aria-valuemin={0}
                 aria-valuemax={100}

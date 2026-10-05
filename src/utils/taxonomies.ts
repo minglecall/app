@@ -317,3 +317,68 @@ export function findInterestByIdOrName(val?: string): InterestItem | undefined {
     (i) => i.id.toLowerCase() === clean || i.name.toLowerCase() === clean
   );
 }
+
+// ============================================================================
+// 5. STORE DISPLAY CURRENCIES (canonical package prices remain USD)
+// rateFromUsd = local currency units per 1 USD (admin-editable placeholders)
+// ============================================================================
+
+export interface CurrencyItem {
+  code: string;
+  name: string;
+  symbol: string;
+  /** Local units per 1 USD */
+  rateFromUsd: number;
+  enabled: boolean;
+  orderNum?: number;
+}
+
+/** Default / fallback catalogue — also used when DB is empty. */
+export const DEFAULT_CURRENCIES: CurrencyItem[] = [
+  { code: 'USD', name: 'US Dollar', symbol: '$', rateFromUsd: 1, enabled: true, orderNum: 0 },
+  { code: 'AED', name: 'UAE Dirham', symbol: 'د.إ', rateFromUsd: 3.6725, enabled: true, orderNum: 1 },
+  { code: 'EUR', name: 'Euro', symbol: '€', rateFromUsd: 0.92, enabled: true, orderNum: 2 },
+  { code: 'GBP', name: 'British Pound', symbol: '£', rateFromUsd: 0.79, enabled: true, orderNum: 3 },
+  { code: 'SAR', name: 'Saudi Riyal', symbol: '﷼', rateFromUsd: 3.75, enabled: true, orderNum: 4 },
+  { code: 'PKR', name: 'Pakistani Rupee', symbol: 'Rs', rateFromUsd: 278, enabled: true, orderNum: 5 },
+  { code: 'INR', name: 'Indian Rupee', symbol: '₹', rateFromUsd: 83, enabled: true, orderNum: 6 },
+  { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$', rateFromUsd: 1.36, enabled: true, orderNum: 7 },
+  { code: 'AUD', name: 'Australian Dollar', symbol: 'A$', rateFromUsd: 1.52, enabled: true, orderNum: 8 },
+  { code: 'TRY', name: 'Turkish Lira', symbol: '₺', rateFromUsd: 32, enabled: true, orderNum: 9 },
+  { code: 'EGP', name: 'Egyptian Pound', symbol: 'E£', rateFromUsd: 48, enabled: true, orderNum: 10 },
+  { code: 'BRL', name: 'Brazilian Real', symbol: 'R$', rateFromUsd: 5.0, enabled: true, orderNum: 11 },
+  { code: 'JPY', name: 'Japanese Yen', symbol: '¥', rateFromUsd: 150, enabled: true, orderNum: 12 },
+  { code: 'CNY', name: 'Chinese Yuan', symbol: '¥', rateFromUsd: 7.2, enabled: false, orderNum: 13 },
+];
+
+export const USD_CURRENCY: CurrencyItem = DEFAULT_CURRENCIES[0];
+
+/**
+ * Enabled currencies for the customer store dropdown.
+ * Falls back to USD if the list is empty/missing.
+ */
+export function getEnabledCurrencies(list?: CurrencyItem[] | null): CurrencyItem[] {
+  const source = list && list.length > 0 ? list : DEFAULT_CURRENCIES;
+  const enabled = source
+    .filter((c) => c && c.enabled !== false && Number(c.rateFromUsd) > 0)
+    .slice()
+    .sort(
+      (a, b) =>
+        (Number(a.orderNum) || 0) - (Number(b.orderNum) || 0) ||
+        String(a.code).localeCompare(String(b.code))
+    );
+  if (enabled.length === 0) return [{ ...USD_CURRENCY }];
+  return enabled;
+}
+
+export function findCurrencyByCode(
+  code?: string | null,
+  list?: CurrencyItem[] | null
+): CurrencyItem {
+  const source = list && list.length > 0 ? list : DEFAULT_CURRENCIES;
+  const clean = String(code || 'USD').trim().toUpperCase();
+  const found = source.find((c) => String(c.code).toUpperCase() === clean);
+  if (found && Number(found.rateFromUsd) > 0) return found;
+  return { ...USD_CURRENCY };
+}
+

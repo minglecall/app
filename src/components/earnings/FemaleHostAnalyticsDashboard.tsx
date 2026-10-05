@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   DollarSign,
@@ -6,7 +6,6 @@ import {
   Video,
   Gift,
   Clock,
-  Send,
   AlertCircle,
   CheckCircle2,
   Building,
@@ -33,6 +32,7 @@ import {
   ChevronRight,
   RefreshCw,
   Globe,
+  MessageCircle,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -52,33 +52,84 @@ import {
   computeHostMetrics,
   EarningsDataPoint,
 } from '../../utils/analyticsHelper';
+import { getCoinUsdPeg, coinsToUsd } from '../../../shared/finance/fx';
+import { getHostPeriodTargetProgress } from '../../../shared/finance/hostPeriodTargetProgress';
 import { normalizeMediaUrl } from '../../utils/r2Storage';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { CreatorTargetProgressCard } from './CreatorTargetProgressCard';
 import { CreatorDailyChecklistWidget } from './CreatorDailyChecklistWidget';
+import { HostSalaryStatusPanel } from './HostSalaryStatusPanel';
+import type { CreatorMetrics } from '../../types';
+
+/** Female hosts managed by a Team Leader — mirrors TeamLeaderDashboard managedCreators. */
+function getManagedHostsForLeader(leader: UserProfile, allUsers: UserProfile[]): UserProfile[] {
+  return allUsers.filter((u) => {
+    if (u.id === leader.id || (leader.authId && u.authId === leader.authId)) return false;
+    if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
+    const isFemale = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
+    if (!isFemale) return false;
+    if (
+      u.teamLeaderId === leader.id ||
+      u.createdById === leader.id ||
+      (leader.authId && (u.teamLeaderId === leader.authId || u.createdById === leader.authId))
+    ) {
+      return true;
+    }
+    if (
+      leader.agencyName &&
+      u.agencyName &&
+      u.agencyName.trim().toLowerCase() === leader.agencyName.trim().toLowerCase()
+    ) {
+      return true;
+    }
+    if (
+      leader.email === 'teamleader@livecall.app' &&
+      (!u.teamLeaderId || u.teamLeaderId === 'teamleader_elena' || u.teamLeaderId === leader.id)
+    ) {
+      return true;
+    }
+    return false;
+  });
+}
 
 interface FemaleHostAnalyticsDashboardProps {
   user?: UserProfile;
   onOpenCallLogs?: () => void;
   onOpenChat?: (userId: string) => void;
+  onStartCall?: (userId: string) => void;
 }
 
 export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboardProps> = ({
   user,
   onOpenCallLogs,
   onOpenChat,
+  onStartCall,
 }) => {
   const {
     currentUser,
     systemSettings,
-    payoutRequests,
-    submitPayoutRequest,
-    showToast,
     callLogs,
     virtualGifts,
     creatorReviews,
+    refreshCreatorReviews,
+    users,
+    myCreatorMetrics,
+    creatorMetricsMap,
   } = useApp();
   const activeUser = user || currentUser;
+
+  useEffect(() => {
+    if (!activeUser?.id) return;
+    void refreshCreatorReviews(activeUser.id);
+  }, [activeUser.id]);
+
+  const isTeamLeaderViewer =
+    activeUser.role === 'team_leader' || activeUser.role === 'agency_manager';
+
+  const managedHosts = useMemo(
+    () => (isTeamLeaderViewer ? getManagedHostsForLeader(activeUser, users) : []),
+    [isTeamLeaderViewer, activeUser, users]
+  );
 
   // Real Creator Reviews for this Host
   const hostReviews = useMemo(() => {
@@ -90,13 +141,13 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
     const count = hostReviews.length;
     if (count === 0) {
       return {
-        averageStars: 5.0,
+        averageStars: 0,
         totalReviews: 0,
-        scoreLabel: 'Top 1% Creator Score',
-        communication: 5.0,
-        friendliness: 5.0,
-        clarity: 5.0,
-        energy: 5.0,
+        scoreLabel: 'No reviews yet',
+        communication: 0,
+        friendliness: 0,
+        clarity: 0,
+        energy: 0,
       };
     }
 
@@ -161,85 +212,61 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
     'targets' | 'financial' | 'engagement' | 'ratings' | 'payouts'
   >('targets');
 
-  // Payout Request Form State
-  const [payoutCoins, setPayoutCoins] = useState<number>(activeUser.earningsCoins || 0);
-  const [payoutMethod, setPayoutMethod] = useState<'paypal' | 'bank' | 'crypto' | 'local'>('paypal');
-  const [accountDetails, setAccountDetails] = useState(
-    activeUser.payoutMethod?.details || ''
-  );
-  const [isSubmittingPayout, setIsSubmittingPayout] = useState(false);
-  const [showPayoutModal, setShowPayoutModal] = useState(false);
+  // Financial Calculations (Fixed Peg)
+  // Header = CURRENT PERIOD (creator_metrics; resets on period close).
+  // In-page CR-0.1 KPI = LIFETIME (hostMetrics.lifetimeUSD / wallet history).
+  const peg = getCoinUsdPeg(systemSettings);
 
-  // Financial Calculations
-  const userCoins = activeUser.earningsCoins ?? 0;
-  const availableUSD = userCoins * systemSettings.femalePayoutRatioUSD;
-  const requestedUSD = payoutCoins * systemSettings.femalePayoutRatioUSD;
-  const isAboveThreshold = requestedUSD >= systemSettings.minPayoutThresholdUSD;
+  const periodMetrics: CreatorMetrics = useMemo(() => {
+    const fromMap = creatorMetricsMap[activeUser.id];
+    if (fromMap) return fromMap;
+    if (activeUser.id === currentUser.id && myCreatorMetrics) return myCreatorMetrics;
+    return {
+      creatorId: activeUser.id,
+      activeOnlineSeconds: 0,
+      activeOnlineHours: 0,
+      coinsEarnedFromCalls: 0,
+      coinsEarnedFromGifts: 0,
+      totalTargetCoins: 0,
+      currentStreakDays: 1,
+      totalCallsOffered: 0,
+      totalCallsAnswered: 0,
+      totalCallsDeclined: 0,
+      totalCallsMissed: 0,
+      responseHealthScore: 100,
+      performanceTier: 'bronze',
+      isReadyNowActive: false,
+      bonusEarnedCoins: 0,
+      bonusEarnedUSD: 0,
+    };
+  }, [activeUser.id, currentUser.id, creatorMetricsMap, myCreatorMetrics]);
+
+  const periodProgress = useMemo(
+    () =>
+      getHostPeriodTargetProgress({
+        creatorId: activeUser.id,
+        metrics: periodMetrics as unknown as Record<string, unknown>,
+        systemSettings: systemSettings as unknown as Record<string, unknown>,
+        coinEarnOverrideRate: activeUser.coinEarnOverrideRate,
+      }),
+    [activeUser.id, activeUser.coinEarnOverrideRate, periodMetrics, systemSettings]
+  );
+
+  const periodCoins = periodProgress.periodCoins;
+  const periodUSD = coinsToUsd(periodCoins, peg);
 
   // Real Host Metrics computed dynamically from Supabase database call logs
   const hostMetrics = useMemo(() => {
-    return computeHostMetrics(activeUser, callLogs, systemSettings.femalePayoutRatioUSD);
-  }, [activeUser, callLogs, systemSettings.femalePayoutRatioUSD]);
+    return computeHostMetrics(activeUser, callLogs, peg);
+  }, [activeUser, callLogs, peg]);
 
   // Selected Graph Data computed dynamically from Supabase call logs
   const chartData = useMemo(() => {
-    return computeHostEarningsData(activeUser.id, callLogs, systemSettings.femalePayoutRatioUSD, timeframe);
-  }, [activeUser.id, callLogs, systemSettings.femalePayoutRatioUSD, timeframe]);
+    return computeHostEarningsData(activeUser.id, callLogs, peg, timeframe);
+  }, [activeUser.id, callLogs, peg, timeframe]);
 
   // Real hourly volume breakdown from callLogs
   const peakHoursData = hostMetrics.peakHours;
-
-  // Filter creator's payout requests
-  const myRequests = payoutRequests.filter(
-    (r) => r.userId === activeUser.id || currentUser.role === 'admin'
-  );
-
-  const handleOpenPayoutModal = () => {
-    if (availableUSD < systemSettings.minPayoutThresholdUSD) {
-      showToast(
-        'Minimum Threshold Not Met',
-        `You need at least $${systemSettings.minPayoutThresholdUSD.toFixed(2)} USD in accumulated earnings to request a withdrawal.`,
-        'warning'
-      );
-      return;
-    }
-    setShowPayoutModal(true);
-  };
-
-  const handleSubmitRequest = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!accountDetails.trim()) {
-      showToast(
-        'Account Details Required',
-        'Please enter your bank IBAN, PayPal email, or crypto wallet address.',
-        'error'
-      );
-      return;
-    }
-
-    if (requestedUSD < systemSettings.minPayoutThresholdUSD) {
-      showToast(
-        'Below Minimum Withdrawal',
-        `Minimum withdrawal amount is $${systemSettings.minPayoutThresholdUSD.toFixed(2)} USD.`,
-        'error'
-      );
-      return;
-    }
-
-    setIsSubmittingPayout(true);
-    const safeMethod = (payoutMethod || 'paypal').toUpperCase();
-    setTimeout(() => {
-      submitPayoutRequest(payoutCoins, safeMethod, accountDetails);
-      setIsSubmittingPayout(false);
-      setShowPayoutModal(false);
-      showToast(
-        'Payout Request Submitted! 💸',
-        `Requested withdrawal of $${requestedUSD.toFixed(2)} USD via ${safeMethod}. Processing time: 24-48 hours.`,
-        'success'
-      );
-    }, 600);
-  };
-
   return (
     <div id="female-host-analytics-dashboard" className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-6 space-y-6">
       
@@ -269,24 +296,27 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 bg-slate-900/90 border border-emerald-500/40 p-4 sm:p-5 rounded-2xl shadow-xl">
               <div>
                 <div className="text-[11px] font-mono font-bold text-slate-400 uppercase tracking-wider">
-                  Withdrawable Net Balance
+                  Current period earnings
                 </div>
                 <div className="text-2xl sm:text-3xl font-black text-emerald-400 font-mono">
-                  ${availableUSD.toFixed(2)} USD
+                  ${periodUSD.toFixed(2)} USD
                 </div>
                 <div className="text-[11px] text-emerald-300 font-mono flex items-center space-x-1 mt-0.5">
                   <span>🪙</span>
-                  <span>{(activeUser?.earningsCoins ?? 0).toLocaleString()} accumulated coins</span>
+                  <span>{periodCoins.toLocaleString()} period coins</span>
                 </div>
+                <p className="text-[10px] text-slate-500 mt-1 max-w-xs">
+                  Resets when the target cycle closes. Lifetime revenue is in the KPIs below. Cash-out is period-end only — see Salary Status.
+                </p>
               </div>
 
               <button
-                id="host-open-payout-btn"
-                onClick={handleOpenPayoutModal}
+                id="host-open-salary-status-btn"
+                onClick={() => setActiveSection('payouts')}
                 className="mt-2 sm:mt-0 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs font-mono transition-all shadow-lg shadow-emerald-500/20 hover:scale-105 cursor-pointer flex items-center space-x-1.5"
               >
-                <Send className="w-3.5 h-3.5" />
-                <span>Request Payout</span>
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>View Salary Status</span>
               </button>
             </div>
           ) : (
@@ -336,7 +366,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                 CR-2
               </span>
               <TrendingUp className="w-3.5 h-3.5" />
-              <span>Financial & Earnings Ledger</span>
+              <span>Call Activity & Estimates</span>
             </button>
           )}
 
@@ -382,8 +412,8 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
               <span className="px-1.5 py-0.5 rounded bg-slate-950 text-indigo-300 font-mono text-[9px] font-bold select-all">
                 CR-5
               </span>
-              <History className="w-3.5 h-3.5" />
-              <span>Withdrawal History ({myRequests.length})</span>
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Salary Status</span>
             </button>
           )}
         </div>
@@ -408,7 +438,10 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             </div>
             <div className="text-[10px] text-emerald-400 font-mono flex items-center space-x-1">
               <ArrowUpRight className="w-3 h-3" />
-              <span>{hostMetrics.totalCalls} completed sessions</span>
+              <span>
+                {(activeUser.earningsCoins ?? 0).toLocaleString()} 🪙 lifetime wallet ·{' '}
+                {hostMetrics.totalCalls} completed sessions
+              </span>
             </div>
           </div>
         ) : (
@@ -521,6 +554,140 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
         </div>
       </div>
 
+      {/* Team Leader: Managed Hosts roster (keeps existing hub content below) */}
+      {isTeamLeaderViewer && (
+        <div className="p-5 sm:p-6 bg-[#13161F] border border-amber-500/30 rounded-3xl space-y-4 shadow-xl">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider flex items-center gap-2">
+                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
+                  TL-HOSTS
+                </span>
+                <Users className="w-4 h-4 text-amber-400" />
+                <span>Managed Hosts</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-1">
+                Female creators linked to {activeUser.agencyName || 'your agency'} ({managedHosts.length} host
+                {managedHosts.length === 1 ? '' : 's'}).
+              </p>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 font-mono text-[11px] font-bold">
+              {managedHosts.length} Managed
+            </span>
+          </div>
+
+          {managedHosts.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 text-xs font-mono border border-dashed border-slate-800 rounded-2xl">
+              No managed hosts yet. Register creators from the Agency Hub.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-slate-800">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-950 text-slate-400 font-mono uppercase text-[10px] border-b border-slate-800">
+                  <tr>
+                    <th className="py-2.5 px-3">Host</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3">Calls</th>
+                    <th className="py-2.5 px-3">Minutes</th>
+                    <th className="py-2.5 px-3">Earnings</th>
+                    <th className="py-2.5 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70">
+                  {[...managedHosts]
+                    .sort((a, b) => (b.earningsCoins || 0) - (a.earningsCoins || 0))
+                    .map((host) => {
+                      const hostLogs = callLogs.filter((l) => l.receiverId === host.id);
+                      const calls = hostLogs.length || host.totalCallsHosted || 0;
+                      const mins =
+                        hostLogs.reduce(
+                          (acc, l) => acc + Math.round((l.durationSeconds || 0) / 60),
+                          0
+                        ) ||
+                        host.totalCallMinutes ||
+                        0;
+                      const status = host.onlineStatus || 'offline';
+                      return (
+                        <tr key={host.id} className="hover:bg-slate-900/40">
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <img
+                                src={host.avatarUrl}
+                                alt={host.name}
+                                className="w-8 h-8 rounded-full object-cover ring-1 ring-slate-700 shrink-0"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).src = getFallbackAvatar(
+                                    host.name,
+                                    'female',
+                                    'female_creator'
+                                  );
+                                }}
+                              />
+                              <div className="min-w-0">
+                                <div className="font-bold text-white truncate flex items-center gap-1">
+                                  <span className="truncate">{host.name}</span>
+                                  {host.isVerified && (
+                                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-mono truncate">
+                                  {host.nationality || '—'}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border ${
+                                status === 'online'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                  : status === 'busy' || status === 'in_call'
+                                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                  : 'bg-slate-800 text-slate-400 border-slate-700'
+                              }`}
+                            >
+                              {String(status).replace('_', ' ')}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 font-mono font-bold text-white">{calls}</td>
+                          <td className="py-2.5 px-3 font-mono text-slate-300">{mins}m</td>
+                          <td className="py-2.5 px-3 font-mono font-bold text-amber-300">
+                            {(host.earningsCoins || 0).toLocaleString()} 🪙
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {onOpenChat && (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenChat(host.id)}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                                  title="Message host"
+                                >
+                                  <MessageCircle className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              {onStartCall && (
+                                <button
+                                  type="button"
+                                  onClick={() => onStartCall(host.id)}
+                                  className="p-1.5 rounded-lg bg-pink-600/80 hover:bg-pink-500 text-white cursor-pointer"
+                                  title="Call host"
+                                >
+                                  <Video className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 2.5 SECTION: CREATOR TARGETS & ALGORITHMIC BOOSTS */}
       {activeSection === 'targets' && (
         <div className="space-y-6">
@@ -545,7 +712,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   <span>Revenue & Earning Streams Breakdown</span>
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Track call earnings from live call logs (coins × payout ratio). Categories only appear when recorded in data.
+                  Track call earnings from live call logs (coins × Coin USD Peg from Economy). Categories only appear when recorded in data.
                 </p>
               </div>
 
@@ -654,7 +821,9 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
 
                 <div className="p-3.5 bg-emerald-500/10 rounded-xl border border-emerald-500/30 flex items-center justify-between text-emerald-300">
                   <span className="font-bold">Total Effective Creator Net Payout</span>
-                  <span className="font-black text-base">75.0% Net ($0.008/coin)</span>
+                  <span className="font-black text-base">
+                    75.0% Net (${getCoinUsdPeg(systemSettings)}/coin)
+                  </span>
                 </div>
               </div>
             </div>
@@ -667,11 +836,11 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                 </span>
                 <Building className="w-5 h-5 text-indigo-400" />
                 <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
-                  Supported Global Payout Channels
+                  Period-end settlement remittance
                 </h3>
               </div>
               <p className="text-xs text-slate-400">
-                Direct withdrawals to international bank accounts, digital e-wallets, and crypto networks.
+                Cash-out is period-end only via settlement batches (not mid-period withdrawals). Remittance channels used by admin/TL:
               </p>
 
               <div className="grid grid-cols-2 gap-2.5 font-mono text-xs">
@@ -679,7 +848,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   <Wallet className="w-5 h-5 text-blue-400 shrink-0" />
                   <div>
                     <div className="font-bold text-white">PayPal Wallet</div>
-                    <div className="text-[10px] text-slate-500">12-24h • Zero fee</div>
+                    <div className="text-[10px] text-slate-500">Agency remittance</div>
                   </div>
                 </div>
 
@@ -687,7 +856,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   <Building className="w-5 h-5 text-emerald-400 shrink-0" />
                   <div>
                     <div className="font-bold text-white">Bank Wire / IBAN</div>
-                    <div className="text-[10px] text-slate-500">SEPA & ACH • Direct</div>
+                    <div className="text-[10px] text-slate-500">SEPA & ACH</div>
                   </div>
                 </div>
 
@@ -709,10 +878,13 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
               </div>
 
               <div className="pt-2 flex items-center justify-between text-[11px] text-slate-400 font-mono">
-                <span>Minimum Withdrawal: <strong className="text-white">${systemSettings.minPayoutThresholdUSD.toFixed(2)} USD</strong></span>
+                <span>
+                  Cash-out:{' '}
+                  <strong className="text-white">Period-end settlements only</strong>
+                </span>
                 <span className="text-emerald-400 flex items-center space-x-1">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Verified 256-Bit SSL</span>
+                  <span>View Salary Status</span>
                 </span>
               </div>
             </div>
@@ -908,7 +1080,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {virtualGifts.filter((g) => g.isActive !== false).map((g) => {
                 const hostShareCoins = Math.round(g.coinCost * ((systemSettings.giftFemaleHostSharePercent ?? 70) / 100));
-                const hostUSD = hostShareCoins * systemSettings.femalePayoutRatioUSD;
+                const hostUSD = coinsToUsd(hostShareCoins, peg);
                 return (
                   <div
                     key={g.id}
@@ -1126,9 +1298,9 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                 ))
               ) : (
                 <div className="p-6 bg-slate-950 border border-slate-800 rounded-2xl text-center space-y-2">
-                  <div className="text-slate-400 text-xs font-mono">No caller reviews recorded yet.</div>
+                  <div className="text-slate-400 text-xs font-mono">No caller reviews yet.</div>
                   <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
-                    Incoming calls and reviews will appear here in real-time as users connect with you.
+                    Use “Ask for a rating” in chat after a call. Reviews appear here once a caller submits feedback.
                   </p>
                 </div>
               )}
@@ -1137,262 +1309,13 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
         </div>
       )}
 
-      {/* 6. SECTION 4: WITHDRAWAL & PAYOUT HISTORY */}
+      {/* 6. SECTION: SALARY STATUS (NO AMOUNTS) */}
       {activeSection === 'payouts' && (
         <div className="space-y-6">
-          <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                    CR-5.1
-                  </span>
-                  <History className="w-4 h-4 text-emerald-400" />
-                  <span>Withdrawal Requests & Payout Ledger</span>
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Track the real-time settlement status of your earnings payouts across all channels.
-                </p>
-              </div>
-
-              <button
-                onClick={handleOpenPayoutModal}
-                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold font-mono text-xs transition-all shadow-md flex items-center space-x-1.5 cursor-pointer"
-              >
-                <Send className="w-3.5 h-3.5" />
-                <span>Submit New Withdrawal</span>
-              </button>
-            </div>
-
-            {/* Payout Requests Table */}
-            {myRequests.length === 0 ? (
-              <div className="p-10 rounded-2xl bg-slate-950/60 border border-dashed border-slate-800 text-center space-y-2">
-                <History className="w-8 h-8 text-slate-600 mx-auto" />
-                <div className="font-bold text-white text-xs">No Payout Requests on Record</div>
-                <p className="text-[11px] text-slate-400 max-w-sm mx-auto">
-                  When you request withdrawals of your earned coins, their tracking status and bank/crypto reference IDs will appear here.
-                </p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left font-mono text-xs">
-                  <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] uppercase">
-                    <tr>
-                      <th className="py-3 px-4">Request ID</th>
-                      <th className="py-3 px-4">Amount</th>
-                      <th className="py-3 px-4">Method & Account</th>
-                      <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4">Date</th>
-                      <th className="py-3 px-4">Note / Gateway Ref</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                    {myRequests.map((req) => (
-                      <tr key={req.id} className="hover:bg-slate-900/40 transition-colors">
-                        <td className="py-3.5 px-4 font-bold text-indigo-400">{req.id}</td>
-                        <td className="py-3.5 px-4">
-                          <div className="font-black text-white text-sm">${req.amountUSD.toFixed(2)} USD</div>
-                          <div className="text-[10px] text-emerald-400">{(req.amountCoins ?? 0).toLocaleString()} coins</div>
-                        </td>
-                        <td className="py-3.5 px-4">
-                          <div className="font-bold text-slate-200">{req.payoutMethod}</div>
-                          <div className="text-[10px] text-slate-400 truncate max-w-[200px]">{req.accountDetails}</div>
-                        </td>
-                        <td className="py-3.5 px-4">
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider inline-flex items-center space-x-1 ${
-                              req.status === 'completed'
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                                : req.status === 'processing'
-                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                                : req.status === 'rejected'
-                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                                : 'bg-slate-800 text-slate-300 border border-slate-700'
-                            }`}
-                          >
-                            <span>{req.status}</span>
-                          </span>
-                        </td>
-                        <td className="py-3.5 px-4 text-slate-400 text-[11px]">{req.requestDate}</td>
-                        <td className="py-3.5 px-4 text-slate-400 text-[11px]">
-                          {req.adminNote || 'Automatic gateway batch queue'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+          <HostSalaryStatusPanel />
         </div>
       )}
 
-      {/* 7. PAYOUT REQUEST MODAL */}
-      {showPayoutModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fade-in"
-          onClick={() => setShowPayoutModal(false)}
-        >
-          <div
-            className="relative w-full max-w-lg bg-[#0F121A] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-5 text-slate-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                  CR-5.2
-                </span>
-                <DollarSign className="w-5 h-5 text-emerald-400" />
-                <h3 className="text-base font-black text-white font-mono uppercase tracking-wider">
-                  Request Earnings Withdrawal
-                </h3>
-              </div>
-              <button
-                onClick={() => setShowPayoutModal(false)}
-                className="text-slate-400 hover:text-white transition-colors text-sm"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleSubmitRequest} className="space-y-4">
-              <div>
-                <label className="block text-xs font-mono font-bold text-slate-300 mb-1 flex items-center justify-between">
-                  <span>Coins to Withdraw</span>
-                  <span className="text-emerald-400 font-bold">
-                    Est. ${requestedUSD.toFixed(2)} USD
-                  </span>
-                </label>
-                <input
-                  type="number"
-                  min={systemSettings.minPayoutThresholdUSD / systemSettings.femalePayoutRatioUSD}
-                  max={currentUser.earningsCoins}
-                  value={payoutCoins}
-                  onChange={(e) => setPayoutCoins(Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
-                />
-                <div className="text-[10px] text-slate-500 font-mono mt-1 flex justify-between">
-                  <span>Available: {(currentUser?.earningsCoins ?? 8400).toLocaleString()} coins</span>
-                  <span>Min: ${(systemSettings.minPayoutThresholdUSD).toFixed(2)} USD</span>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-mono font-bold text-slate-300 mb-1.5">
-                  Select Payout Gateway
-                </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPayoutMethod('paypal')}
-                    className={`p-2.5 rounded-xl border text-xs font-mono font-bold flex flex-col items-center justify-center space-y-1 ${
-                      payoutMethod === 'paypal'
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500 shadow-sm'
-                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <Wallet className="w-4 h-4" />
-                    <span>PayPal</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setPayoutMethod('bank')}
-                    className={`p-2.5 rounded-xl border text-xs font-mono font-bold flex flex-col items-center justify-center space-y-1 ${
-                      payoutMethod === 'bank'
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500 shadow-sm'
-                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <Building className="w-4 h-4" />
-                    <span>Bank Wire</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setPayoutMethod('crypto')}
-                    className={`p-2.5 rounded-xl border text-xs font-mono font-bold flex flex-col items-center justify-center space-y-1 ${
-                      payoutMethod === 'crypto'
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500 shadow-sm'
-                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <Zap className="w-4 h-4" />
-                    <span>USDT Crypto</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setPayoutMethod('local')}
-                    className={`p-2.5 rounded-xl border text-xs font-mono font-bold flex flex-col items-center justify-center space-y-1 ${
-                      payoutMethod === 'local'
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500 shadow-sm'
-                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <CreditCard className="w-4 h-4" />
-                    <span>E-Wallet</span>
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-mono font-bold text-slate-300 mb-1">
-                  Recipient Account Details / Wallet Address *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={accountDetails}
-                  onChange={(e) => setAccountDetails(e.target.value)}
-                  placeholder={
-                    payoutMethod === 'paypal'
-                      ? 'your-paypal@email.com'
-                      : payoutMethod === 'bank'
-                      ? 'IBAN / Routing & Account #'
-                      : payoutMethod === 'crypto'
-                      ? 'USDT TRC20 / ERC20 Address'
-                      : 'Revolut / PIX / GCash ID'
-                  }
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] font-mono text-slate-400 space-y-1">
-                <div className="flex justify-between">
-                  <span>Gross Withdrawal:</span>
-                  <span className="text-white">${requestedUSD.toFixed(2)} USD</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Gateway Settlement Fee:</span>
-                  <span className="text-emerald-400 font-bold">$0.00 (Free)</span>
-                </div>
-                <div className="flex justify-between text-white font-bold pt-1 border-t border-slate-800">
-                  <span>Net Payout to Account:</span>
-                  <span className="text-emerald-400">${requestedUSD.toFixed(2)} USD</span>
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={isSubmittingPayout || !isAboveThreshold}
-                className={`w-full py-3 rounded-xl font-mono font-black text-xs transition-all flex items-center justify-center space-x-2 shadow-lg cursor-pointer ${
-                  isAboveThreshold
-                    ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 hover:brightness-110 shadow-emerald-500/20'
-                    : 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                }`}
-              >
-                <Send className="w-4 h-4" />
-                <span>
-                  {isSubmittingPayout
-                    ? 'Processing...'
-                    : `Confirm & Submit Payout ($${requestedUSD.toFixed(2)} USD)`}
-                </span>
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -1,34 +1,50 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { X, ShieldAlert, Ban, Flag, CheckCircle2 } from 'lucide-react';
+import { X, ShieldAlert, Ban, Flag, CheckCircle2, Loader2 } from 'lucide-react';
 
 interface BlockReportModalProps {
   isOpen: boolean;
   onClose: () => void;
   targetUserId: string | null;
+  initialAction?: 'report' | 'block';
 }
 
-export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onClose, targetUserId }) => {
+export const BlockReportModal: React.FC<BlockReportModalProps> = ({
+  isOpen,
+  onClose,
+  targetUserId,
+  initialAction = 'report',
+}) => {
   const { users, blockUser, reportUser } = useApp();
-  const [actionType, setActionType] = useState<'report' | 'block'>('report');
+  const [actionType, setActionType] = useState<'report' | 'block'>(initialAction);
   const [selectedReason, setSelectedReason] = useState<string>('Inappropriate Conduct / Content');
   const [customNote, setCustomNote] = useState<string>('');
+  const [submitting, setSubmitting] = useState(false);
 
   if (!isOpen || !targetUserId) return null;
 
   const targetUser = users.find((u) => u.id === targetUserId);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const finalReason = selectedReason === 'Other' ? customNote || 'User Flagged' : selectedReason;
+    if (submitting) return;
 
-    if (actionType === 'block') {
-      blockUser(targetUserId, finalReason);
-    } else {
-      reportUser(targetUserId, finalReason);
+    const finalReason =
+      selectedReason === 'Other' ? customNote.trim() || 'User Flagged' : selectedReason;
+    const details = selectedReason === 'Other' ? customNote.trim() || undefined : undefined;
+
+    setSubmitting(true);
+    try {
+      let ok = false;
+      if (actionType === 'block') {
+        ok = await blockUser(targetUserId, finalReason);
+      } else {
+        ok = await reportUser(targetUserId, finalReason, details);
+      }
+      if (ok) onClose();
+    } finally {
+      setSubmitting(false);
     }
-
-    onClose();
   };
 
   const reasons = [
@@ -37,7 +53,7 @@ export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onCl
     'Fake Profile / Impersonation',
     'Commercial Spam or Scams',
     'Abusive Language',
-    'Other'
+    'Other',
   ];
 
   return (
@@ -52,8 +68,10 @@ export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onCl
             </h2>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            disabled={submitting}
+            className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-colors disabled:opacity-50"
           >
             <X className="w-4 h-4" />
           </button>
@@ -82,8 +100,9 @@ export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onCl
             <div className="grid grid-cols-2 gap-2 font-mono text-xs">
               <button
                 type="button"
+                disabled={submitting}
                 onClick={() => setActionType('report')}
-                className={`py-2 px-3 rounded font-bold flex items-center justify-center space-x-1.5 border transition-all ${
+                className={`py-2 px-3 rounded font-bold flex items-center justify-center space-x-1.5 border transition-all disabled:opacity-50 ${
                   actionType === 'report'
                     ? 'bg-amber-500/20 text-amber-300 border-amber-500'
                     : 'bg-[#0F1115] text-slate-400 border-slate-800'
@@ -95,8 +114,9 @@ export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onCl
 
               <button
                 type="button"
+                disabled={submitting}
                 onClick={() => setActionType('block')}
-                className={`py-2 px-3 rounded font-bold flex items-center justify-center space-x-1.5 border transition-all ${
+                className={`py-2 px-3 rounded font-bold flex items-center justify-center space-x-1.5 border transition-all disabled:opacity-50 ${
                   actionType === 'block'
                     ? 'bg-rose-600 text-white border-rose-500'
                     : 'bg-[#0F1115] text-slate-400 border-slate-800'
@@ -117,7 +137,7 @@ export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onCl
               {reasons.map((r) => (
                 <label
                   key={r}
-                  onClick={() => setSelectedReason(r)}
+                  onClick={() => !submitting && setSelectedReason(r)}
                   className={`flex items-center justify-between p-2.5 rounded border text-xs cursor-pointer transition-all ${
                     selectedReason === r
                       ? 'bg-indigo-500/10 border-indigo-500 text-white font-bold'
@@ -132,11 +152,13 @@ export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onCl
 
             {selectedReason === 'Other' && (
               <textarea
-                placeholder="Describe the issue for AI moderators..."
+                placeholder="Describe the issue for our safety team..."
                 value={customNote}
+                disabled={submitting}
                 onChange={(e) => setCustomNote(e.target.value)}
-                className="w-full mt-2 p-2.5 bg-[#0F1115] border border-slate-800 rounded text-xs text-white focus:outline-none focus:border-indigo-500"
+                className="w-full mt-2 p-2.5 bg-[#0F1115] border border-slate-800 rounded text-xs text-white focus:outline-none focus:border-indigo-500 disabled:opacity-50"
                 rows={2}
+                maxLength={2000}
               />
             )}
           </div>
@@ -146,18 +168,21 @@ export const BlockReportModal: React.FC<BlockReportModalProps> = ({ isOpen, onCl
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 py-2 rounded text-xs font-semibold text-slate-400 bg-[#0F1115] border border-slate-800 hover:text-white"
+              disabled={submitting}
+              className="flex-1 py-2 rounded text-xs font-semibold text-slate-400 bg-[#0F1115] border border-slate-800 hover:text-white disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className={`flex-1 py-2 rounded text-xs font-mono font-bold text-white border transition-all ${
+              disabled={submitting}
+              className={`flex-1 py-2 rounded text-xs font-mono font-bold text-white border transition-all disabled:opacity-60 flex items-center justify-center gap-1.5 ${
                 actionType === 'block'
                   ? 'bg-rose-600 hover:bg-rose-500 border-rose-500'
                   : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-500'
               }`}
             >
+              {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               {actionType === 'block' ? 'Confirm Block' : 'Submit Report'}
             </button>
           </div>

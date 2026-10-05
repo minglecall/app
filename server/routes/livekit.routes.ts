@@ -74,43 +74,51 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
   router.post('/token', requireAuth, async (req, res) => {
     try {
       const { roomName, name } = req.body;
+      // Identity is always server-derived from the verified session (never trust client identity)
       const identity = String((req as any).profileId || (req as any).user?.id || '').trim();
       const profileRole = String((req as any).profile?.role || '');
-      const isSpectator = false;
+      const appMetaRole = String((req as any).user?.app_metadata?.role || '');
+      const authUserId = String((req as any).user?.id || '').trim();
 
       if (!roomName || !identity) {
-        return res.status(400).json({ error: 'roomName and identity are required' });
+        return res.status(400).json({ error: 'roomName is required' });
       }
 
       const { activeCalls } = ctx;
-      const isAdmin = profileRole === 'admin';
-      const isAdminTestRoom = String(roomName).startsWith('admin_test_room_');
+      const isAdmin = profileRole === 'admin' || appMetaRole === 'admin';
+      const room = String(roomName);
+      const isAdminTestRoom = room.startsWith('admin_test_room_');
+
       if (isAdminTestRoom && !isAdmin) {
         return res.status(403).json({ error: 'Admin test rooms require admin privileges.' });
       }
+
+      // Non-admin rooms: require an active call record + membership (caller/receiver)
       if (!isAdminTestRoom) {
-        const call = activeCalls.get(roomName);
-        if (
-          call &&
-          call.callerId !== identity &&
-          call.receiverId !== identity &&
-          call.callerId !== (req as any).user?.id &&
-          call.receiverId !== (req as any).user?.id
-        ) {
+        const call = activeCalls.get(room);
+        if (!call) {
+          return res.status(404).json({ error: 'Call room not found or is no longer active.' });
+        }
+        const isMember =
+          call.callerId === identity ||
+          call.receiverId === identity ||
+          (!!authUserId &&
+            (call.callerId === authUserId || call.receiverId === authUserId));
+        if (!isMember) {
           return res.status(403).json({ error: 'Not authorized to join this room.' });
         }
       }
 
-      const apiKey = livekitConfig.apiKey;
-      const apiSecret = livekitConfig.apiSecret;
-      const livekitUrl = livekitConfig.wsUrl || 'wss://your-livekit-project.livekit.cloud';
+      const apiKey = String(livekitConfig.apiKey || '').trim();
+      const apiSecret = String(livekitConfig.apiSecret || '').trim();
+      const livekitUrl = String(livekitConfig.wsUrl || '').trim() || 'wss://your-livekit-project.livekit.cloud';
 
       if (!apiKey || !apiSecret || apiKey === 'devkey' || apiSecret === 'secret') {
         return res.json({
           configured: false,
           token: null,
           wsUrl: livekitUrl,
-          message: 'LiveKit credentials missing or placeholder in environment variables.'
+          message: 'LiveKit credentials missing or placeholder. Save your API Key & Secret first.',
         });
       }
 
@@ -128,23 +136,28 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
 
       at.addGrant({
         roomJoin: true,
-        room: roomName,
-        canPublish: !isSpectator,
+        room,
+        canPublish: true,
         canSubscribe: true,
-        canPublishData: !isSpectator,
-        hidden: Boolean(isSpectator),
+        canPublishData: true,
+        hidden: false,
       });
 
       const token = await at.toJwt();
 
       return res.json({
         configured: true,
-        token: token,
+        token,
         wsUrl: livekitUrl,
       });
     } catch (err: any) {
       console.error('Error generating LiveKit token:', err);
-      return res.status(500).json({ error: err.message || 'Failed to generate token' });
+      return res.status(500).json({
+        configured: false,
+        token: null,
+        error: 'Failed to generate token',
+        message: 'Token signing failed. Check that LIVEKIT_API_KEY and LIVEKIT_API_SECRET match your LiveKit Cloud project.',
+      });
     }
   });
 

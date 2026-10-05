@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
+import { authFetch } from '../../utils/apiClient';
 import {
   Settings,
   DollarSign,
@@ -39,9 +40,6 @@ import {
   Clock,
   Layers,
   FileText,
-  Sun,
-  Moon,
-  Palette,
   Database,
   Crown,
   Building,
@@ -56,8 +54,33 @@ import {
   Rocket,
   Percent,
   ChevronRight,
+  Target,
+  Landmark,
 } from 'lucide-react';
 import { CoinPackage, UserProfile, AdminActiveCall, getUserRoleLabel, getFemaleRoleMark, VirtualGift } from '../../types';
+import { getCoinUsdPeg, coinsToUsd, usdToCoins, formatPegExample } from '../../../shared/finance/fx';
+import {
+  DEFAULT_COIN_BURN_RATE_PER_MIN,
+  DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN,
+  DEFAULT_FEMALE_HOST_SHARE_PERCENT,
+  DEFAULT_FEMALE_HOST_TARGET_SHARE_PERCENT,
+  DEFAULT_TEAM_LEADER_SHARE_PERCENT,
+  deriveHostEarnPerMin,
+} from '../../../shared/finance/economyBurn';
+import {
+  DEFAULT_GIFT_FEMALE_HOST_SHARE_PERCENT,
+  DEFAULT_GIFT_TEAM_LEADER_SHARE_PERCENT,
+} from '../../../shared/finance/economyGift';
+import {
+  totalCoins as pkgTotalCoins,
+  payPriceUSD,
+  listPriceUSD,
+  savingUSD,
+  savingPercent,
+  savingDisplayLabel,
+  approxCallMinutes as pkgApproxCallMinutes,
+  hasDiscount,
+} from '../../utils/coinPackagePricing';
 import { getUserEffectiveLocation } from '../../utils/location';
 import { ManualCoinModal } from './ManualCoinModal';
 import { EditUserModal } from './EditUserModal';
@@ -66,14 +89,16 @@ import { UserAnalyticsModal } from './UserAnalyticsModal';
 import { AdminSilentCallMonitorModal } from './AdminSilentCallMonitorModal';
 import { AdminDatabaseStorageConfig } from './AdminDatabaseStorageConfig';
 import { ResetMockDataModal } from './ResetMockDataModal';
-import { AdminCountryConfig } from './AdminCountryConfig';
 import { AdminTaxonomyManager } from './AdminTaxonomyManager';
+import { AdminCreatorTargetConfig } from './AdminCreatorTargetConfig';
+import { AdminFinancialModule } from './finance/AdminFinancialModule';
 import { ALL_WORLDWIDE_COUNTRIES, getAllowedCountries } from '../../utils/countries';
 import { ALL_WORLDWIDE_LANGUAGES } from '../../utils/languages';
 import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { getFallbackAvatar } from '../../utils/avatars';
-import { PlatformMasterAnalytics } from './PlatformMasterAnalytics';
+import { AdminAnalyticsHub } from './analytics/AdminAnalyticsHub';
+import { AdminEconomyConfigHub } from './AdminEconomyConfigHub';
 
 /** Female hosts managed by a Team Leader — ID/authId first, agencyName only as fallback. */
 function getManagedCreatorsForLeader(leader: UserProfile, allUsers: UserProfile[]): UserProfile[] {
@@ -126,8 +151,6 @@ export const AdminDashboard: React.FC = () => {
     deleteVirtualGift,
     resetVirtualGifts,
     payoutRequests,
-    adminApprovePayout,
-    adminRejectPayout,
     users,
     toggleVerifyUser,
     updateUserProfile,
@@ -141,21 +164,35 @@ export const AdminDashboard: React.FC = () => {
     adminTerminateCall,
     adminIssueCallWarning,
     adminCaptureEvidence,
-    adminSpawnDemoCall,
-    purgeAllMockData,
     syncUsersFromSupabase,
     createTeamLeader,
     callLogs,
     updateCreatorCoinEarnOverride,
   } = useApp();
 
-  const [isPurgingMock, setIsPurgingMock] = useState(false);
   const [isSyncingFromDb, setIsSyncingFromDb] = useState(false);
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
 
-  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'monitoring' | 'financials' | 'gifts' | 'countries' | 'livekit' | 'infra' | 'skus' | 'leaders' | 'payouts' | 'users' | 'cms'>('analytics');
+  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'monitoring' | 'financials' | 'finance-module' | 'gifts' | 'countries' | 'creator-ops' | 'livekit' | 'infra' | 'skus' | 'leaders' | 'payouts' | 'users' | 'cms'>('analytics');
+  /** Deep-link section inside Coin Burn / Economy hub (A–F). */
+  const [economySection, setEconomySection] = useState<'A' | 'B' | 'C' | 'D' | 'E' | 'F' | undefined>(undefined);
   const [activeSpectatorCall, setActiveSpectatorCall] = useState<AdminActiveCall | null>(null);
-  const [selectedAnalyticsUser, setSelectedAnalyticsUser] = useState<UserProfile | null>(null);
+
+  // Deep-links from host target progress panels (Creator Ops / Economy shares)
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { tab?: string; economySection?: 'A' | 'B' | 'C' | 'D' | 'E' | 'F' }
+        | undefined;
+      if (!detail?.tab) return;
+      setActiveSubTab(detail.tab as typeof activeSubTab);
+      if (detail.economySection) {
+        setEconomySection(detail.economySection);
+      }
+    };
+    window.addEventListener('minglecall:admin-navigate', handler as EventListener);
+    return () => window.removeEventListener('minglecall:admin-navigate', handler as EventListener);
+  }, []);
 
   // Virtual Gift Modal state
   const [editingGift, setEditingGift] = useState<(Partial<VirtualGift> & { id?: string }) | null>(null);
@@ -234,112 +271,6 @@ export const AdminDashboard: React.FC = () => {
     avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400',
   });
 
-  // Config Form State
-  const [coinBurnRate, setCoinBurnRate] = useState(systemSettings.coinBurnRatePerMin ?? 120);
-  const [coinBurnRateFriend, setCoinBurnRateFriend] = useState(systemSettings.coinBurnRateFriendPerMin ?? 80);
-  const [femaleHostSharePercent, setFemaleHostSharePercent] = useState(systemSettings.femaleHostSharePercent ?? 40);
-  const [teamLeaderSharePercent, setTeamLeaderSharePercent] = useState(systemSettings.teamLeaderSharePercent ?? 10);
-  const [giftFemaleHostSharePercent, setGiftFemaleHostSharePercent] = useState(systemSettings.giftFemaleHostSharePercent ?? 70);
-  const [giftTeamLeaderSharePercent, setGiftTeamLeaderSharePercent] = useState(systemSettings.giftTeamLeaderSharePercent ?? 10);
-  const [enableVirtualGifts, setEnableVirtualGifts] = useState(systemSettings.enableVirtualGifts !== false);
-  const [payoutRatio, setPayoutRatio] = useState(systemSettings.femalePayoutRatioUSD ?? 0.008);
-  const [minPayout, setMinPayout] = useState(systemSettings.minPayoutThresholdUSD ?? 50);
-  const [enableRegularFemaleCoinEarning, setEnableRegularFemaleCoinEarning] = useState<boolean>(
-    systemSettings.enableRegularFemaleCoinEarning ?? false
-  );
-  const [defaultTheme, setDefaultTheme] = useState<'dark' | 'light'>(systemSettings.defaultTheme || 'dark');
-  const [videoQualityProfile, setVideoQualityProfile] = useState<'auto' | 'ultra_4k' | 'hd_1080p' | 'high_720p' | 'standard_480p'>(
-    systemSettings.videoQualityProfile || 'high_720p'
-  );
-
-  // Quick Match Configuration State
-  const [quickMatchFreeEnabled, setQuickMatchFreeEnabled] = useState<boolean>(systemSettings.quickMatchFreeEnabled !== false);
-  const [quickMatchTimerSeconds, setQuickMatchTimerSeconds] = useState<number>(systemSettings.quickMatchTimerSeconds || 5);
-  const [quickMatchGiftRose, setQuickMatchGiftRose] = useState<number>(systemSettings.quickMatchGiftPrices?.rose || 10);
-  const [quickMatchGiftHeart, setQuickMatchGiftHeart] = useState<number>(systemSettings.quickMatchGiftPrices?.heart || 25);
-  const [quickMatchGiftCheers, setQuickMatchGiftCheers] = useState<number>(systemSettings.quickMatchGiftPrices?.cheers || 50);
-  const [quickMatchGiftTiara, setQuickMatchGiftTiara] = useState<number>(systemSettings.quickMatchGiftPrices?.tiara || 100);
-  const [quickMatchGiftDiamond, setQuickMatchGiftDiamond] = useState<number>(systemSettings.quickMatchGiftPrices?.diamond || 200);
-  const [quickMatchGiftRocket, setQuickMatchGiftRocket] = useState<number>(systemSettings.quickMatchGiftPrices?.rocket || 500);
-  const [quickMatchSplitCreator, setQuickMatchSplitCreator] = useState<number>(systemSettings.quickMatchGiftSplitFemaleCreator ?? 60);
-  const [quickMatchSplitTL, setQuickMatchSplitTL] = useState<number>(systemSettings.quickMatchGiftSplitTL ?? 10);
-  const [quickMatchSplitPlatform, setQuickMatchSplitPlatform] = useState<number>(systemSettings.quickMatchGiftSplitPlatform ?? 30);
-  const [quickMatchAutoFallback, setQuickMatchAutoFallback] = useState<boolean>(systemSettings.quickMatchAutoFallbackOnlineCreators !== false);
-  
-  // Daily Rewards & Quests Admin Configuration State
-  const [streakRewards, setStreakRewards] = useState<number[]>(
-    systemSettings.dailyStreakRewards || [10, 15, 20, 25, 35, 50, 100]
-  );
-  const [missionsConfig, setMissionsConfig] = useState(
-    systemSettings.dailyMissionsConfig || {
-      chatFriends: { target: 3, reward: 25, enabled: true },
-      quickMatches: { target: 10, reward: 30, enabled: true },
-      videoCall: { target: 60, reward: 35, enabled: true },
-      momentInteract: { target: 3, reward: 15, enabled: true },
-      sendGift: { target: 1, reward: 20, enabled: true },
-      masterChest: { target: 4, reward: 50, enabled: true },
-    }
-  );
-
-  useEffect(() => {
-    setCoinBurnRate(systemSettings.coinBurnRatePerMin ?? 120);
-    setCoinBurnRateFriend(systemSettings.coinBurnRateFriendPerMin ?? 80);
-    setFemaleHostSharePercent(systemSettings.femaleHostSharePercent ?? 40);
-    setTeamLeaderSharePercent(systemSettings.teamLeaderSharePercent ?? 10);
-    setGiftFemaleHostSharePercent(systemSettings.giftFemaleHostSharePercent ?? 70);
-    setGiftTeamLeaderSharePercent(systemSettings.giftTeamLeaderSharePercent ?? 10);
-    setEnableVirtualGifts(systemSettings.enableVirtualGifts !== false);
-    setPayoutRatio(systemSettings.femalePayoutRatioUSD ?? 0.008);
-    setMinPayout(systemSettings.minPayoutThresholdUSD ?? 50);
-    setQuickMatchFreeEnabled(systemSettings.quickMatchFreeEnabled !== false);
-    setQuickMatchTimerSeconds(systemSettings.quickMatchTimerSeconds || 5);
-    setQuickMatchGiftRose(systemSettings.quickMatchGiftPrices?.rose || 10);
-    setQuickMatchGiftHeart(systemSettings.quickMatchGiftPrices?.heart || 25);
-    setQuickMatchGiftCheers(systemSettings.quickMatchGiftPrices?.cheers || 50);
-    setQuickMatchGiftTiara(systemSettings.quickMatchGiftPrices?.tiara || 100);
-    setQuickMatchGiftDiamond(systemSettings.quickMatchGiftPrices?.diamond || 200);
-    setQuickMatchGiftRocket(systemSettings.quickMatchGiftPrices?.rocket || 500);
-    setQuickMatchSplitCreator(systemSettings.quickMatchGiftSplitFemaleCreator ?? 60);
-    setQuickMatchSplitTL(systemSettings.quickMatchGiftSplitTL ?? 10);
-    setQuickMatchSplitPlatform(systemSettings.quickMatchGiftSplitPlatform ?? 30);
-    setQuickMatchAutoFallback(systemSettings.quickMatchAutoFallbackOnlineCreators !== false);
-  }, [
-    systemSettings.coinBurnRatePerMin,
-    systemSettings.coinBurnRateFriendPerMin,
-    systemSettings.femaleHostSharePercent,
-    systemSettings.teamLeaderSharePercent,
-    systemSettings.giftFemaleHostSharePercent,
-    systemSettings.giftTeamLeaderSharePercent,
-    systemSettings.enableVirtualGifts,
-    systemSettings.femalePayoutRatioUSD,
-    systemSettings.minPayoutThresholdUSD,
-    systemSettings.quickMatchFreeEnabled,
-    systemSettings.quickMatchTimerSeconds,
-    systemSettings.quickMatchGiftPrices,
-    systemSettings.quickMatchGiftSplitFemaleCreator,
-    systemSettings.quickMatchGiftSplitTL,
-    systemSettings.quickMatchGiftSplitPlatform,
-    systemSettings.quickMatchAutoFallbackOnlineCreators,
-  ]);
-
-  useEffect(() => {
-    if (systemSettings.enableRegularFemaleCoinEarning !== undefined) {
-      setEnableRegularFemaleCoinEarning(systemSettings.enableRegularFemaleCoinEarning);
-    }
-  }, [systemSettings.enableRegularFemaleCoinEarning]);
-
-  useEffect(() => {
-    if (systemSettings.defaultTheme) {
-      setDefaultTheme(systemSettings.defaultTheme);
-    }
-  }, [systemSettings.defaultTheme]);
-
-  useEffect(() => {
-    if (systemSettings.videoQualityProfile) {
-      setVideoQualityProfile(systemSettings.videoQualityProfile);
-    }
-  }, [systemSettings.videoQualityProfile]);
-
   useEffect(() => {
     if (activeSubTab === 'monitoring') {
       refreshAdminActiveCalls();
@@ -354,10 +285,10 @@ export const AdminDashboard: React.FC = () => {
     systemSettings.livekitCaptureResolution || '720p'
   );
   const [livekitMaxBitrateKbps, setLivekitMaxBitrateKbps] = useState<number>(
-    systemSettings.livekitMaxBitrateKbps || 5500
+    systemSettings.livekitMaxBitrateKbps || 2200
   );
   const [livekitMaxFramerate, setLivekitMaxFramerate] = useState<number>(
-    systemSettings.livekitMaxFramerate || 60
+    systemSettings.livekitMaxFramerate || 30
   );
   const [livekitSimulcastEnabled, setLivekitSimulcastEnabled] = useState<boolean>(
     systemSettings.livekitSimulcastEnabled !== undefined ? systemSettings.livekitSimulcastEnabled : true
@@ -443,48 +374,6 @@ export const AdminDashboard: React.FC = () => {
     .filter((r) => r.status === 'completed')
     .reduce((sum, r) => sum + r.amountUSD, 0);
 
-  const handleSaveSystemConfig = (e: React.FormEvent) => {
-    e.preventDefault();
-    const standardRate = Number(coinBurnRate) || 120;
-    const hostShare = Number(femaleHostSharePercent) || 40;
-    const derivedHostRate = Math.round(standardRate * (hostShare / 100));
-
-    updateSystemSettings({
-      coinBurnRatePerMin: standardRate,
-      coinBurnRateFriendPerMin: Number(coinBurnRateFriend) || 80,
-      femaleHostSharePercent: hostShare,
-      teamLeaderSharePercent: Number(teamLeaderSharePercent) || 10,
-      giftFemaleHostSharePercent: Number(giftFemaleHostSharePercent) || 70,
-      giftTeamLeaderSharePercent: Number(giftTeamLeaderSharePercent) || 10,
-      enableVirtualGifts: Boolean(enableVirtualGifts),
-      femaleEarningRatePerMin: derivedHostRate,
-      femalePayoutRatioUSD: Number(payoutRatio) || 0.008,
-      minPayoutThresholdUSD: Number(minPayout) || 50,
-      enableRegularFemaleCoinEarning: Boolean(enableRegularFemaleCoinEarning),
-      showDevPersonaBar: false,
-      defaultTheme: defaultTheme,
-      videoQualityProfile: videoQualityProfile,
-      quickMatchFreeEnabled: Boolean(quickMatchFreeEnabled),
-      quickMatchTimerSeconds: Number(quickMatchTimerSeconds) || 5,
-      quickMatchGiftPrices: {
-        rose: Number(quickMatchGiftRose) || 10,
-        heart: Number(quickMatchGiftHeart) || 25,
-        cheers: Number(quickMatchGiftCheers) || 50,
-        tiara: Number(quickMatchGiftTiara) || 100,
-        diamond: Number(quickMatchGiftDiamond) || 200,
-        rocket: Number(quickMatchGiftRocket) || 500,
-      },
-      quickMatchGiftSplitFemaleCreator: Number(quickMatchSplitCreator) || 60,
-      quickMatchGiftSplitTL: Number(quickMatchSplitTL) || 10,
-      quickMatchGiftSplitPlatform: Number(quickMatchSplitPlatform) || 30,
-      quickMatchAutoFallbackOnlineCreators: Boolean(quickMatchAutoFallback),
-      dailyStreakRewards: streakRewards,
-      dailyMissionsConfig: missionsConfig,
-    });
-
-    showToast('Economy Settings Saved 🪙', 'Global burn rates, gift revenue splits, Quick Match settings, and payout limits updated.', 'success');
-  };
-
   const handleSaveGiftForm = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingGift) return;
@@ -512,13 +401,15 @@ export const AdminDashboard: React.FC = () => {
       livekitCaptureResolution,
       videoQualityProfile: currentProfile,
       livekitMaxBitrateKbps: Number(livekitMaxBitrateKbps),
-      livekitMaxFramerate: Number(livekitMaxFramerate),
+      // Never persist 60fps as publish target — client clamps too; keep stored policy honest
+      livekitMaxFramerate: Math.min(30, Math.max(24, Number(livekitMaxFramerate) || 30)),
       livekitSimulcastEnabled: Boolean(livekitSimulcastEnabled),
       livekitAdaptiveStream: Boolean(livekitAdaptiveStream),
       livekitDynacast: Boolean(livekitDynacast),
       livekitVideoCodec: livekitVideoCodec,
       livekitExplicitlySet: true,
     });
+    setLivekitMaxFramerate(Math.min(30, Math.max(24, Number(livekitMaxFramerate) || 30)));
 
     setIsSavingLivekit(false);
     if (success) {
@@ -530,18 +421,24 @@ export const AdminDashboard: React.FC = () => {
     setIsTestingToken(true);
     setTestTokenResult(null);
     try {
-      await updateLiveKitConfig({
+      const saved = await updateLiveKitConfig({
         apiKey: livekitApiKey.trim(),
         apiSecret: livekitApiSecret.trim(),
         wsUrl: livekitWsUrl.trim(),
       });
 
-      const res = await fetch('/api/livekit/token', {
+      if (!saved) {
+        setTestTokenResult({
+          success: false,
+          message: 'Could not save LiveKit credentials before testing. Check you are logged in as admin.',
+        });
+        return;
+      }
+
+      const res = await authFetch('/api/livekit/token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           roomName: 'admin_test_room_' + Date.now(),
-          identity: 'admin_tester',
           name: 'Admin Tester',
         }),
       });
@@ -558,19 +455,39 @@ export const AdminDashboard: React.FC = () => {
         };
       }
 
-      if (data.configured && data.token) {
+      const errorMessage =
+        (typeof data?.error === 'string' && data.error) ||
+        data?.error?.message ||
+        data?.message ||
+        null;
+
+      if (res.ok && data.configured && data.token) {
         setTestTokenResult({
           success: true,
           message: 'Token generated successfully! LiveKit WebRTC authentication is active.',
           token: data.token,
         });
         showToast('Token Verified 🟢', 'LiveKit WebRTC token signed successfully!', 'success');
+      } else if (res.status === 401) {
+        setTestTokenResult({
+          success: false,
+          message: errorMessage || 'Authentication required. Please sign in again as admin, then retry.',
+        });
+        showToast('Auth Required 🔴', 'Sign in as admin to test LiveKit tokens.', 'error');
+      } else if (res.status === 403) {
+        setTestTokenResult({
+          success: false,
+          message: errorMessage || 'Admin privileges required to generate a test token.',
+        });
+        showToast('Forbidden 🔴', errorMessage || 'Admin privileges required.', 'error');
       } else {
         setTestTokenResult({
           success: false,
-          message: data.message || 'Token generation failed. Please verify your API Key & Secret.',
+          message:
+            errorMessage ||
+            'Token generation failed. Please verify your API Key, Secret, and WebSocket URL.',
         });
-        showToast('Verification Failed 🔴', data.message || 'Check LiveKit keys.', 'error');
+        showToast('Verification Failed 🔴', errorMessage || 'Check LiveKit keys.', 'error');
       }
     } catch (err: any) {
       setTestTokenResult({
@@ -586,7 +503,29 @@ export const AdminDashboard: React.FC = () => {
   const handleSaveSkuForm = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSku) return;
-    saveCoinPackage(editingSku);
+    const list = Number(editingSku.priceUSD) || 0;
+    const discountRaw = editingSku.discountPriceUSD;
+    if (discountRaw != null && String(discountRaw) !== '') {
+      const discount = Number(discountRaw);
+      if (!Number.isFinite(discount)) {
+        showToast('Invalid Discount', 'Discount Price must be a valid number.', 'error');
+        return;
+      }
+      if (discount > list) {
+        showToast('Invalid Discount', 'Discount Price must be ≤ Price.', 'error');
+        return;
+      }
+    }
+    saveCoinPackage({
+      ...editingSku,
+      discountPriceUSD:
+        discountRaw == null || String(discountRaw) === '' ? null : Number(discountRaw),
+      approxCallMinutes:
+        editingSku.approxCallMinutes == null || String(editingSku.approxCallMinutes) === ''
+          ? null
+          : Math.floor(Number(editingSku.approxCallMinutes)),
+      savingLabel: editingSku.savingLabel ? String(editingSku.savingLabel).trim() || null : null,
+    });
     setEditingSku(null);
   };
 
@@ -652,12 +591,13 @@ export const AdminDashboard: React.FC = () => {
   }, [adminActiveCalls]);
 
   const totalPlatformVolumeUSD = useMemo(() => {
-    const coinSpendUSD = totalCoinBurnAcrossPlatform * (systemSettings.coinToUSDRatio || 0.01);
+    const peg = getCoinUsdPeg(systemSettings);
+    const coinSpendUSD = coinsToUsd(totalCoinBurnAcrossPlatform, peg);
     const payoutsUSD = payoutRequests
       .filter((p) => p.status === 'completed')
       .reduce((acc, p) => acc + (p.amountUSD || 0), 0);
     return coinSpendUSD + payoutsUSD;
-  }, [totalCoinBurnAcrossPlatform, payoutRequests, systemSettings.coinToUSDRatio]);
+  }, [totalCoinBurnAcrossPlatform, payoutRequests, systemSettings.coinUsdPeg, systemSettings.femalePayoutRatioUSD, systemSettings.coinToUSDRatio]);
 
   return (
     <div id="admin-dashboard-root" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
@@ -671,7 +611,7 @@ export const AdminDashboard: React.FC = () => {
             </div>
             <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight mt-1">Platform Control & Moderation</h1>
             <p className="text-xs text-slate-400 font-sans">
-              Dynamic coin burn rates, female revenue splits, SKU package management, and real-time payout verification.
+              Coin Burn &amp; Economy hub, SKU packages, gift catalog, and real-time payout verification.
             </p>
           </div>
 
@@ -704,7 +644,7 @@ export const AdminDashboard: React.FC = () => {
             }`}
           >
             <TrendingUp className="w-3.5 h-3.5 text-indigo-300" />
-            <span>📊 Master Analytics</span>
+            <span>Analytics Hub</span>
           </button>
           <button
             onClick={() => setActiveSubTab('monitoring')}
@@ -716,12 +656,18 @@ export const AdminDashboard: React.FC = () => {
             <span>Live Call Surveillance ({adminActiveCalls.length})</span>
           </button>
           <button
-            onClick={() => setActiveSubTab('financials')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
-              activeSubTab === 'financials' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
+            id="admin-economy-config-tab-btn"
+            onClick={() => {
+              setEconomySection(undefined);
+              setActiveSubTab('financials');
+            }}
+            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
+              activeSubTab === 'financials' ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
             }`}
+            title="Coin burn rates, revenue shares, peg & payout thresholds"
           >
-            Config
+            <Coins className="w-3.5 h-3.5 text-amber-400" />
+            <span>Coin Burn & Economy</span>
           </button>
           <button
             id="admin-countries-tab-btn"
@@ -732,6 +678,16 @@ export const AdminDashboard: React.FC = () => {
           >
             <Globe className="w-3.5 h-3.5 text-indigo-400" />
             <span>Taxonomies & Attributes ({systemSettings.allowedCountryCodes?.length ?? 'All'} 🌍)</span>
+          </button>
+          <button
+            id="admin-creator-ops-tab-btn"
+            onClick={() => setActiveSubTab('creator-ops')}
+            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
+              activeSubTab === 'creator-ops' ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
+            }`}
+          >
+            <Target className="w-3.5 h-3.5 text-amber-400" />
+            <span>Creator Ops</span>
           </button>
           <button
             onClick={() => setActiveSubTab('livekit')}
@@ -791,12 +747,21 @@ export const AdminDashboard: React.FC = () => {
             <span>Team Leaders ({users.filter((u) => u.role === 'team_leader').length})</span>
           </button>
           <button
+            onClick={() => setActiveSubTab('finance-module')}
+            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
+              activeSubTab === 'finance-module' ? 'bg-emerald-600 text-white font-bold shadow-md shadow-emerald-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
+            }`}
+          >
+            <Landmark className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Financial Module</span>
+          </button>
+          <button
             onClick={() => setActiveSubTab('payouts')}
             className={`px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
               activeSubTab === 'payouts' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
             }`}
           >
-            Payout Queue ({payoutRequests.filter((r) => r.status === 'pending').length})
+            Legacy Payout History ({payoutRequests.length})
           </button>
           <button
             onClick={() => setActiveSubTab('users')}
@@ -821,45 +786,95 @@ export const AdminDashboard: React.FC = () => {
             type="button"
             onClick={() => setIsResetModalOpen(true)}
             className="px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 bg-rose-950/80 hover:bg-rose-900 border border-rose-700/60 text-rose-200 font-bold text-xs shadow-md shadow-rose-950/30 cursor-pointer"
-            title="Open Granular Mock Data Reset Manager"
+            title="Open Destructive Data Reset Manager (ALLOW_FACTORY_RESET required)"
           >
             <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-            <span>Reset Mock Data</span>
+            <span>Reset Data</span>
           </button>
         </div>
       </div>
 
-      {/* KPI Cards */}
+      {/* KPI Cards — read-only snapshot; global economy only editable in Coin Burn & Economy */}
+      <div className="px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700/80 text-[11px] text-slate-400 font-mono">
+        Configured in Economy — cards below are read-only. Open{' '}
+        <button
+          type="button"
+          onClick={() => {
+            setEconomySection(undefined);
+            setActiveSubTab('financials');
+          }}
+          className="text-amber-300 font-bold underline underline-offset-2 cursor-pointer hover:text-amber-200"
+        >
+          Coin Burn &amp; Economy
+        </button>{' '}
+        to edit burn, shares, or Coin USD Peg. Per-host absolute earn override is on Users (coin_earn_override_rate).
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg">
+        <button
+          type="button"
+          onClick={() => {
+            setEconomySection('A');
+            setActiveSubTab('financials');
+          }}
+          className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg text-left cursor-pointer hover:border-amber-500/40"
+        >
           <div className="text-xs font-semibold text-slate-400 mb-1">Male Coin Burn Rates</div>
           <div className="text-xl font-black text-amber-300 flex items-center justify-between">
-            <span>Standard: 🪙 {systemSettings.coinBurnRatePerMin ?? 120}/m</span>
+            <span>
+              Standard: 🪙 {systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN}/m
+            </span>
           </div>
           <div className="text-xs font-bold text-emerald-400 mt-1">
-            Friend Discount: 🪙 {systemSettings.coinBurnRateFriendPerMin ?? 80}/m
+            Friend Discount: 🪙{' '}
+            {systemSettings.coinBurnRateFriendPerMin ?? DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN}/m
           </div>
-        </div>
+        </button>
 
-        <div className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg">
+        <button
+          type="button"
+          onClick={() => {
+            setEconomySection('B');
+            setActiveSubTab('financials');
+          }}
+          className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg text-left cursor-pointer hover:border-pink-500/40"
+        >
           <div className="text-xs font-semibold text-slate-400 mb-1">Host & Team Leader Shares</div>
           <div className="text-xl font-black text-emerald-400">
-            Host {systemSettings.femaleHostSharePercent ?? 40}% · TL {systemSettings.teamLeaderSharePercent ?? 10}%
+            Base {systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT}% · Target{' '}
+            {systemSettings.femaleHostTargetSharePercent ?? DEFAULT_FEMALE_HOST_TARGET_SHARE_PERCENT}% · TL{' '}
+            {systemSettings.teamLeaderSharePercent ?? DEFAULT_TEAM_LEADER_SHARE_PERCENT}%
           </div>
           <div className="text-[11px] text-slate-400 mt-1">
-            Platform Net: {100 - (systemSettings.femaleHostSharePercent ?? 40) - (systemSettings.teamLeaderSharePercent ?? 10)}% margin
+            Platform Net:{' '}
+            {100 -
+              (systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT) -
+              (systemSettings.teamLeaderSharePercent ?? DEFAULT_TEAM_LEADER_SHARE_PERCENT)}
+            % (base)
           </div>
-        </div>
+        </button>
 
-        <div className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg">
-          <div className="text-xs font-semibold text-slate-400 mb-1">Payout Ratio & Min Threshold</div>
+        <button
+          type="button"
+          onClick={() => {
+            setEconomySection('D');
+            setActiveSubTab('financials');
+          }}
+          className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg text-left cursor-pointer hover:border-purple-500/40"
+        >
+          <div className="text-xs font-semibold text-slate-400 mb-1">Fixed Peg & Min Threshold</div>
           <div className="text-xl font-black text-purple-300">
-            ${systemSettings.femalePayoutRatioUSD ?? 0.008} / coin
+            ${getCoinUsdPeg(systemSettings)} / coin
           </div>
           <div className="text-[11px] text-purple-400 mt-1">
-            Min cashout: ${systemSettings.minPayoutThresholdUSD ?? 50} USD ({Math.round((systemSettings.minPayoutThresholdUSD ?? 50) / (systemSettings.femalePayoutRatioUSD ?? 0.008)).toLocaleString()} 🪙)
+            {formatPegExample(getCoinUsdPeg(systemSettings))} · Min cashout: $
+            {systemSettings.minPayoutThresholdUSD ?? 50} USD (
+            {usdToCoins(
+              systemSettings.minPayoutThresholdUSD ?? 50,
+              getCoinUsdPeg(systemSettings)
+            ).toLocaleString()}{' '}
+            🪙)
           </div>
-        </div>
+        </button>
 
         <div className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg">
           <div className="text-xs font-semibold text-slate-400 mb-1">Payout Queues & Dispatched</div>
@@ -870,9 +885,25 @@ export const AdminDashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* TAB -1: Dedicated Platform Master Analytics & Economics */}
+      {/* TAB -1: Admin Analytics Hub */}
       {activeSubTab === 'analytics' && (
-        <PlatformMasterAnalytics onInspectUser={(u) => setSelectedAnalyticsUser(u)} />
+        <AdminAnalyticsHub
+          onOpenFinancialModule={() => setActiveSubTab('finance-module')}
+          onOpenEconomyConfig={() => {
+            setEconomySection(undefined);
+            setActiveSubTab('financials');
+          }}
+          onOverrideEarning={(u) => {
+            setOverrideEarningUser(u);
+            const systemRate = deriveHostEarnPerMin(
+              systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN,
+              systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT
+            );
+            const hasOverride = u.coinEarnOverrideRate != null && Number(u.coinEarnOverrideRate) > 0;
+            setOverrideEarningRate(hasOverride ? Number(u.coinEarnOverrideRate) : systemRate);
+            setOverrideUseSystemRate(!hasOverride);
+          }}
+        />
       )}
 
       {/* TAB 0: Silent Admin Video Call Surveillance & Quality Assurance */}
@@ -1070,7 +1101,7 @@ export const AdminDashboard: React.FC = () => {
                                 <span>{call.callerName}</span>
                               </div>
                               <div className="text-[10px] text-indigo-400 font-bold font-mono">
-                                CALLER ({call.callerVipTier?.toUpperCase() || 'VIP'})
+                                CALLER
                               </div>
                             </div>
                           </div>
@@ -1209,927 +1240,13 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 1: Financial & Coin Configuration */}
+      {/* TAB 1: Coin Burn / Economy Config hub (Phase 0) */}
       {activeSubTab === 'financials' && (
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-6">
-          <div>
-            <h3 className="text-lg font-extrabold text-white flex items-center space-x-2">
-              <DollarSign className="w-5 h-5 text-purple-400" />
-              <span>Financial & Coin Economy Matrix</span>
-            </h3>
-            <p className="text-xs text-slate-400 mt-1">
-              Master configuration for 1-on-1 call burn rates, percentage-based revenue shares for female hosts & team leaders, payout ratios, and minimum withdrawal thresholds.
-            </p>
-          </div>
-
-          <form onSubmit={handleSaveSystemConfig} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-            {/* FIELD 1: Standard Coin Burn Rate - Non-Friends */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-amber-300">
-                  1. Standard Coin Burn Rate - Non-Friends (Coins / Minute)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                  Non-Friends
-                </span>
-              </div>
-              <input
-                id="admin-coin-burn-rate-input"
-                type="number"
-                min="1"
-                step="1"
-                value={coinBurnRate}
-                onChange={(e) => setCoinBurnRate(Number(e.target.value))}
-                className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-sm font-bold text-white focus:outline-none focus:border-amber-400"
-                placeholder="120"
-              />
-              <p className="text-[11px] text-slate-400">
-                How many coins a male user loses every minute on a regular non-friend call.
-              </p>
-            </div>
-
-            {/* FIELD 2: Friend Discounted Burn Rate */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-emerald-300">
-                  2. Friend Discounted Burn Rate - Friends (Coins / Minute)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                  Friends Call
-                </span>
-              </div>
-              <input
-                id="admin-coin-burn-rate-friend-input"
-                type="number"
-                min="1"
-                step="1"
-                value={coinBurnRateFriend}
-                onChange={(e) => setCoinBurnRateFriend(Number(e.target.value))}
-                className="w-full px-3.5 py-2.5 bg-slate-900 border border-emerald-500/40 rounded-xl text-sm font-bold text-emerald-300 focus:outline-none focus:border-emerald-400"
-                placeholder="80"
-              />
-              <p className="text-[11px] text-slate-400">
-                How many coins a male user loses every minute on a discounted friend call.
-              </p>
-            </div>
-
-            {/* FIELD 3: Female Host Share (%) */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-pink-300">
-                  3. Female Host Share (%)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-pink-500/20 text-pink-300 border border-pink-500/40">
-                  Host Split %
-                </span>
-              </div>
-              <div className="relative">
-                <input
-                  id="admin-female-host-share-percent-input"
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={femaleHostSharePercent}
-                  onChange={(e) => setFemaleHostSharePercent(Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 bg-slate-900 border border-pink-500/40 rounded-xl text-sm font-bold text-pink-300 focus:outline-none focus:border-pink-400 pr-8"
-                  placeholder="40"
-                />
-                <span className="absolute right-3 top-2.5 text-pink-400 font-bold text-sm">%</span>
-              </div>
-              <p className="text-[11px] text-slate-400">
-                The system automatically gives this % of whatever the burn rate is (e.g. 40% of 120 = 48 🪙/m) to the host.
-              </p>
-            </div>
-
-            {/* FIELD 4: Team Leader Share (%) */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-indigo-300">
-                  4. Team Leader Share (%)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                  TL Override %
-                </span>
-              </div>
-              <div className="relative">
-                <input
-                  id="admin-team-leader-share-percent-input"
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={teamLeaderSharePercent}
-                  onChange={(e) => setTeamLeaderSharePercent(Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 bg-slate-900 border border-indigo-500/40 rounded-xl text-sm font-bold text-indigo-300 focus:outline-none focus:border-indigo-400 pr-8"
-                  placeholder="10"
-                />
-                <span className="absolute right-3 top-2.5 text-indigo-400 font-bold text-sm">%</span>
-              </div>
-              <p className="text-[11px] text-slate-400">
-                Automatically calculates the team leader's override commission from the total coin burn (e.g. 10% of 120 = 12 🪙/m).
-              </p>
-            </div>
-
-            {/* FIELD 5: Female Coin-to-USD Payout Ratio */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-purple-300">
-                  5. Female Coin-to-USD Payout Ratio ($ USD per Coin Earned)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40">
-                  Cashout Conversion
-                </span>
-              </div>
-              <input
-                id="admin-female-payout-ratio-input"
-                type="number"
-                min="0.0001"
-                step="0.001"
-                value={payoutRatio}
-                onChange={(e) => setPayoutRatio(Number(e.target.value))}
-                className="w-full px-3.5 py-2.5 bg-slate-900 border border-purple-500/40 rounded-xl text-sm font-bold text-purple-300 focus:outline-none focus:border-purple-400"
-                placeholder="0.008"
-              />
-              <p className="text-[11px] text-slate-400">
-                Converts coins earned into real USD cash value (e.g. 0.008 = $8.00 per 1,000 coins).
-              </p>
-            </div>
-
-            {/* FIELD 6: Minimum Withdrawal Threshold */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-emerald-300">
-                  6. Minimum Withdrawal Threshold ($ USD)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                  Min Payout
-                </span>
-              </div>
-              <div className="relative">
-                <span className="absolute left-3.5 top-2.5 text-emerald-400 font-bold text-sm">$</span>
-                <input
-                  id="admin-min-payout-threshold-input"
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={minPayout}
-                  onChange={(e) => setMinPayout(Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 bg-slate-900 border border-emerald-500/40 rounded-xl text-sm font-bold text-emerald-300 focus:outline-none focus:border-emerald-400 pl-8"
-                  placeholder="50"
-                />
-              </div>
-              <p className="text-[11px] text-slate-400">
-                The minimum cash balance a host must reach before requesting a payout (e.g. $50 = {Math.round((Number(minPayout) || 50) / (Number(payoutRatio) || 0.008)).toLocaleString()} 🪙).
-              </p>
-            </div>
-
-            {/* FIELD 7: Virtual Gift Female Host Share (%) */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-pink-300">
-                  7. Virtual Gift Female Host Share (%)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-pink-500/20 text-pink-300 border border-pink-500/40">
-                  Gift Host %
-                </span>
-              </div>
-              <div className="relative">
-                <input
-                  id="admin-gift-female-host-share-percent-input"
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={giftFemaleHostSharePercent}
-                  onChange={(e) => setGiftFemaleHostSharePercent(Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 bg-slate-900 border border-pink-500/40 rounded-xl text-sm font-bold text-pink-300 focus:outline-none focus:border-pink-400 pr-8"
-                  placeholder="70"
-                />
-                <span className="absolute right-3 top-2.5 text-pink-400 font-bold text-sm">%</span>
-              </div>
-              <p className="text-[11px] text-slate-400">
-                Percentage of virtual gift coin value given directly to the female host receiving the gift (e.g. 70% of 100 🪙 = 70 🪙).
-              </p>
-            </div>
-
-            {/* FIELD 8: Virtual Gift Team Leader Share (%) */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-indigo-300">
-                  8. Virtual Gift Team Leader Share (%)
-                </label>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                  Gift TL %
-                </span>
-              </div>
-              <div className="relative">
-                <input
-                  id="admin-gift-team-leader-share-percent-input"
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={giftTeamLeaderSharePercent}
-                  onChange={(e) => setGiftTeamLeaderSharePercent(Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 bg-slate-900 border border-indigo-500/40 rounded-xl text-sm font-bold text-indigo-300 focus:outline-none focus:border-indigo-400 pr-8"
-                  placeholder="10"
-                />
-                <span className="absolute right-3 top-2.5 text-indigo-400 font-bold text-sm">%</span>
-              </div>
-              <p className="text-[11px] text-slate-400">
-                Commission percentage paid to the managing Team Leader from virtual gifts sent to their female creators (e.g. 10% of 100 🪙 = 10 🪙).
-              </p>
-            </div>
-
-            {/* FIELD 9: Virtual Gifts System Master Toggle */}
-            <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold text-amber-300">
-                  9. Virtual Gifts Master Switch
-                </label>
-                <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
-                  enableVirtualGifts
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                }`}>
-                  {enableVirtualGifts ? 'ACTIVE' : 'DISABLED'}
-                </span>
-              </div>
-              <button
-                type="button"
-                id="admin-toggle-enable-gifts-btn"
-                onClick={() => setEnableVirtualGifts(!enableVirtualGifts)}
-                className={`w-full py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-2 border cursor-pointer ${
-                  enableVirtualGifts
-                    ? 'bg-emerald-600/20 border-emerald-500 text-emerald-200'
-                    : 'bg-rose-900/30 border-rose-700 text-rose-300'
-                }`}
-              >
-                <Gift className="w-4 h-4" />
-                <span>{enableVirtualGifts ? 'Virtual Gifts Enabled in Video Calls' : 'Virtual Gifts Disabled Platform-wide'}</span>
-              </button>
-              <p className="text-[11px] text-slate-400">
-                Master switch to enable or disable in-call virtual tipping and gift animations.
-              </p>
-            </div>
-
-            {/* FIELD 10: QUICK MATCH SYSTEM CONFIGURATION */}
-            <div className="sm:col-span-2 lg:col-span-3 p-5 bg-gradient-to-br from-slate-950 via-rose-950/20 to-slate-950 border border-rose-500/30 rounded-2xl space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <Zap className="w-5 h-5 text-rose-400" />
-                  <span className="text-sm font-black text-white">Quick Match & Speed Video Economy Configuration</span>
-                </div>
-                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-mono font-bold">
-                  Free Match Enabled
-                </span>
-              </div>
-              <p className="text-xs text-slate-300">
-                Quick Match allows users to discover, preview, and match for free. Callers can send instant animated Quick Gifts during video previews, with revenue automatically split between Creators, Team Leaders, and the Platform.
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
-                {/* Free Matching Toggle */}
-                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl space-y-2">
-                  <label className="block text-xs font-bold text-slate-200">10.1 Free Quick Matching</label>
-                  <button
-                    type="button"
-                    onClick={() => setQuickMatchFreeEnabled(!quickMatchFreeEnabled)}
-                    className={`w-full py-2 rounded-lg text-xs font-bold transition-all border cursor-pointer ${
-                      quickMatchFreeEnabled
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                        : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                    }`}
-                  >
-                    {quickMatchFreeEnabled ? '✅ 100% Free Matching Active' : '❌ Paid Matching Only'}
-                  </button>
-                  <p className="text-[10px] text-slate-400">Previews and speed matching are free for callers.</p>
-                </div>
-
-                {/* Decision Timer Slider */}
-                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl space-y-2">
-                  <div className="flex justify-between items-center text-xs font-bold text-slate-200">
-                    <span>10.2 Decision Timer</span>
-                    <span className="font-mono text-amber-400">{quickMatchTimerSeconds}s Countdown</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="3"
-                    max="15"
-                    step="1"
-                    value={quickMatchTimerSeconds}
-                    onChange={(e) => setQuickMatchTimerSeconds(Number(e.target.value))}
-                    className="w-full accent-rose-500 cursor-pointer"
-                  />
-                  <p className="text-[10px] text-slate-400">Duration before auto-skipping to the next creator card.</p>
-                </div>
-
-                {/* Auto Fallback Toggle */}
-                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl space-y-2">
-                  <label className="block text-xs font-bold text-slate-200">10.3 Fallback Matching</label>
-                  <button
-                    type="button"
-                    onClick={() => setQuickMatchAutoFallback(!quickMatchAutoFallback)}
-                    className={`w-full py-2 rounded-lg text-xs font-bold transition-all border cursor-pointer ${
-                      quickMatchAutoFallback
-                        ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
-                        : 'bg-slate-800 text-slate-400 border-slate-700'
-                    }`}
-                  >
-                    {quickMatchAutoFallback ? '⚡ Auto-Fallback to Online Creators' : 'Strict Live Studio Only'}
-                  </button>
-                  <p className="text-[10px] text-slate-400">Shows online verified creators when no live studio hosts exist.</p>
-                </div>
-              </div>
-
-              {/* Quick Gift Rates */}
-              <div className="pt-2">
-                <label className="block text-xs font-bold text-pink-300 mb-2">
-                  10.4 Quick Gift Prices (Coin Cost per Gift)
-                </label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 text-xs font-mono">
-                  <div className="p-2 bg-slate-900/80 border border-slate-800 rounded-lg text-center">
-                    <span className="text-base block mb-1">🌹 Rose</span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quickMatchGiftRose}
-                      onChange={(e) => setQuickMatchGiftRose(Number(e.target.value))}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-center text-amber-300 font-bold"
-                    />
-                  </div>
-                  <div className="p-2 bg-slate-900/80 border border-slate-800 rounded-lg text-center">
-                    <span className="text-base block mb-1">💖 Heart</span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quickMatchGiftHeart}
-                      onChange={(e) => setQuickMatchGiftHeart(Number(e.target.value))}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-center text-amber-300 font-bold"
-                    />
-                  </div>
-                  <div className="p-2 bg-slate-900/80 border border-slate-800 rounded-lg text-center">
-                    <span className="text-base block mb-1">🥂 Cheers</span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quickMatchGiftCheers}
-                      onChange={(e) => setQuickMatchGiftCheers(Number(e.target.value))}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-center text-amber-300 font-bold"
-                    />
-                  </div>
-                  <div className="p-2 bg-slate-900/80 border border-slate-800 rounded-lg text-center">
-                    <span className="text-base block mb-1">👑 Tiara</span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quickMatchGiftTiara}
-                      onChange={(e) => setQuickMatchGiftTiara(Number(e.target.value))}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-center text-amber-300 font-bold"
-                    />
-                  </div>
-                  <div className="p-2 bg-slate-900/80 border border-slate-800 rounded-lg text-center">
-                    <span className="text-base block mb-1">💎 Diamond</span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quickMatchGiftDiamond}
-                      onChange={(e) => setQuickMatchGiftDiamond(Number(e.target.value))}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-center text-amber-300 font-bold"
-                    />
-                  </div>
-                  <div className="p-2 bg-slate-900/80 border border-slate-800 rounded-lg text-center">
-                    <span className="text-base block mb-1">🚀 Rocket</span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quickMatchGiftRocket}
-                      onChange={(e) => setQuickMatchGiftRocket(Number(e.target.value))}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-center text-amber-300 font-bold"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Gift Revenue Split Sliders */}
-              <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-xl space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-white">10.5 Quick Match Gift Revenue Split</label>
-                  <span className="text-[10px] font-mono text-pink-300 font-bold">
-                    Creator: {quickMatchSplitCreator}% · TL: {quickMatchSplitTL}% · Platform: {Math.max(0, 100 - quickMatchSplitCreator - quickMatchSplitTL)}%
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-[11px] text-pink-300 font-bold block mb-1">Female Creator Share (%)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={quickMatchSplitCreator}
-                      onChange={(e) => setQuickMatchSplitCreator(Number(e.target.value))}
-                      className="w-full px-3 py-1.5 bg-slate-950 border border-pink-500/40 rounded-lg text-pink-300 font-bold text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-indigo-300 font-bold block mb-1">Team Leader Share (%)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={quickMatchSplitTL}
-                      onChange={(e) => setQuickMatchSplitTL(Number(e.target.value))}
-                      className="w-full px-3 py-1.5 bg-slate-950 border border-indigo-500/40 rounded-lg text-indigo-300 font-bold text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-emerald-300 font-bold block mb-1">Platform Retained (%)</label>
-                    <div className="px-3 py-1.5 bg-slate-950 border border-emerald-500/40 rounded-lg text-emerald-300 font-bold text-xs">
-                      {Math.max(0, 100 - quickMatchSplitCreator - quickMatchSplitTL)}%
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-2.5 rounded-lg bg-indigo-950/40 border border-indigo-500/30 text-[11px] text-indigo-200">
-                  ℹ️ <strong>System Split Rule:</strong> If the recipient is a regular male or regular female user (non-creator), <strong>100% of the gift coin revenue is retained by the Platform</strong>. Only verified female creators under agency management receive the creator % share.
-                </div>
-              </div>
-            </div>
-
-            {/* REAL-TIME LIVE SIMULATION CALCULATOR */}
-            <div className="sm:col-span-2 lg:col-span-3 p-5 bg-gradient-to-br from-slate-950 via-purple-950/20 to-slate-950 border border-purple-500/30 rounded-2xl space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <Coins className="w-4 h-4 text-amber-400" />
-                  <span className="text-xs font-extrabold text-white">Live Economy, Call Burn & Virtual Gift Split Simulation</span>
-                </div>
-                <span className="text-[10px] font-mono font-bold text-purple-300">Auto-Calculated Real-Time</span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                {/* Standard Call Simulation */}
-                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl space-y-2">
-                  <div className="flex items-center justify-between font-bold text-amber-300 pb-1.5 border-b border-slate-800">
-                    <span>Standard Call (Non-Friends)</span>
-                    <span>🪙 {coinBurnRate} / min</span>
-                  </div>
-                  <div className="space-y-1 text-[11px]">
-                    <div className="flex justify-between text-pink-300">
-                      <span>Female Host ({femaleHostSharePercent}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(coinBurnRate * (femaleHostSharePercent / 100))}/m (${(Math.round(coinBurnRate * (femaleHostSharePercent / 100)) * payoutRatio).toFixed(3)}/m · ${(Math.round(coinBurnRate * (femaleHostSharePercent / 100)) * payoutRatio * 60).toFixed(2)}/hr)
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-indigo-300">
-                      <span>Team Leader Override ({teamLeaderSharePercent}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(coinBurnRate * (teamLeaderSharePercent / 100))}/m (${(Math.round(coinBurnRate * (teamLeaderSharePercent / 100)) * payoutRatio).toFixed(3)}/m · ${(Math.round(coinBurnRate * (teamLeaderSharePercent / 100)) * payoutRatio * 60).toFixed(2)}/hr)
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-emerald-300">
-                      <span>Platform Margin ({Math.max(0, 100 - femaleHostSharePercent - teamLeaderSharePercent)}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(coinBurnRate * (Math.max(0, 100 - femaleHostSharePercent - teamLeaderSharePercent) / 100))}/m
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Friend Call Simulation */}
-                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl space-y-2">
-                  <div className="flex items-center justify-between font-bold text-emerald-300 pb-1.5 border-b border-slate-800">
-                    <span>Friend Call (Discounted)</span>
-                    <span>🪙 {coinBurnRateFriend} / min</span>
-                  </div>
-                  <div className="space-y-1 text-[11px]">
-                    <div className="flex justify-between text-pink-300">
-                      <span>Female Host ({femaleHostSharePercent}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(coinBurnRateFriend * (femaleHostSharePercent / 100))}/m (${(Math.round(coinBurnRateFriend * (femaleHostSharePercent / 100)) * payoutRatio).toFixed(3)}/m · ${(Math.round(coinBurnRateFriend * (femaleHostSharePercent / 100)) * payoutRatio * 60).toFixed(2)}/hr)
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-indigo-300">
-                      <span>Team Leader Override ({teamLeaderSharePercent}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(coinBurnRateFriend * (teamLeaderSharePercent / 100))}/m (${(Math.round(coinBurnRateFriend * (teamLeaderSharePercent / 100)) * payoutRatio).toFixed(3)}/m · ${(Math.round(coinBurnRateFriend * (teamLeaderSharePercent / 100)) * payoutRatio * 60).toFixed(2)}/hr)
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-emerald-300">
-                      <span>Platform Margin ({Math.max(0, 100 - femaleHostSharePercent - teamLeaderSharePercent)}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(coinBurnRateFriend * (Math.max(0, 100 - femaleHostSharePercent - teamLeaderSharePercent) / 100))}/m
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Virtual Gift Simulation */}
-                <div className="p-3.5 bg-slate-900/90 border border-pink-500/30 rounded-xl space-y-2">
-                  <div className="flex items-center justify-between font-bold text-pink-300 pb-1.5 border-b border-slate-800">
-                    <span className="flex items-center space-x-1">
-                      <Gift className="w-3.5 h-3.5 text-pink-400" />
-                      <span>Virtual Gift Model (100 🪙)</span>
-                    </span>
-                    <span>🪙 100 Gift</span>
-                  </div>
-                  <div className="space-y-1 text-[11px]">
-                    <div className="flex justify-between text-pink-300">
-                      <span>Female Host ({giftFemaleHostSharePercent}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(100 * (giftFemaleHostSharePercent / 100))} (${(Math.round(100 * (giftFemaleHostSharePercent / 100)) * payoutRatio).toFixed(2)} USD)
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-indigo-300">
-                      <span>Team Leader ({giftTeamLeaderSharePercent}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(100 * (giftTeamLeaderSharePercent / 100))} (${(Math.round(100 * (giftTeamLeaderSharePercent / 100)) * payoutRatio).toFixed(2)} USD)
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-emerald-300">
-                      <span>Platform Retained ({Math.max(0, 100 - giftFemaleHostSharePercent - giftTeamLeaderSharePercent)}%):</span>
-                      <span className="font-mono font-bold">
-                        🪙 {Math.round(100 * (Math.max(0, 100 - giftFemaleHostSharePercent - giftTeamLeaderSharePercent) / 100))}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Regular Female User Coin Earning Master Toggle */}
-            <div className="sm:col-span-2 p-5 bg-slate-950/80 border border-slate-800 rounded-2xl space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <Coins className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-bold text-white">Regular Female User Coin Earning & Payouts</span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                      enableRegularFemaleCoinEarning
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                    }`}>
-                      {enableRegularFemaleCoinEarning ? 'ENABLED (ALL FEMALE USERS)' : 'DISABLED (TEAM LEADER HOSTS ONLY)'}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-1 max-w-xl leading-relaxed">
-                    {enableRegularFemaleCoinEarning
-                      ? 'Regular female accounts can earn coins during 1-on-1 calls and request payout withdrawals directly.'
-                      : 'When disabled, all coin earning and payout UI options are hidden from regular female users. The main coin earning system is exclusively reserved for Team Leader created/managed female host users.'}
-                  </p>
-                </div>
-
-                <div className="flex items-center space-x-2 shrink-0">
-                  <button
-                    type="button"
-                    id="admin-toggle-regular-female-earning-btn"
-                    onClick={() => {
-                      const nextState = !enableRegularFemaleCoinEarning;
-                      setEnableRegularFemaleCoinEarning(nextState);
-                      updateSystemSettings({ enableRegularFemaleCoinEarning: nextState });
-                    }}
-                    className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center space-x-2 cursor-pointer border ${
-                      enableRegularFemaleCoinEarning
-                        ? 'bg-emerald-600 hover:bg-emerald-500 border-emerald-400 text-white shadow-lg shadow-emerald-500/20'
-                        : 'bg-slate-900 hover:bg-slate-800 border-amber-500/50 text-amber-300'
-                    }`}
-                  >
-                    <span className={`w-2 h-2 rounded-full ${enableRegularFemaleCoinEarning ? 'bg-white animate-pulse' : 'bg-amber-400'}`} />
-                    <span>{enableRegularFemaleCoinEarning ? 'Coin Earning: Enabled' : 'Coin Earning: Disabled'}</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* System Default Theme Option */}
-            <div className="sm:col-span-2 p-5 bg-slate-950/80 border border-slate-800 rounded-2xl space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <Palette className="w-4 h-4 text-purple-400" />
-                    <span className="text-xs font-bold text-white">Default Application Theme</span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                      defaultTheme === 'dark'
-                        ? 'bg-slate-800 text-amber-300 border border-slate-700'
-                        : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-                    }`}>
-                      {defaultTheme === 'dark' ? 'DARK MODE (DEFAULT)' : 'LIGHT MODE (DEFAULT)'}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    Select whether the application defaults to Dark Mode or Light Mode for visitors and initial logins.
-                  </p>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <button
-                    type="button"
-                    id="admin-theme-select-dark-btn"
-                    onClick={() => {
-                      setDefaultTheme('dark');
-                      updateSystemSettings({ defaultTheme: 'dark' });
-                    }}
-                    className={`px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-2 cursor-pointer border ${
-                      defaultTheme === 'dark'
-                        ? 'bg-slate-800 border-purple-500 text-white shadow-md shadow-purple-500/20 ring-1 ring-purple-500/50'
-                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <Moon className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>Dark Theme</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    id="admin-theme-select-light-btn"
-                    onClick={() => {
-                      setDefaultTheme('light');
-                      updateSystemSettings({ defaultTheme: 'light' });
-                    }}
-                    className={`px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-2 cursor-pointer border ${
-                      defaultTheme === 'light'
-                        ? 'bg-slate-100 border-purple-500 text-slate-900 shadow-md shadow-purple-500/20 ring-1 ring-purple-500/50'
-                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <Sun className="w-3.5 h-3.5 text-amber-500" />
-                    <span>Light Theme</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-
-
-            {/* FIELD 11: GAMIFIED DAILY REWARDS & ACTIVITY QUESTS MATRIX */}
-            <div className="sm:col-span-2 lg:col-span-3 p-5 bg-gradient-to-br from-slate-950 via-amber-950/20 to-slate-950 border border-amber-500/30 rounded-2xl space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="flex items-center space-x-2">
-                  <Gift className="w-5 h-5 text-amber-400" />
-                  <h3 className="text-sm font-black text-white">
-                    11. Gamified Daily Rewards & Activity Quests Matrix
-                  </h3>
-                </div>
-                <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-mono font-bold">
-                  Universal Free Coin Economy
-                </span>
-              </div>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Configure the 7-day progressive login streak reward ladder and daily activity mission targets/coins. All values are automatically persisted in Supabase database (<code className="text-amber-300">system_configs</code> and <code className="text-amber-300">user_daily_rewards</code>).
-              </p>
-
-              {/* 11.1: 7-Day Progressive Streak Ladder */}
-              <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-xl space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-amber-300">
-                    11.1 7-Day Progressive Check-in Streak Ladder (Coins per Day)
-                  </label>
-                  <span className="text-[10px] font-mono text-slate-400">Day 1 → Day 7 (Golden Mystery Chest)</span>
-                </div>
-                
-                <div className="grid grid-cols-2 sm:grid-cols-7 gap-2">
-                  {[0, 1, 2, 3, 4, 5, 6].map((dayIdx) => (
-                    <div key={dayIdx} className="p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-center space-y-1">
-                      <span className="text-[10px] font-mono font-bold text-slate-400 block uppercase">
-                        Day {dayIdx + 1} {dayIdx === 6 ? '🏆' : '🪙'}
-                      </span>
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={streakRewards[dayIdx] || 20}
-                        onChange={(e) => {
-                          const val = Number(e.target.value) || 1;
-                          const copy = [...streakRewards];
-                          copy[dayIdx] = val;
-                          setStreakRewards(copy);
-                        }}
-                        className="w-full px-2 py-1 bg-slate-900 border border-amber-500/40 rounded text-center text-amber-300 font-black text-xs font-mono"
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* 11.2: Daily Activity Missions Configuration */}
-              <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-emerald-300">
-                    11.2 Daily Activity Missions & Quest Rewards
-                  </label>
-                  <span className="text-[10px] font-mono text-slate-400">Target Requirements & Coin Payouts</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  
-                  {/* Quest 1: Chat with Friends */}
-                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-white flex items-center space-x-1.5">
-                        <span>💬 Social Butterfly</span>
-                      </span>
-                      <span className="text-[10px] text-sky-400 font-mono font-bold">Chat Friends</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Target Friends</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.chatFriends?.target || 3}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, chatFriends: { ...prev.chatFriends, target: Number(e.target.value) || 3, reward: prev.chatFriends?.reward || 25, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-800 rounded text-white font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Reward (🪙)</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.chatFriends?.reward || 25}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, chatFriends: { ...prev.chatFriends, target: prev.chatFriends?.target || 3, reward: Number(e.target.value) || 25, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-amber-500/40 rounded text-amber-300 font-mono font-bold"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Quest 2: Quick Matches */}
-                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-white flex items-center space-x-1.5">
-                        <span>⚡ Radar Explorer</span>
-                      </span>
-                      <span className="text-[10px] text-amber-400 font-mono font-bold">Quick Matches</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Target Matches</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.quickMatches?.target || 10}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, quickMatches: { ...prev.quickMatches, target: Number(e.target.value) || 10, reward: prev.quickMatches?.reward || 30, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-800 rounded text-white font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Reward (🪙)</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.quickMatches?.reward || 30}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, quickMatches: { ...prev.quickMatches, target: prev.quickMatches?.target || 10, reward: Number(e.target.value) || 30, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-amber-500/40 rounded text-amber-300 font-mono font-bold"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Quest 3: Video Call */}
-                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-white flex items-center space-x-1.5">
-                        <span>📹 Live Connection</span>
-                      </span>
-                      <span className="text-[10px] text-indigo-400 font-mono font-bold">1-on-1 Call</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Min Seconds</label>
-                        <input
-                          type="number"
-                          min="10"
-                          value={missionsConfig.videoCall?.target || 60}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, videoCall: { ...prev.videoCall, target: Number(e.target.value) || 60, reward: prev.videoCall?.reward || 35, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-800 rounded text-white font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Reward (🪙)</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.videoCall?.reward || 35}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, videoCall: { ...prev.videoCall, target: prev.videoCall?.target || 60, reward: Number(e.target.value) || 35, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-amber-500/40 rounded text-amber-300 font-mono font-bold"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Quest 4: Moments Interaction */}
-                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-white flex items-center space-x-1.5">
-                        <span>❤️ Community Vibe</span>
-                      </span>
-                      <span className="text-[10px] text-pink-400 font-mono font-bold">Moments Feed</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Target Likes/Posts</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.momentInteract?.target || 3}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, momentInteract: { ...prev.momentInteract, target: Number(e.target.value) || 3, reward: prev.momentInteract?.reward || 15, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-800 rounded text-white font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Reward (🪙)</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.momentInteract?.reward || 15}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, momentInteract: { ...prev.momentInteract, target: prev.momentInteract?.target || 3, reward: Number(e.target.value) || 15, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-amber-500/40 rounded text-amber-300 font-mono font-bold"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Quest 5: Send Virtual Gift */}
-                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-white flex items-center space-x-1.5">
-                        <span>🎁 Generous Heart</span>
-                      </span>
-                      <span className="text-[10px] text-emerald-400 font-mono font-bold">Gifts Sent</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Min Gifts Sent</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.sendGift?.target || 1}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, sendGift: { ...prev.sendGift, target: Number(e.target.value) || 1, reward: prev.sendGift?.reward || 20, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-800 rounded text-white font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Reward (🪙)</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.sendGift?.reward || 20}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, sendGift: { ...prev.sendGift, target: prev.sendGift?.target || 1, reward: Number(e.target.value) || 20, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-amber-500/40 rounded text-amber-300 font-mono font-bold"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Quest 6: Daily Master Super Chest */}
-                  <div className="p-3 bg-slate-950 border border-amber-500/40 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-amber-300 flex items-center space-x-1.5">
-                        <span>🏆 Daily Master Chest</span>
-                      </span>
-                      <span className="text-[10px] text-amber-400 font-mono font-bold">Bonus Chest</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Missions Needed</label>
-                        <input
-                          type="number"
-                          min="1"
-                          max="5"
-                          value={missionsConfig.masterChest?.target || 4}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, masterChest: { ...prev.masterChest, target: Number(e.target.value) || 4, reward: prev.masterChest?.reward || 50, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-800 rounded text-white font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Reward (🪙)</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={missionsConfig.masterChest?.reward || 50}
-                          onChange={(e) => setMissionsConfig(prev => ({ ...prev, masterChest: { ...prev.masterChest, target: prev.masterChest?.target || 4, reward: Number(e.target.value) || 50, enabled: true } }))}
-                          className="w-full px-2 py-1 bg-slate-900 border border-amber-500/40 rounded text-amber-300 font-mono font-bold"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                </div>
-              </div>
-            </div>
-
-            <div className="sm:col-span-2 pt-2">
-              <button
-                type="submit"
-                className="px-6 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-purple-500/25 transition-all"
-              >
-                Save & Update Platform Economy Matrix
-              </button>
-            </div>
-          </form>
-        </div>
+        <AdminEconomyConfigHub
+          initialSection={economySection}
+          onOpenSkuBundles={() => setActiveSubTab('skus')}
+          onOpenGiftsCatalog={() => setActiveSubTab('gifts')}
+        />
       )}
 
       {/* TAB 1.5: LiveKit API Keys & WebRTC Cloud Configuration */}
@@ -2272,31 +1389,30 @@ export const AdminDashboard: React.FC = () => {
                     type="button"
                     onClick={() => {
                       setLivekitCaptureResolution('720p');
-                      setLivekitMaxBitrateKbps(3500);
-                      setLivekitMaxFramerate(60);
+                      setLivekitMaxBitrateKbps(2200);
+                      setLivekitMaxFramerate(30);
                       setLivekitVideoCodec('h264');
                       setLivekitSimulcastEnabled(true);
                       setLivekitAdaptiveStream(true);
                       setLivekitDynacast(true);
-                      setVideoQualityProfile('high_720p');
                       updateSystemSettings({
                         livekitCaptureResolution: '720p',
                         videoQualityProfile: 'high_720p',
-                        livekitMaxBitrateKbps: 3500,
-                        livekitMaxFramerate: 60,
+                        livekitMaxBitrateKbps: 2200,
+                        livekitMaxFramerate: 30,
                         livekitVideoCodec: 'h264',
                         livekitSimulcastEnabled: true,
                         livekitAdaptiveStream: true,
                         livekitDynacast: true,
                         livekitExplicitlySet: true,
                       });
-                      showToast('Default Restored ⚡', 'System reset to 720p HD @ 3,500 kbps (60 FPS)', 'success');
+                      showToast('Default Restored ⚡', 'System reset to 720p HD @ 2,200 kbps (30 FPS) — recommended for smooth calls', 'success');
                     }}
                     className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-amber-200 border border-slate-700 rounded-lg text-xs font-mono font-bold flex items-center space-x-1.5 transition-all cursor-pointer shadow-sm"
-                    title="Reset all settings to system recommended default (720p HD @ 3,500 kbps)"
+                    title="Reset to recommended default (720p30 @ 2,200 kbps)"
                   >
                     <RefreshCw className="w-3 h-3 text-amber-400" />
-                    <span>Reset to System Default (720p @ 3,500 kbps)</span>
+                    <span>Reset to Recommended (720p30 @ 2,200 kbps)</span>
                   </button>
                 </div>
               </div>
@@ -2319,11 +1435,11 @@ export const AdminDashboard: React.FC = () => {
                         res === '1080p' ? 'hd_1080p' :
                         res === '480p' ? 'standard_480p' :
                         'high_720p';
-                      const bitrate = res === '4k' ? 8500 : res === '1080p' ? 5500 : res === '480p' ? 1500 : 3500;
-                      const fps = res === '480p' ? 30 : 60;
+                      // Smooth-call bands: never default to 60fps (client also clamps to ≤30)
+                      const bitrate = res === '4k' ? 8500 : res === '1080p' ? 4000 : res === '480p' ? 1200 : 2200;
+                      const fps = res === '480p' ? 24 : 30;
                       setLivekitMaxBitrateKbps(bitrate);
                       setLivekitMaxFramerate(fps);
-                      setVideoQualityProfile(profile);
                       updateSystemSettings({
                         livekitCaptureResolution: res,
                         videoQualityProfile: profile,
@@ -2331,23 +1447,36 @@ export const AdminDashboard: React.FC = () => {
                         livekitMaxFramerate: fps,
                         livekitExplicitlySet: true,
                       });
-                      showToast('Quality Policy Updated ⚡', `System set to ${res.toUpperCase()} (${bitrate} kbps @ ${fps} FPS)`, 'info');
+                      if (res === '4k') {
+                        showToast(
+                          '4K not recommended',
+                          '4K / high FPS increases freeze risk on mobile. Client caps phones to 720p30. Prefer 720p30 for smooth 1-on-1 calls.',
+                          'warning'
+                        );
+                      } else {
+                        showToast('Quality Policy Updated ⚡', `System set to ${res.toUpperCase()} (${bitrate} kbps @ ${fps} FPS)`, 'info');
+                      }
                     }}
                     className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-xs sm:text-sm text-white font-medium focus:outline-none focus:border-indigo-500 font-sans cursor-pointer shadow-inner"
                   >
                     <option value="720p">
-                      720p HD (1280x720) • 60 FPS • 3,500 kbps — [System Default Recommended]
+                      720p HD (1280x720) • 30 FPS • 2,200 kbps — Recommended for smooth calls
                     </option>
                     <option value="1080p">
-                      1080p Full HD (1920x1080) • 60 FPS • 5,500 kbps — [Studio High Quality]
+                      1080p Full HD (1920x1080) • 30 FPS • 4,000 kbps — Desktop / Wi‑Fi
                     </option>
                     <option value="4k">
-                      4K Ultra HD (3840x2160) • 60 FPS • 8,500 kbps — [Broadcast Master]
+                      4K Ultra HD (3840x2160) • 30 FPS • 8,500 kbps — Not recommended (mobile freeze risk)
                     </option>
                     <option value="480p">
-                      480p SD (854x480) • 30 FPS • 1,500 kbps — [Low Bandwidth Saver]
+                      480p SD (854x480) • 24 FPS • 1,200 kbps — Low bandwidth saver
                     </option>
                   </select>
+                  <p className="mt-2 text-[10px] text-slate-500 leading-relaxed">
+                    Clients clamp publish FPS to ≤30 (admin 60 → 30). Mobile soft-caps capture to 720p.
+                    Prefer <span className="text-cyan-400 font-semibold">720p30</span> for clear + smooth talking-head calls;
+                    60fps / 4K increase encoder backlog and stuck frames on cellular.
+                  </p>
                 </div>
 
                 {/* Preset Specs Summary Banner */}
@@ -2459,11 +1588,37 @@ export const AdminDashboard: React.FC = () => {
                 <Coins className="w-5 h-5 text-amber-400" />
                 <span>Coin Store Package Bundles (SKUs)</span>
               </h3>
-              <p className="text-xs text-slate-400 mt-1">Configure pricing, bonus coins, and promotional banners.</p>
+              <p className="text-xs text-slate-400 mt-1">
+                Configure pricing, bonus coins, discounts, and promotional banners. Burn rate &amp; peg
+                margin preview live under{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEconomySection('E');
+                    setActiveSubTab('financials');
+                  }}
+                  className="text-amber-300 hover:underline font-semibold cursor-pointer"
+                >
+                  Coin Burn &amp; Economy → Package preview
+                </button>
+                .
+              </p>
             </div>
 
             <button
-              onClick={() => setEditingSku({ title: '', coins: 100, bonusCoins: 10, priceUSD: 4.99, badgeTag: 'PROMO' })}
+              onClick={() =>
+                setEditingSku({
+                  title: '',
+                  coins: 100,
+                  bonusCoins: 10,
+                  priceUSD: 4.99,
+                  discountPriceUSD: null,
+                  approxCallMinutes: null,
+                  savingLabel: null,
+                  badgeTag: 'PROMO',
+                  popular: false,
+                })
+              }
               className="px-4 py-2 bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 shadow-md"
             >
               <Plus className="w-4 h-4" />
@@ -2471,55 +1626,86 @@ export const AdminDashboard: React.FC = () => {
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {coinPackages.map((pkg) => (
-              <div key={pkg.id} className="bg-slate-950 border border-slate-800 p-4 rounded-2xl space-y-3 relative">
-                {pkg.badgeTag && (
-                  <span className="px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-500/40 text-[9px] font-bold">
-                    {pkg.badgeTag}
-                  </span>
-                )}
-                <div>
-                  <h4 className="font-extrabold text-white text-base">{pkg.title}</h4>
-                  <div className="text-amber-300 font-black text-xl mt-1">🪙 {pkg.coins} Coins</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {coinPackages.map((pkg) => {
+              const total = pkgTotalCoins(pkg);
+              const list = listPriceUSD(pkg);
+              const pay = payPriceUSD(pkg);
+              const saveLabel = savingDisplayLabel(pkg);
+              const mins = pkgApproxCallMinutes(
+                pkg,
+                systemSettings.coinBurnRatePerMin || DEFAULT_COIN_BURN_RATE_PER_MIN
+              );
+              return (
+                <div key={pkg.id} className="bg-slate-950 border border-slate-800 p-3.5 rounded-2xl space-y-2 relative">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h4 className="font-extrabold text-white text-sm truncate">{pkg.title}</h4>
+                      {pkg.popular && (
+                        <span className="text-[9px] font-bold text-amber-400 uppercase tracking-wide">Popular</span>
+                      )}
+                    </div>
+                    {pkg.badgeTag && (
+                      <span className="shrink-0 px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-500/40 text-[9px] font-bold">
+                        {pkg.badgeTag}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-amber-300 font-black text-lg leading-tight">🪙 {pkg.coins}</div>
                   {pkg.bonusCoins > 0 && (
-                    <div className="text-[10px] text-emerald-400 font-bold">+ {pkg.bonusCoins} Bonus</div>
+                    <div className="text-[10px] text-emerald-400 font-bold">+{pkg.bonusCoins} bonus · {total} total</div>
                   )}
-                  <div className="text-slate-400 font-bold text-sm mt-1">${pkg.priceUSD.toFixed(2)} USD</div>
-                </div>
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    {hasDiscount(pkg) ? (
+                      <>
+                        <span className="text-slate-500 text-xs line-through">${list.toFixed(2)}</span>
+                        <span className="text-white font-bold text-sm">${pay.toFixed(2)}</span>
+                      </>
+                    ) : (
+                      <span className="text-slate-300 font-bold text-sm">${pay.toFixed(2)} USD</span>
+                    )}
+                    {saveLabel && (
+                      <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                        {saveLabel}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-slate-500">~{mins} min call time</div>
 
-                <div className="flex space-x-2 pt-2 border-t border-slate-800">
-                  <button
-                    onClick={() => setEditingSku(pkg)}
-                    className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1"
-                  >
-                    <Edit2 className="w-3 h-3" />
-                    <span>Edit</span>
-                  </button>
-                  <button
-                    onClick={() => deleteCoinPackage(pkg.id)}
-                    className="p-1.5 bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 rounded-lg text-xs"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex space-x-2 pt-2 border-t border-slate-800">
+                    <button
+                      onClick={() => setEditingSku(pkg)}
+                      className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1"
+                    >
+                      <Edit2 className="w-3 h-3" />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      onClick={() => deleteCoinPackage(pkg.id)}
+                      className="p-1.5 bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 rounded-lg text-xs"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Edit / Add SKU Modal */}
           {editingSku && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
-              <div className="bg-slate-900 border border-slate-800 p-6 rounded-3xl w-full max-w-md space-y-4">
-                <h4 className="font-bold text-white text-base">Edit Coin Package SKU</h4>
+              <div className="bg-slate-900 border border-slate-800 p-5 sm:p-6 rounded-3xl w-full max-w-lg space-y-3 max-h-[90vh] overflow-y-auto">
+                <h4 className="font-bold text-white text-base">{editingSku.id ? 'Edit' : 'Add'} Coin Package SKU</h4>
                 <form onSubmit={handleSaveSkuForm} className="space-y-3">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Bundle Title</label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Package Title</label>
                     <input
                       type="text"
                       value={editingSku.title || ''}
                       onChange={(e) => setEditingSku({ ...editingSku, title: e.target.value })}
                       className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
+                      required
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-2">
@@ -2527,7 +1713,8 @@ export const AdminDashboard: React.FC = () => {
                       <label className="block text-xs font-semibold text-slate-300 mb-1">Coins</label>
                       <input
                         type="number"
-                        value={editingSku.coins || 100}
+                        min={0}
+                        value={editingSku.coins ?? 100}
                         onChange={(e) => setEditingSku({ ...editingSku, coins: Number(e.target.value) })}
                         className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
                       />
@@ -2536,33 +1723,121 @@ export const AdminDashboard: React.FC = () => {
                       <label className="block text-xs font-semibold text-slate-300 mb-1">Bonus Coins</label>
                       <input
                         type="number"
-                        value={editingSku.bonusCoins || 0}
+                        min={0}
+                        value={editingSku.bonusCoins ?? 0}
                         onChange={(e) => setEditingSku({ ...editingSku, bonusCoins: Number(e.target.value) })}
                         className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
                       />
                     </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Price ($ USD)</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingSku.priceUSD || 4.99}
-                      onChange={(e) => setEditingSku({ ...editingSku, priceUSD: Number(e.target.value) })}
-                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
-                    />
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Price ($ USD)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        value={editingSku.priceUSD ?? 4.99}
+                        onChange={(e) => setEditingSku({ ...editingSku, priceUSD: Number(e.target.value) })}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Discount Price ($)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        value={editingSku.discountPriceUSD ?? ''}
+                        placeholder="No discount"
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setEditingSku({
+                            ...editingSku,
+                            discountPriceUSD: v === '' ? null : Number(v),
+                          });
+                        }}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Promo Badge Tag</label>
-                    <input
-                      type="text"
-                      value={editingSku.badgeTag || ''}
-                      placeholder="e.g. 70% OFF, BEST VALUE"
-                      onChange={(e) => setEditingSku({ ...editingSku, badgeTag: e.target.value })}
-                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
-                    />
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Approx call time (min)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={editingSku.approxCallMinutes ?? ''}
+                        placeholder="Auto from burn rate"
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setEditingSku({
+                            ...editingSku,
+                            approxCallMinutes: v === '' ? null : Number(v),
+                          });
+                        }}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Saving label (optional)</label>
+                      <input
+                        type="text"
+                        value={editingSku.savingLabel || ''}
+                        placeholder="Auto from price − discount"
+                        onChange={(e) => setEditingSku({ ...editingSku, savingLabel: e.target.value || null })}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
+                      />
+                    </div>
                   </div>
-                  <div className="flex space-x-2 pt-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Promo Badge</label>
+                      <input
+                        type="text"
+                        value={editingSku.badgeTag || ''}
+                        placeholder="e.g. BEST VALUE"
+                        onChange={(e) => setEditingSku({ ...editingSku, badgeTag: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <label className="flex items-center gap-2 w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(editingSku.popular)}
+                          onChange={(e) => setEditingSku({ ...editingSku, popular: e.target.checked })}
+                          className="rounded border-slate-600"
+                        />
+                        <span className="font-semibold">Popular</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Live preview */}
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 space-y-1">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Live Preview</div>
+                    <div className="text-sm text-white font-bold">
+                      {pkgTotalCoins(editingSku)} total coins · Pay ${payPriceUSD(editingSku).toFixed(2)}
+                      {hasDiscount(editingSku) && (
+                        <span className="text-slate-500 font-medium line-through ml-2">
+                          ${listPriceUSD(editingSku).toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      ~{pkgApproxCallMinutes(
+                        editingSku,
+                        systemSettings.coinBurnRatePerMin || DEFAULT_COIN_BURN_RATE_PER_MIN
+                      )}{' '}
+                      min ·{' '}
+                      {savingDisplayLabel(editingSku)
+                        ? `Saving: ${savingDisplayLabel(editingSku)} ($${savingUSD(editingSku).toFixed(2)} / ${savingPercent(editingSku)}%)`
+                        : 'No discount / saving'}
+                    </div>
+                  </div>
+
+                  <div className="flex space-x-2 pt-1">
                     <button
                       type="button"
                       onClick={() => setEditingSku(null)}
@@ -2584,7 +1859,7 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 2.2: Dynamic Virtual Gifts & Tipping Manager */}
+      {/* TAB 2.2: Dynamic Virtual Gifts & Tipping Manager (catalog only — shares in Economy hub) */}
       {activeSubTab === 'gifts' && (
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-6">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
@@ -2594,11 +1869,26 @@ export const AdminDashboard: React.FC = () => {
                 <span>Virtual Gifts Catalog & In-Call Tips Manager</span>
               </h3>
               <p className="text-xs text-slate-400 mt-1">
-                Manage gift items, coin prices, visual animations, and real-time revenue splits (Host {systemSettings.giftFemaleHostSharePercent ?? 70}% / TL {systemSettings.giftTeamLeaderSharePercent ?? 10}% / Platform {Math.max(0, 100 - (systemSettings.giftFemaleHostSharePercent ?? 70) - (systemSettings.giftTeamLeaderSharePercent ?? 10))}%).
+                Manage gift items, coin prices, and animations. Revenue splits are read-only here —
+                edit Host / TL / Platform % in Coin Burn &amp; Economy.
               </p>
             </div>
 
             <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                id="admin-gifts-open-economy-shares-btn"
+                onClick={() => {
+                  setEconomySection('C');
+                  setActiveSubTab('financials');
+                }}
+                className="px-3 py-2 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 font-semibold text-xs rounded-xl flex items-center space-x-1.5 transition-all cursor-pointer border border-amber-500/30"
+                title="Edit gift share percentages in Economy hub"
+              >
+                <Percent className="w-3.5 h-3.5" />
+                <span>Edit gift shares →</span>
+              </button>
+
               <button
                 type="button"
                 id="admin-reset-default-gifts-btn"
@@ -2634,42 +1924,69 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </div>
 
-          {/* Quick Metrics Bar */}
+          {/* Quick Metrics Bar — read-only; edit via Economy section C */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl">
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Catalog Size</span>
               <div className="text-xl font-black text-white mt-1">{virtualGifts.length} Gifts</div>
               <span className="text-[10px] text-pink-400 font-semibold">{virtualGifts.filter(g => g.isActive !== false).length} Active in Calls</span>
             </div>
-            <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl">
+            <button
+              type="button"
+              onClick={() => {
+                setEconomySection('C');
+                setActiveSubTab('financials');
+              }}
+              className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl text-left cursor-pointer hover:border-pink-500/40"
+            >
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Host Gift Split</span>
-              <div className="text-xl font-black text-pink-400 mt-1">{systemSettings.giftFemaleHostSharePercent ?? 70}%</div>
-              <span className="text-[10px] text-slate-400">Direct host wallet share</span>
-            </div>
-            <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl">
+              <div className="text-xl font-black text-pink-400 mt-1">
+                {systemSettings.giftFemaleHostSharePercent ?? DEFAULT_GIFT_FEMALE_HOST_SHARE_PERCENT}%
+              </div>
+              <span className="text-[10px] text-amber-300/80 font-semibold">Edit in Economy →</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setEconomySection('C');
+                setActiveSubTab('financials');
+              }}
+              className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl text-left cursor-pointer hover:border-indigo-500/40"
+            >
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Team Leader Share</span>
-              <div className="text-xl font-black text-indigo-400 mt-1">{systemSettings.giftTeamLeaderSharePercent ?? 10}%</div>
-              <span className="text-[10px] text-slate-400">Guild override commission</span>
-            </div>
+              <div className="text-xl font-black text-indigo-400 mt-1">
+                {systemSettings.giftTeamLeaderSharePercent ?? DEFAULT_GIFT_TEAM_LEADER_SHARE_PERCENT}%
+              </div>
+              <span className="text-[10px] text-amber-300/80 font-semibold">Edit in Economy →</span>
+            </button>
             <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl">
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Platform Margin</span>
               <div className="text-xl font-black text-emerald-400 mt-1">
-                {Math.max(0, 100 - (systemSettings.giftFemaleHostSharePercent ?? 70) - (systemSettings.giftTeamLeaderSharePercent ?? 10))}%
+                {Math.max(
+                  0,
+                  100 -
+                    (systemSettings.giftFemaleHostSharePercent ??
+                      DEFAULT_GIFT_FEMALE_HOST_SHARE_PERCENT) -
+                    (systemSettings.giftTeamLeaderSharePercent ??
+                      DEFAULT_GIFT_TEAM_LEADER_SHARE_PERCENT)
+                )}%
               </div>
-              <span className="text-[10px] text-slate-400">Retained gross profit</span>
+              <span className="text-[10px] text-slate-400">Implied (read-only)</span>
             </div>
           </div>
 
           {/* Virtual Gifts Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {virtualGifts.map((gift) => {
-              const hostSharePct = systemSettings.giftFemaleHostSharePercent ?? 70;
-              const tlSharePct = systemSettings.giftTeamLeaderSharePercent ?? 10;
+              const hostSharePct =
+                systemSettings.giftFemaleHostSharePercent ?? DEFAULT_GIFT_FEMALE_HOST_SHARE_PERCENT;
+              const tlSharePct =
+                systemSettings.giftTeamLeaderSharePercent ?? DEFAULT_GIFT_TEAM_LEADER_SHARE_PERCENT;
               const platformSharePct = Math.max(0, 100 - hostSharePct - tlSharePct);
               const hostCoins = Math.round(gift.coinCost * (hostSharePct / 100));
               const tlCoins = Math.round(gift.coinCost * (tlSharePct / 100));
               const platformCoins = Math.round(gift.coinCost * (platformSharePct / 100));
-              const payoutUsdRatio = systemSettings.femalePayoutRatioUSD ?? 0.008;
+              const payoutUsdRatio = getCoinUsdPeg(systemSettings);
 
               return (
                 <div
@@ -2725,6 +2042,9 @@ export const AdminDashboard: React.FC = () => {
                         <span>Platform ({platformSharePct}%):</span>
                         <span className="font-bold font-mono">🪙 {platformCoins}</span>
                       </div>
+                      <p className="text-[9px] text-slate-500 pt-1 border-t border-slate-800/80">
+                        USD @ Coin USD Peg (Economy → D). Shares edited in Economy → C only.
+                      </p>
                     </div>
 
                     {/* Animation info */}
@@ -2829,7 +2149,7 @@ export const AdminDashboard: React.FC = () => {
                         <option value="Love">Love</option>
                         <option value="Luxury">Luxury</option>
                         <option value="Fun">Fun</option>
-                        <option value="VIP">VIP</option>
+                        <option value="Luxury">Luxury</option>
                       </select>
                     </div>
                   </div>
@@ -3176,6 +2496,9 @@ export const AdminDashboard: React.FC = () => {
                       name: newLeaderForm.name,
                       email: newLeaderForm.email || `teamleader_${Date.now().toString().slice(-4)}@livecall.app`,
                       password: newLeaderForm.password || 'leader123',
+                      gender: 'female',
+                      genderLocked: true,
+                      role: 'team_leader',
                       agencyName: newLeaderForm.agencyName || 'Aurora Talent Management',
                       commissionPercent: Number(newLeaderForm.commissionPercent) || (systemSettings.teamLeaderSharePercent ?? 10),
                       spokenLanguages: newLeaderForm.spokenLanguages.split(',').map((s) => s.trim()).filter(Boolean),
@@ -3565,13 +2888,19 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 3: Payout Approval Queue */}
+      {/* TAB 3: Legacy payout history (read-only — settlements are cash-out) */}
       {activeSubTab === 'payouts' && (
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
-          <h3 className="text-lg font-extrabold text-white flex items-center space-x-2">
-            <DollarSign className="w-5 h-5 text-emerald-400" />
-            <span>Withdrawal Approval Queue</span>
-          </h3>
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+            <h3 className="text-lg font-extrabold text-white flex items-center space-x-2">
+              <DollarSign className="w-5 h-5 text-slate-400" />
+              <span>Legacy Payout History (Read-Only)</span>
+            </h3>
+            <p className="text-xs text-amber-200/90 bg-amber-950/40 border border-amber-700/40 rounded-xl px-3 py-2 max-w-xl">
+              Manual <span className="font-mono">payout_requests</span> are historical only. Do not approve here —
+              cash-out is <strong>Financial Module → settlement batches</strong> (avoids double-pay).
+            </p>
+          </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
@@ -3618,26 +2947,7 @@ export const AdminDashboard: React.FC = () => {
                       </span>
                     </td>
                     <td className="p-3">
-                      {req.status === 'pending' || req.status === 'processing' ? (
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={() => adminApprovePayout(req.id)}
-                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold flex items-center space-x-1"
-                          >
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            <span>Approve</span>
-                          </button>
-                          <button
-                            onClick={() => adminRejectPayout(req.id, 'Account details mismatch')}
-                            className="px-3 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold flex items-center space-x-1"
-                          >
-                            <XCircle className="w-3.5 h-3.5" />
-                            <span>Reject</span>
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="text-[10px] text-slate-500 italic">Closed</span>
-                      )}
+                      <span className="text-[10px] text-slate-500 italic">View only — use settlements</span>
                     </td>
                   </tr>
                 ))}
@@ -3679,19 +2989,12 @@ export const AdminDashboard: React.FC = () => {
 
               <button
                 type="button"
-                onClick={async () => {
-                  if (window.confirm('⚠️ Reset Mock Data Warning:\n\nAre you sure you want to permanently delete all mock/demo profiles from Supabase and the server cache?\n\nThis will purge all predefined demo accounts and leave ONLY real registered users.\n\nContinue?')) {
-                    setIsPurgingMock(true);
-                    await purgeAllMockData();
-                    setIsPurgingMock(false);
-                  }
-                }}
-                disabled={isPurgingMock}
-                className="px-3 py-1.5 bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20 rounded text-xs font-mono font-bold flex items-center space-x-1.5 transition-all shadow-sm cursor-pointer disabled:opacity-50"
-                title="Permanently remove all mock demo profiles from Supabase and server"
+                onClick={() => setIsResetModalOpen(true)}
+                className="px-3 py-1.5 bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20 rounded text-xs font-mono font-bold flex items-center space-x-1.5 transition-all shadow-sm cursor-pointer"
+                title="Open destructive data reset manager (requires ALLOW_FACTORY_RESET)"
               >
-                <Trash2 className={`w-3.5 h-3.5 text-rose-400 ${isPurgingMock ? 'animate-pulse' : ''}`} />
-                <span>{isPurgingMock ? 'Purging Mock...' : 'Reset Mock Data'}</span>
+                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <span>Reset Data…</span>
               </button>
 
               <button
@@ -3871,9 +3174,6 @@ export const AdminDashboard: React.FC = () => {
                             <span className="font-extrabold text-amber-300">
                               🪙 {(u.coinBalance ?? 0).toLocaleString()} Coins
                             </span>
-                            <div className="text-[10px] text-slate-500">
-                              Tier: {(u.vipTier || 'Free').toUpperCase()}
-                            </div>
                           </div>
                         )}
                       </td>
@@ -3993,13 +3293,12 @@ export const AdminDashboard: React.FC = () => {
                                     {(u.role === 'female_creator' || u.role === 'female_host') && (
                                       <button
                                         onClick={() => {
-                                          const systemRate =
-                                            systemSettings.femaleEarningRatePerMin ||
-                                            Math.round(
-                                              (systemSettings.coinBurnRatePerMin ?? 120) *
-                                                ((systemSettings.femaleHostSharePercent ?? 40) / 100)
-                                            ) ||
-                                            48;
+                                          const systemRate = deriveHostEarnPerMin(
+                                            systemSettings.coinBurnRatePerMin ??
+                                              DEFAULT_COIN_BURN_RATE_PER_MIN,
+                                            systemSettings.femaleHostSharePercent ??
+                                              DEFAULT_FEMALE_HOST_SHARE_PERCENT
+                                          );
                                           const hasOverride =
                                             u.coinEarnOverrideRate != null && Number(u.coinEarnOverrideRate) > 0;
                                           setOverrideEarningUser(u);
@@ -4161,6 +3460,10 @@ export const AdminDashboard: React.FC = () => {
       {/* Sub-Tab: Worldwide Countries, Languages, Zodiac & Interests Control */}
       {activeSubTab === 'countries' && <AdminTaxonomyManager />}
 
+      {/* Sub-Tab: Creator targets, rotational matrix, performance */}
+      {activeSubTab === 'creator-ops' && <AdminCreatorTargetConfig />}
+      {activeSubTab === 'finance-module' && <AdminFinancialModule />}
+
       {/* Sub-Tab 7: Supabase PostgreSQL & Cloudflare R2 Infrastructure Management */}
       {activeSubTab === 'infra' && <AdminDatabaseStorageConfig />}
 
@@ -4183,14 +3486,12 @@ export const AdminDashboard: React.FC = () => {
 
       {/* Override Female Creator Earning Modal */}
       {overrideEarningUser && (() => {
-        const systemRate =
-          systemSettings.femaleEarningRatePerMin ||
-          Math.round(
-            (systemSettings.coinBurnRatePerMin ?? 120) *
-              ((systemSettings.femaleHostSharePercent ?? 40) / 100)
-          ) ||
-          48;
-        const hostShare = systemSettings.femaleHostSharePercent ?? 40;
+        const systemRate = deriveHostEarnPerMin(
+          systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN,
+          systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT
+        );
+        const hostShare =
+          systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT;
 
         return (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -4210,7 +3511,7 @@ export const AdminDashboard: React.FC = () => {
                     }}
                   />
                   <div>
-                    <h3 className="font-bold text-white text-sm">Override Earning</h3>
+                    <h3 className="font-bold text-white text-sm">Override host coins/min</h3>
                     <p className="text-[11px] text-slate-400">{overrideEarningUser.name}</p>
                   </div>
                 </div>
@@ -4224,9 +3525,14 @@ export const AdminDashboard: React.FC = () => {
 
               <div className="space-y-3 text-xs">
                 <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 leading-relaxed">
-                  By default, female creators earn the system rate (
+                  Default = Economy burn × host base share (
                   <span className="font-mono font-bold text-emerald-300">{systemRate} 🪙/min</span>
-                  {' '}· {hostShare}% of coin burn). Set an individual override only when needed.
+                  {' '}· {hostShare}% of burn). Custom override is{' '}
+                  <span className="text-pink-300 font-bold">absolute host coins/min</span> (
+                  <code className="text-slate-400">coin_earn_override_rate</code>) — ignores share %.
+                  TL % still applies when linked; host+TL clamped ≤ burn. If override &gt; 0 at period
+                  close, share true-up is skipped for this host. Global burn/share/peg stay in Coin Burn
+                  &amp; Economy only.
                 </div>
 
                 <label className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-900/80 border border-slate-700 cursor-pointer">
@@ -4240,8 +3546,8 @@ export const AdminDashboard: React.FC = () => {
                     className="accent-emerald-400"
                   />
                   <div>
-                    <div className="font-bold text-white text-xs">Use system earning rate</div>
-                    <div className="text-[10px] text-slate-400">{systemRate} 🪙/min ({hostShare}% share)</div>
+                    <div className="font-bold text-white text-xs">Use Economy share %</div>
+                    <div className="text-[10px] text-slate-400">{systemRate} 🪙/min ({hostShare}% base)</div>
                   </div>
                 </label>
 
@@ -4254,8 +3560,8 @@ export const AdminDashboard: React.FC = () => {
                   />
                   <div className="flex-1 space-y-2">
                     <div>
-                      <div className="font-bold text-white text-xs">Custom override (🪙 / min)</div>
-                      <div className="text-[10px] text-slate-400">Applies only to this female creator</div>
+                      <div className="font-bold text-white text-xs">Custom absolute (🪙 / min)</div>
+                      <div className="text-[10px] text-slate-400">Ignores host share % for this creator</div>
                     </div>
                     {!overrideUseSystemRate && (
                       <div className="space-y-2">
@@ -4315,11 +3621,22 @@ export const AdminDashboard: React.FC = () => {
         );
       })()}
 
-      {/* User Analytics & Earnings/Spending Ledger Modal */}
+      {/* User Analytics — admin-native drawer */}
       <UserAnalyticsModal
         isOpen={selectedUserForAnalytics !== null}
         onClose={() => setSelectedUserForAnalytics(null)}
         user={selectedUserForAnalytics}
+        onOverrideEarning={(u) => {
+          setSelectedUserForAnalytics(null);
+          setOverrideEarningUser(u);
+          const systemRate = deriveHostEarnPerMin(
+            systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN,
+            systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT
+          );
+          const hasOverride = u.coinEarnOverrideRate != null && Number(u.coinEarnOverrideRate) > 0;
+          setOverrideEarningRate(hasOverride ? Number(u.coinEarnOverrideRate) : systemRate);
+          setOverrideUseSystemRate(!hasOverride);
+        }}
       />
 
       {/* Silent Admin Video Call Surveillance & Quality Assurance Modal */}
@@ -4389,8 +3706,8 @@ export const AdminDashboard: React.FC = () => {
                     if (!deletingUser) return;
                     setIsDeletingUserProcessing(true);
                     try {
-                      await adminDeleteUser(deletingUser.id);
-                      setDeletingUser(null);
+                      const ok = await adminDeleteUser(deletingUser.id);
+                      if (ok !== false) setDeletingUser(null);
                     } finally {
                       setIsDeletingUserProcessing(false);
                     }
@@ -4404,15 +3721,6 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </div>
         </div>
-      )}
-
-      {/* Dedicated User Analytics Modal */}
-      {selectedAnalyticsUser && (
-        <UserAnalyticsModal
-          isOpen={Boolean(selectedAnalyticsUser)}
-          user={selectedAnalyticsUser}
-          onClose={() => setSelectedAnalyticsUser(null)}
-        />
       )}
     </div>
   );

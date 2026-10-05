@@ -4,8 +4,6 @@ import {
   X,
   Lock,
   CheckCircle2,
-  Shield,
-  Smartphone,
   Mail,
   User,
   Sparkles,
@@ -52,7 +50,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const { completeAuthenticatedLogin, showToast, updateUserProfile } = useApp();
 
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>(initialMode);
-  const [authMethod, setAuthMethod] = useState<'email' | 'phone'>('email');
 
   // Register Form State
   const [selectedRole, setSelectedRole] = useState<UserRole>(defaultRole);
@@ -80,9 +77,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
-  const [loginPhone, setLoginPhone] = useState('');
-  const [loginPhoneOtp, setLoginPhoneOtp] = useState('');
-  const [loginPhoneOtpSent, setLoginPhoneOtpSent] = useState(false);
 
   // Password reset
   const [resetEmail, setResetEmail] = useState('');
@@ -110,7 +104,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setResetOtpSent(false);
       setResetPassword('');
       setResetConfirmPassword('');
-      setAuthMethod('email');
     }
   }, [isOpen, initialMode, defaultRole]);
 
@@ -138,6 +131,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleStartRegistration = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isLoading) return;
     setErrorMessage(null);
     setSuccessMessage(null);
 
@@ -192,7 +186,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }, 150);
     } catch (err: any) {
       console.error('Registration exception:', err);
-      setErrorMessage(err.message || 'An error occurred during account creation.');
+      setErrorMessage('An error occurred during account creation. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -240,8 +234,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleVerifyOtpCode = async (tokenString?: string) => {
     const token = tokenString || otpDigits.join('');
-    if (token.length < 6) {
-      setErrorMessage('Please enter the complete 6-digit code received in your email.');
+    if (token.length < 6 || isLoading) {
+      if (token.length < 6) {
+        setErrorMessage('Please enter the complete 6-digit code received in your email.');
+      }
       return;
     }
 
@@ -249,22 +245,50 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setIsLoading(true);
 
     try {
-      const res = await verifyEmailOtp(email.trim(), token, selectedRole, name.trim());
+      const res = await verifyEmailOtp({
+        email: email.trim(),
+        token,
+        role: selectedRole,
+        name: name.trim(),
+        password,
+      });
       if (!res.success || !res.user) {
         setErrorMessage(res.error || 'Invalid or expired verification code. Please check your email inbox.');
-        setIsLoading(false);
         return;
+      }
+
+      // Ensure a live Supabase session before onboarding (required for profile persistence)
+      let verifiedUser = res.user;
+      if (!res.session && password) {
+        const sessionRes = await signInWithEmailPassword(email.trim(), password);
+        if (sessionRes.success && sessionRes.user) {
+          verifiedUser = {
+            ...sessionRes.user,
+            // Prefer freshly verified email/onboarding flags from OTP path
+            emailVerified: true,
+            isOnboarded: Boolean(sessionRes.user.isOnboarded),
+          };
+        } else if (!sessionRes.success) {
+          setErrorMessage(
+            sessionRes.error ||
+              'Email verified, but we could not start your session. Please sign in with your password to continue.'
+          );
+          setMode('login');
+          setLoginEmail(email.trim());
+          setShowOtpScreen(false);
+          return;
+        }
       }
 
       showToast('Email Verified Successfully! 🟢', 'Proceeding to Profile Setup...', 'success');
       
       // Check if user is already onboarded or needs wizard
-      if (res.user.isOnboarded) {
-        completeAuthenticatedLogin(res.user);
+      if (verifiedUser.isOnboarded) {
+        completeAuthenticatedLogin(verifiedUser);
         if (onNavigateToTab) {
-          if (res.user.role === 'admin') {
+          if (verifiedUser.role === 'admin') {
             onNavigateToTab('admin');
-          } else if (res.user.role === 'team_leader') {
+          } else if (verifiedUser.role === 'team_leader') {
             onNavigateToTab('team_leader');
           } else {
             onNavigateToTab('profile');
@@ -273,22 +297,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         onClose();
       } else {
         setOnboardingProfile({
-          ...res.user,
-          dob: dob || res.user.dob || '2000-01-01',
-          age: age || res.user.age || 24,
+          ...verifiedUser,
+          dob: dob || verifiedUser.dob || '2000-01-01',
+          age: age || verifiedUser.age || 24,
         });
         setShowOnboarding(true);
       }
     } catch (err: any) {
       console.error('Verify OTP exception:', err);
-      setErrorMessage(err.message || 'OTP verification failed.');
+      setErrorMessage('OTP verification failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleResendOtp = async () => {
-    if (!canResend || !email) return;
+    if (!canResend || !email || isLoading) return;
     setIsLoading(true);
     setErrorMessage(null);
     try {
@@ -304,7 +328,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setErrorMessage(res.error || 'Failed to resend code.');
       }
     } catch (e: any) {
-      setErrorMessage(e.message || 'Resend failed.');
+      console.error('Resend OTP exception:', e);
+      setErrorMessage('Could not resend verification code. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -316,16 +341,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleLoginSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isLoading) return;
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    if (authMethod === 'phone') {
-      setErrorMessage('Phone login is disabled. Please sign in with email and password.');
-      return;
-    }
-
     if (!loginEmail.trim()) {
-      setErrorMessage('Please enter your Email or Username.');
+      setErrorMessage('Please enter your email address.');
       return;
     }
     if (!loginPassword) {
@@ -339,7 +360,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const res = await signInWithEmailPassword(loginEmail.trim(), loginPassword);
       if (!res.success || !res.user) {
         setErrorMessage(res.error || 'Invalid email or password. Please check your credentials.');
-        setIsLoading(false);
         return;
       }
 
@@ -363,7 +383,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
     } catch (err: any) {
       console.error('Login error:', err);
-      setErrorMessage(err.message || 'Authentication error.');
+      setErrorMessage('Authentication error. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -393,7 +413,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setSuccessMessage(`A 6-digit reset code was sent to ${targetEmail}.`);
       setTimeout(() => otpInputRefs.current[0]?.focus(), 150);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to send reset code.');
+      console.error('Request reset OTP exception:', err);
+      setErrorMessage('Failed to send reset code. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -401,6 +422,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleCompletePasswordReset = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isLoading) return;
     setErrorMessage(null);
     setSuccessMessage(null);
     const code = otpDigits.join('');
@@ -439,7 +461,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setReceivedOtpCode(null);
       setOtpDigits(['', '', '', '', '', '']);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Password reset failed.');
+      console.error('Password reset exception:', err);
+      setErrorMessage('Password reset failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -467,37 +490,39 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-[85] flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="relative w-full max-w-lg bg-[#12141A] border border-slate-800 rounded-3xl shadow-2xl flex flex-col overflow-hidden my-auto">
+    <div className="fixed inset-0 z-[85] flex items-end sm:items-center justify-center p-0 sm:p-4 backdrop-blur-md" style={{ backgroundColor: 'var(--app-overlay)' }}>
+      <div className="relative w-full max-w-lg bg-app-card border border-hairline rounded-t-app-xl sm:rounded-app-xl shadow-app-lg flex flex-col overflow-hidden my-auto app-sheet-up max-h-[94vh]">
         {/* Top Header */}
-        <div className="px-5 pt-5 pb-4 bg-slate-950/90 border-b border-slate-800 shrink-0">
+        <div className="px-5 pt-5 pb-4 bg-app-card-subtle border-b border-hairline shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-rose-500 via-pink-500 to-indigo-600 text-white flex items-center justify-center font-bold shadow-lg shadow-rose-500/20 shrink-0">
-                {mode === 'login' ? <LogIn className="w-5 h-5" /> : <Sparkles className="w-5 h-5" />}
+              <div className="w-10 h-10 rounded-app bg-flirt text-white flex items-center justify-center font-bold shadow-brand shrink-0">
+                {mode === 'login' ? <LogIn className="w-5 h-5" /> : <User className="w-5 h-5" />}
               </div>
               <div>
-                <h2 className="text-base font-extrabold text-white">
+                <h2 className="font-display text-lg font-bold text-app-heading">
                   {showOtpScreen
-                    ? 'Confirm Email OTP'
+                    ? 'Confirm your email'
                     : mode === 'login'
-                    ? 'Account Sign In'
+                    ? 'Welcome back'
                     : mode === 'reset'
-                    ? 'Reset Password'
-                    : '18+ Member Registration'}
+                    ? 'Reset password'
+                    : 'Join Minglecall'}
                 </h2>
                 {showOtpScreen ? (
-                  <p className="text-xs text-slate-400">Enter 6-digit code sent to {email}</p>
+                  <p className="text-xs text-app-muted">Enter the 6-digit code sent to {email}</p>
                 ) : mode === 'login' ? (
-                  <p className="text-xs text-slate-400">Access private calls, creator hosts & coin balances</p>
+                  <p className="text-xs text-app-muted">Sign in for private calls and messages</p>
                 ) : mode === 'reset' ? (
-                  <p className="text-xs text-slate-400">Verify your email, then set a strong new password</p>
-                ) : null}
+                  <p className="text-xs text-app-muted">Verify your email, then set a new password</p>
+                ) : (
+                  <p className="text-xs text-app-muted">18+ only · Create your free profile</p>
+                )}
               </div>
             </div>
             <button
               onClick={onClose}
-              className="p-2 rounded-full text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 transition-colors cursor-pointer shrink-0"
+              className="p-2 rounded-full text-app-muted hover:text-app-heading bg-app-card hover:bg-brand-soft border border-hairline transition-colors cursor-pointer shrink-0"
               title="Close modal"
             >
               <X className="w-5 h-5" />
@@ -506,17 +531,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
           {/* Mode Switcher Tabs (Hidden during OTP / reset) */}
           {!showOtpScreen && mode !== 'reset' && (
-            <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#090A0D] rounded-xl border border-slate-800/80 mt-4">
+            <div className="grid grid-cols-2 gap-1.5 p-1 bg-app-input rounded-app border border-hairline mt-4">
               <button
                 type="button"
                 onClick={() => {
                   setMode('login');
                   setErrorMessage(null);
                 }}
-                className={`py-2 rounded-lg text-xs font-bold transition-all ${
+                className={`py-2 rounded-[var(--radius-sm)] text-xs font-semibold transition-all ${
                   mode === 'login'
-                    ? 'bg-slate-800 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
+                    ? 'bg-app-card text-app-heading shadow-app-sm'
+                    : 'text-app-muted hover:text-app-heading'
                 }`}
               >
                 Sign In
@@ -527,10 +552,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   setMode('register');
                   setErrorMessage(null);
                 }}
-                className={`py-2 rounded-lg text-xs font-bold transition-all ${
+                className={`py-2 rounded-[var(--radius-sm)] text-xs font-semibold transition-all ${
                   mode === 'register'
-                    ? 'bg-gradient-to-r from-rose-600 to-indigo-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
+                    ? 'bg-flirt text-white shadow-brand'
+                    : 'text-app-muted hover:text-app-heading'
                 }`}
               >
                 Create Account
@@ -546,7 +571,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 setErrorMessage(null);
                 setSuccessMessage(null);
               }}
-              className="mt-3 text-xs text-slate-400 hover:text-white font-mono"
+              className="mt-3 text-xs text-app-muted hover:text-app-heading"
             >
               ← Back to Sign In
             </button>
@@ -579,17 +604,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <div className="w-14 h-14 mx-auto rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
                   <Mail className="w-7 h-7 animate-bounce" />
                 </div>
-                <h3 className="text-base font-bold text-white">Enter 6-Digit Verification Code</h3>
-                <p className="text-xs text-slate-400 max-w-sm mx-auto">
-                  We've dispatched a 6-digit OTP code & confirmation link to <strong className="text-white">{email}</strong>.
+                <h3 className="text-base font-bold text-app-heading">Enter 6-Digit Verification Code</h3>
+                <p className="text-xs text-app-muted max-w-sm mx-auto">
+                  We've dispatched a 6-digit OTP code & confirmation link to <strong className="text-app-heading">{email}</strong>.
                 </p>
-                <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 bg-slate-800/80 border border-slate-700 rounded-full text-[11px] text-slate-300">
+                <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 bg-app-input border border-hairline rounded-full text-[11px] text-app-muted">
                   <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Dual Verification: 6-Digit OTP + Instant Email Link</span>
                 </div>
               </div>
 
-              {/* Testing Mode OTP Display Box (Visible during testing / when OTP is returned) */}
+              {/* Dev / delivery-fallback OTP (shown when API returns otpCode) */}
               {receivedOtpCode && (
                 <div className="p-3.5 bg-gradient-to-r from-emerald-950/40 via-slate-900 to-indigo-950/40 border border-emerald-500/40 rounded-2xl space-y-2.5 shadow-lg shadow-emerald-950/30">
                   <div className="flex items-center justify-between">
@@ -599,17 +624,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                       </span>
                       <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-emerald-400">
-                        Live Test OTP Code
+                        Dev / Delivery-Fallback OTP
                       </span>
                     </div>
                     <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono font-semibold">
-                      Testing Mode
+                      Temporary
                     </span>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-[#0B0D11] border border-slate-700/80 rounded-xl p-2.5 gap-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-app-input border border-hairline rounded-xl p-2.5 gap-2">
                     <div className="flex items-center space-x-2">
-                      <span className="text-xs text-slate-400 font-mono">OTP:</span>
+                      <span className="text-xs text-app-muted font-mono">OTP:</span>
                       <span className="text-xl font-mono font-black tracking-widest text-emerald-300">
                         {receivedOtpCode}
                       </span>
@@ -622,7 +647,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           setCopiedOtp(true);
                           setTimeout(() => setCopiedOtp(false), 2000);
                         }}
-                        className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-[11px] font-mono flex items-center space-x-1 transition-colors cursor-pointer"
+                        className="px-2.5 py-1.5 bg-app-card-subtle hover:bg-app-card border border-hairline text-app-muted hover:text-app-heading rounded-lg text-[11px] font-mono flex items-center space-x-1 transition-colors cursor-pointer"
                         title="Copy Code"
                       >
                         {copiedOtp ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
@@ -630,12 +655,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       </button>
                       <button
                         type="button"
+                        disabled={isLoading}
                         onClick={() => {
                           const digits = receivedOtpCode.split('').slice(0, 6);
                           setOtpDigits(digits);
                           handleVerifyOtpCode(receivedOtpCode);
                         }}
-                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-[11px] flex items-center space-x-1 shadow-md shadow-emerald-600/30 transition-all cursor-pointer"
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-[11px] flex items-center space-x-1 shadow-md shadow-emerald-600/30 transition-all cursor-pointer disabled:opacity-50"
                       >
                         <Sparkles className="w-3 h-3" />
                         <span>Auto-fill & Verify</span>
@@ -643,8 +669,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </div>
                   </div>
 
-                  <p className="text-[10px] text-slate-400 flex items-center space-x-1">
-                    <span>💡 <em>Test Mode: Click "Auto-fill & Verify" to instantly register. The real email was also sent to {email}.</em></span>
+                  <p className="text-[10px] text-app-muted flex items-center space-x-1">
+                    <span>
+                      <em>
+                        Temporary: shown when OTP_DEBUG is on or email delivery failed. Prefer the code from your inbox when email arrives.
+                      </em>
+                    </span>
                   </p>
                 </div>
               )}
@@ -663,12 +693,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     value={digit}
                     onChange={(e) => handleOtpDigitChange(idx, e.target.value)}
                     onKeyDown={(e) => handleOtpKeyDown(idx, e)}
-                    className="w-11 h-13 sm:w-12 sm:h-14 bg-[#0B0D11] border-2 border-slate-700 focus:border-rose-500 rounded-xl text-center text-lg sm:text-xl font-bold font-mono text-white focus:outline-none focus:ring-2 focus:ring-rose-500/30 transition-all"
+                    className="w-11 h-13 sm:w-12 sm:h-14 bg-app-input border-2 border-hairline focus:border-rose-500 rounded-xl text-center text-lg sm:text-xl font-bold font-mono text-app-heading focus:outline-none focus:ring-2 focus:ring-rose-500/30 transition-all"
                   />
                 ))}
               </div>
 
-              <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+              <div className="flex items-center justify-between text-xs text-app-muted px-1">
                 <span className="flex items-center space-x-1.5">
                   <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
                   <span>
@@ -689,7 +719,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowOtpScreen(false)}
-                  className="text-slate-400 hover:text-white hover:underline cursor-pointer"
+                  className="text-app-muted hover:text-app-heading hover:underline cursor-pointer"
                 >
                   Change Email
                 </button>
@@ -699,7 +729,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 type="button"
                 onClick={() => handleVerifyOtpCode()}
                 disabled={isLoading || otpDigits.join('').length < 6}
-                className="w-full py-3 bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all disabled:opacity-50 cursor-pointer"
+                className="w-full py-3 bg-flirt hover:brightness-110 text-white rounded-app font-semibold text-sm flex items-center justify-center space-x-2 shadow-brand transition-all disabled:opacity-50 cursor-pointer"
               >
                 {isLoading ? (
                   <>
@@ -721,7 +751,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <form onSubmit={handleStartRegistration} className="space-y-4">
               {/* Role Selection */}
               <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-2">
+                <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-2">
                   CHOOSE YOUR ACCOUNT TYPE *
                 </label>
                 <div className="grid grid-cols-3 gap-2.5">
@@ -731,11 +761,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className={`py-3 px-2 rounded-2xl border text-center transition-all relative overflow-hidden flex items-center justify-center space-x-1.5 ${
                       selectedRole === 'male_user'
                         ? 'bg-indigo-950/40 border-indigo-500 ring-2 ring-indigo-500/40'
-                        : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
+                        : 'bg-app-input border-hairline text-app-muted hover:border-brand/40'
                     }`}
                   >
                     <span className="text-base">👨</span>
-                    <span className="text-xs font-bold text-white">Male User</span>
+                    <span className="text-xs font-bold text-app-heading">Male User</span>
                     {selectedRole === 'male_user' && (
                       <Check className="w-3 h-3 text-indigo-400 absolute top-2 right-2" />
                     )}
@@ -747,11 +777,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className={`py-3 px-2 rounded-2xl border text-center transition-all relative overflow-hidden flex items-center justify-center space-x-1.5 ${
                       selectedRole === 'female_user' || selectedRole === 'female_creator'
                         ? 'bg-rose-950/40 border-rose-500 ring-2 ring-rose-500/40'
-                        : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
+                        : 'bg-app-input border-hairline text-app-muted hover:border-brand/40'
                     }`}
                   >
                     <span className="text-base">👩</span>
-                    <span className="text-xs font-bold text-white">Female User</span>
+                    <span className="text-xs font-bold text-app-heading">Female User</span>
                     {(selectedRole === 'female_user' || selectedRole === 'female_creator') && (
                       <Check className="w-3 h-3 text-rose-400 absolute top-2 right-2" />
                     )}
@@ -763,11 +793,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className={`py-3 px-2 rounded-2xl border text-center transition-all relative overflow-hidden flex items-center justify-center space-x-1.5 ${
                       selectedRole === 'other_user'
                         ? 'bg-purple-950/40 border-purple-500 ring-2 ring-purple-500/40'
-                        : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
+                        : 'bg-app-input border-hairline text-app-muted hover:border-brand/40'
                     }`}
                   >
                     <span className="text-base">✨</span>
-                    <span className="text-xs font-bold text-white">Other User</span>
+                    <span className="text-xs font-bold text-app-heading">Other User</span>
                     {selectedRole === 'other_user' && (
                       <Check className="w-3 h-3 text-purple-400 absolute top-2 right-2" />
                     )}
@@ -777,7 +807,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               {/* Full Name */}
               <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
+                <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-1">
                   FULL NAME / DISPLAY HANDLE *
                 </label>
                 <div className="relative">
@@ -788,14 +818,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     placeholder="e.g. Jessica Sterling or Alex Hunter"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                    className="w-full bg-app-input border border-hairline rounded-xl pl-10 pr-4 py-2.5 text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-rose-500"
                   />
                 </div>
               </div>
 
               {/* Email Address */}
               <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
+                <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-1">
                   EMAIL ADDRESS (FOR SUPABASE OTP) *
                 </label>
                 <div className="relative">
@@ -806,7 +836,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     placeholder="name@example.com"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                    className="w-full bg-app-input border border-hairline rounded-xl pl-10 pr-4 py-2.5 text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-rose-500"
                   />
                 </div>
               </div>
@@ -835,10 +865,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </div>
 
               {/* Security & Zero KYC Notice */}
-              <div className="p-3 bg-slate-900/70 border border-slate-800 rounded-xl flex items-start space-x-2.5 text-[11px] text-slate-400">
+              <div className="p-3 bg-app-input border border-hairline rounded-xl flex items-start space-x-2.5 text-[11px] text-app-muted">
                 <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                 <div>
-                  <strong className="text-white">Seamless Zero-Friction Onboarding:</strong> An email OTP will be sent to confirm your identity. After email OTP, you configure your bio & Cloudflare R2 media. KYC documents are only requested when requesting your first earnings payout.
+                  <strong className="text-app-heading">Seamless Zero-Friction Onboarding:</strong> An email OTP will be sent to confirm your identity. After email OTP, you configure your bio & Cloudflare R2 media. KYC documents are only requested when requesting your first earnings payout.
                 </div>
               </div>
 
@@ -849,7 +879,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   !evaluatePasswordStrength(password).isValid ||
                   password !== confirmPassword
                 }
-                className="w-full py-3 bg-gradient-to-r from-rose-600 via-pink-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full py-3 bg-flirt hover:brightness-110 text-white rounded-app font-semibold text-sm flex items-center justify-center space-x-2 shadow-brand transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isLoading ? (
                   <>
@@ -871,11 +901,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <div className="space-y-4">
               {!resetOtpSent ? (
                 <form onSubmit={handleRequestResetOtp} className="space-y-3.5">
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-app-muted">
                     Enter the email on your account. We will send a 6-digit code so you can set a new password.
                   </p>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
+                    <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-1">
                       EMAIL ADDRESS
                     </label>
                     <div className="relative">
@@ -886,7 +916,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         placeholder="you@example.com"
                         value={resetEmail}
                         onChange={(e) => setResetEmail(e.target.value)}
-                        className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                        className="w-full bg-app-input border border-hairline rounded-xl pl-10 pr-4 py-2.5 text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-rose-500"
                         autoFocus
                       />
                     </div>
@@ -894,7 +924,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <button
                     type="submit"
                     disabled={isLoading}
-                    className="w-full py-3 bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50"
+                    className="w-full py-3 bg-flirt hover:brightness-110 text-white rounded-app font-semibold text-sm flex items-center justify-center space-x-2 shadow-brand transition-all cursor-pointer disabled:opacity-50"
                   >
                     {isLoading ? (
                       <>
@@ -912,15 +942,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               ) : (
                 <form onSubmit={handleCompletePasswordReset} className="space-y-4">
                   <div className="text-center space-y-1">
-                    <p className="text-xs text-slate-400">
-                      Enter the code sent to <strong className="text-white">{resetEmail}</strong>, then choose a strong password.
+                    <p className="text-xs text-app-muted">
+                      Enter the code sent to <strong className="text-app-heading">{resetEmail}</strong>, then choose a strong password.
                     </p>
                   </div>
 
                   {receivedOtpCode && (
                     <div className="p-3 bg-emerald-950/40 border border-emerald-500/40 rounded-xl flex items-center justify-between gap-2">
                       <span className="text-[11px] text-emerald-300 font-mono">
-                        Test OTP: <strong className="tracking-widest">{receivedOtpCode}</strong>
+                        Dev / delivery-fallback OTP:{' '}
+                        <strong className="tracking-widest">{receivedOtpCode}</strong>
                       </span>
                       <button
                         type="button"
@@ -938,7 +969,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   )}
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-2">
+                    <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-2">
                       6-DIGIT CODE
                     </label>
                     <div className="flex justify-between gap-2">
@@ -954,7 +985,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           value={digit}
                           onChange={(e) => handleOtpDigitChange(idx, e.target.value)}
                           onKeyDown={(e) => handleOtpKeyDown(idx, e)}
-                          className="w-10 h-11 sm:w-11 sm:h-12 text-center text-base font-bold font-mono bg-[#0B0D11] border border-slate-800 rounded-xl text-white focus:outline-none focus:border-rose-500"
+                          className="w-10 h-11 sm:w-11 sm:h-12 text-center text-base font-bold font-mono bg-app-input border border-hairline rounded-xl text-app-heading focus:outline-none focus:border-rose-500"
                           aria-label={`Digit ${idx + 1}`}
                         />
                       ))}
@@ -1012,7 +1043,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       !evaluatePasswordStrength(resetPassword).isValid ||
                       resetPassword !== resetConfirmPassword
                     }
-                    className="w-full py-3 bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full py-3 bg-flirt hover:brightness-110 text-white rounded-app font-semibold text-sm flex items-center justify-center space-x-2 shadow-brand transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isLoading ? (
                       <>
@@ -1031,183 +1062,88 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           ) : (
             /* ========================================================================= */
-            /* LOGIN FORM (EMAIL / PHONE)                                                */
+            /* LOGIN FORM (EMAIL + PASSWORD)                                             */
             /* ========================================================================= */
-            <div className="space-y-4">
-              {/* Method Selector Tabs */}
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setAuthMethod('email')}
-                  className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all ${
-                    authMethod === 'email'
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
-                      : 'bg-slate-900/60 text-slate-400 border-slate-800 hover:text-white'
-                  }`}
-                >
-                  <Mail className="w-3.5 h-3.5" />
-                  <span>Email</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setAuthMethod('phone')}
-                  className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all ${
-                    authMethod === 'phone'
-                      ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/50'
-                      : 'bg-slate-900/60 text-slate-400 border-slate-800 hover:text-white'
-                  }`}
-                >
-                  <Smartphone className="w-3.5 h-3.5" />
-                  <span>Phone OTP</span>
-                </button>
+            <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-1">
+                  EMAIL ADDRESS
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                  <input
+                    type="email"
+                    required
+                    placeholder="alex@example.com"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    className="w-full bg-app-input border border-hairline rounded-xl pl-10 pr-4 py-2.5 text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-rose-500"
+                    autoFocus
+                    autoComplete="email"
+                  />
+                </div>
               </div>
 
-              {/* Email Login */}
-              {authMethod === 'email' && (
-                <form onSubmit={handleLoginSubmit} className="space-y-3.5">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
-                      EMAIL ADDRESS OR USERNAME
-                    </label>
-                    <div className="relative">
-                      <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                      <input
-                        type="text"
-                        required
-                        placeholder="alex@example.com or Alex Hunter"
-                        value={loginEmail}
-                        onChange={(e) => setLoginEmail(e.target.value)}
-                        className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
-                        autoFocus
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider">
-                        PASSWORD
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMode('reset');
-                          setResetEmail(loginEmail.includes('@') ? loginEmail.trim() : '');
-                          setResetOtpSent(false);
-                          setErrorMessage(null);
-                          setSuccessMessage(null);
-                        }}
-                        className="text-[11px] text-rose-400 hover:text-rose-300 font-mono"
-                      >
-                        Forgot password?
-                      </button>
-                    </div>
-                    <div className="relative">
-                      <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                      <input
-                        type={showLoginPassword ? 'text' : 'password'}
-                        required
-                        placeholder="••••••••"
-                        value={loginPassword}
-                        onChange={(e) => setLoginPassword(e.target.value)}
-                        autoComplete="current-password"
-                        className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowLoginPassword((prev) => !prev)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
-                        title={showLoginPassword ? 'Hide password' : 'Show password'}
-                        aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
-                      >
-                        {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isLoading}
-                    className="w-full py-3 bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-rose-600/30 transition-all cursor-pointer disabled:opacity-50"
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Signing In to Supabase...</span>
-                      </>
-                    ) : (
-                      <>
-                        <LogIn className="w-4 h-4" />
-                        <span>Sign In</span>
-                      </>
-                    )}
-                  </button>
-                </form>
-              )}
-
-              {/* Phone OTP Login */}
-              {authMethod === 'phone' && (
-                <div className="space-y-3.5">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
-                      MOBILE PHONE NUMBER
-                    </label>
-                    <div className="flex space-x-2">
-                      <div className="relative flex-1">
-                        <Smartphone className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                        <input
-                          type="tel"
-                          placeholder="+1 (555) 019-2834"
-                          value={loginPhone}
-                          onChange={(e) => setLoginPhone(e.target.value)}
-                          className="w-full bg-[#0B0D11] border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!loginPhone) {
-                            setErrorMessage('Please enter your mobile phone number.');
-                            return;
-                          }
-                          setLoginPhoneOtpSent(true);
-                          setLoginPhoneOtp('123456');
-                          showToast('SMS OTP Code: 123456', 'Simulated 6-digit verification code.', 'info');
-                        }}
-                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shrink-0 cursor-pointer"
-                      >
-                        {loginPhoneOtpSent ? 'Resend' : 'Send Code'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {loginPhoneOtpSent && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1">
-                        ENTER 6-DIGIT SMS CODE
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="123456"
-                        value={loginPhoneOtp}
-                        onChange={(e) => setLoginPhoneOtp(e.target.value)}
-                        className="w-full px-3 py-2.5 bg-[#0B0D11] border border-slate-800 rounded-xl text-xs text-white text-center tracking-widest font-mono text-base placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                      />
-                    </div>
-                  )}
-
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider">
+                    PASSWORD
+                  </label>
                   <button
                     type="button"
-                    onClick={() => handleLoginSubmit()}
-                    className="w-full py-3 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white rounded-xl font-bold text-xs flex items-center justify-center space-x-2 shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
+                    onClick={() => {
+                      setMode('reset');
+                      setResetEmail(loginEmail.includes('@') ? loginEmail.trim() : '');
+                      setResetOtpSent(false);
+                      setErrorMessage(null);
+                      setSuccessMessage(null);
+                    }}
+                    className="text-[11px] text-rose-400 hover:text-rose-300 font-mono"
                   >
-                    <LogIn className="w-4 h-4" />
-                    <span>Verify & Sign In</span>
+                    Forgot password?
                   </button>
                 </div>
-              )}
-            </div>
+                <div className="relative">
+                  <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                  <input
+                    type={showLoginPassword ? 'text' : 'password'}
+                    required
+                    placeholder="••••••••"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    autoComplete="current-password"
+                    className="w-full bg-app-input border border-hairline rounded-xl pl-10 pr-10 py-2.5 text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-rose-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword((prev) => !prev)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-app-muted hover:text-app-heading transition-colors"
+                    title={showLoginPassword ? 'Hide password' : 'Show password'}
+                    aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full py-3 bg-flirt hover:brightness-110 text-white rounded-app font-semibold text-sm flex items-center justify-center space-x-2 shadow-brand transition-all cursor-pointer disabled:opacity-50"
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Signing In...</span>
+                  </>
+                ) : (
+                  <>
+                    <LogIn className="w-4 h-4" />
+                    <span>Sign In</span>
+                  </>
+                )}
+              </button>
+            </form>
           )}
         </div>
       </div>

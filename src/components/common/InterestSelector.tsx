@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Heart,
   Sparkles,
@@ -16,9 +17,8 @@ import {
   ChevronDown,
   Layers,
 } from 'lucide-react';
-import { InterestItem, InterestCategory } from '../../types';
+import { InterestCategory } from '../../types';
 import {
-  ALL_INTERESTS,
   INTEREST_CATEGORIES,
   getAllowedInterests,
   findInterestByIdOrName,
@@ -74,7 +74,10 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Available interests derived from system settings
   const activeAllowed = allowedInterests || systemSettings.allowedInterests;
@@ -95,11 +98,9 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
   // Filtered interests
   const filteredInterests = useMemo(() => {
     return availableInterests.filter((item) => {
-      // Category filter
       if (selectedCategory !== 'all' && item.category !== selectedCategory) {
         return false;
       }
-      // Search filter
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchesName = item.name.toLowerCase().includes(q);
@@ -110,17 +111,68 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
     });
   }, [availableInterests, selectedCategory, searchQuery]);
 
-  // Close on outside click
+  const updateMenuPosition = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+
+    const rect = trigger.getBoundingClientRect();
+    const gap = 4;
+    const maxMenuHeight = 320;
+    const spaceBelow = window.innerHeight - rect.bottom - gap;
+    const spaceAbove = rect.top - gap;
+    const openUpward = spaceBelow < Math.min(maxMenuHeight, 240) && spaceAbove > spaceBelow;
+    const available = Math.max(160, openUpward ? spaceAbove : spaceBelow);
+    const height = Math.min(maxMenuHeight, available);
+
+    setMenuStyle({
+      position: 'fixed',
+      left: rect.left,
+      width: Math.max(rect.width, 280),
+      maxWidth: 'min(100vw - 16px, 560px)',
+      zIndex: 9999,
+      maxHeight: height,
+      ...(openUpward
+        ? { bottom: window.innerHeight - rect.top + gap }
+        : { top: rect.bottom + gap }),
+    });
+  }, []);
+
   useEffect(() => {
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+    if (!isOpen) return;
+
+    updateMenuPosition();
+
+    const handleReposition = () => updateMenuPosition();
+    window.addEventListener('resize', handleReposition);
+    window.addEventListener('scroll', handleReposition, true);
+
+    return () => {
+      window.removeEventListener('resize', handleReposition);
+      window.removeEventListener('scroll', handleReposition, true);
+    };
+  }, [isOpen, updateMenuPosition]);
+
+  // Close on outside click with safe delay so option clicks register cleanly
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleClickOutside = (e: MouseEvent | TouchEvent | PointerEvent) => {
+      const target = e.target as Node;
+      const inTrigger = containerRef.current?.contains(target);
+      const inDropdown = dropdownRef.current?.contains(target);
+      if (!inTrigger && !inDropdown) {
         setIsOpen(false);
       }
     };
-    if (isOpen) {
-      document.addEventListener('mousedown', handleOutsideClick);
-    }
-    return () => document.removeEventListener('mousedown', handleOutsideClick);
+
+    const timer = setTimeout(() => {
+      document.addEventListener('pointerdown', handleClickOutside);
+    }, 10);
+
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('pointerdown', handleClickOutside);
+    };
   }, [isOpen]);
 
   const toggleInterest = (itemName: string) => {
@@ -139,6 +191,7 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
   };
 
   const removeInterest = (itemName: string, e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
     const next = selectedInterests.filter((i) => {
       const found = findInterestByIdOrName(i);
@@ -147,6 +200,156 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
     });
     onChange(next);
   };
+
+  const dropdownPanel =
+    isOpen && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            ref={dropdownRef}
+            style={menuStyle}
+            className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col"
+            onPointerDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Search & Action Bar */}
+            <div className="p-2.5 border-b border-slate-800 bg-slate-950/90 sticky top-0 z-10 space-y-2 shrink-0">
+              <div className="flex items-center justify-between gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="Search interests & passions..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-8 pr-8 py-1.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-medium"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setSearchQuery('');
+                      }}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsOpen(false);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shrink-0 transition-colors cursor-pointer"
+                >
+                  Done ({selectedInterests.length})
+                </button>
+              </div>
+
+              {/* Category Pills Slider */}
+              <div className="flex items-center space-x-1.5 overflow-x-auto pb-0.5 scrollbar-none text-[11px] font-medium select-none">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSelectedCategory('all');
+                  }}
+                  className={`px-2.5 py-1 rounded-lg shrink-0 transition-colors flex items-center space-x-1 cursor-pointer ${
+                    selectedCategory === 'all'
+                      ? 'bg-indigo-600 text-white font-bold'
+                      : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                  }`}
+                >
+                  <Layers className="w-3 h-3" />
+                  <span>All Categories</span>
+                </button>
+
+                {INTEREST_CATEGORIES.map((cat) => (
+                  <button
+                    key={cat.key}
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setSelectedCategory(cat.key);
+                    }}
+                    className={`px-2.5 py-1 rounded-lg shrink-0 transition-colors flex items-center space-x-1 cursor-pointer ${
+                      selectedCategory === cat.key
+                        ? 'bg-indigo-600 text-white font-bold shadow'
+                        : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    <span>{getCategoryIcon(cat.key, 'w-3 h-3')}</span>
+                    <span>{cat.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Categorized Interests Grid */}
+            <div className="overflow-y-auto p-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-1.5 flex-1 min-h-0">
+              {filteredInterests.length === 0 ? (
+                <div className="col-span-full py-8 text-center text-xs text-slate-500 font-mono">
+                  No active interests found in this category.
+                </div>
+              ) : (
+                filteredInterests.map((interest) => {
+                  const isSelected = selectedNormalized.has(interest.name);
+                  return (
+                    <button
+                      key={interest.id}
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        toggleInterest(interest.name);
+                      }}
+                      className={`p-2 rounded-xl flex items-center justify-between text-left transition-all cursor-pointer select-none ${
+                        isSelected
+                          ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40 shadow-sm'
+                          : 'bg-slate-950/50 hover:bg-slate-800 border border-slate-800/60 text-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2 min-w-0 pr-1 pointer-events-none">
+                        <span
+                          className={`p-1 rounded-md shrink-0 ${
+                            isSelected ? 'bg-indigo-500/20 text-indigo-300' : 'bg-slate-900 text-slate-400'
+                          }`}
+                        >
+                          {getCategoryIcon(interest.category, 'w-3 h-3')}
+                        </span>
+                        <span
+                          className={`text-xs font-bold truncate ${isSelected ? 'text-indigo-300' : 'text-white'}`}
+                        >
+                          {interest.name}
+                        </span>
+                      </div>
+
+                      <div
+                        className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 border transition-all pointer-events-none ${
+                          isSelected
+                            ? 'bg-indigo-600 border-indigo-500 text-white'
+                            : 'border-slate-700 bg-slate-900'
+                        }`}
+                      >
+                        {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>,
+          document.body
+        )
+      : null;
 
   return (
     <div className={`space-y-2 ${className}`} ref={containerRef}>
@@ -164,7 +367,16 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
 
       {/* Selected Chips Box / Dropdown Opener */}
       <div
-        onClick={() => !disabled && setIsOpen(!isOpen)}
+        ref={triggerRef}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (disabled) return;
+          if (!isOpen) {
+            updateMenuPosition();
+          }
+          setIsOpen((prev) => !prev);
+        }}
         className={`min-h-[48px] p-2 bg-slate-950 border rounded-xl sm:rounded-2xl flex flex-wrap items-center gap-1.5 transition-all cursor-pointer select-none relative ${
           isOpen
             ? 'border-indigo-500 ring-2 ring-indigo-500/20 bg-slate-900 shadow-lg'
@@ -201,127 +413,15 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
           })
         )}
 
-        <div className="ml-auto pl-1 flex items-center space-x-1 shrink-0 text-slate-400">
-          <Plus className="w-4 h-4 hover:text-indigo-400 transition-colors" />
-          <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180 text-indigo-400' : ''}`} />
+        <div className="ml-auto pl-1 flex items-center space-x-1 shrink-0 text-slate-400 pointer-events-none">
+          <Plus className="w-4 h-4" />
+          <ChevronDown
+            className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180 text-indigo-400' : ''}`}
+          />
         </div>
       </div>
 
-      {/* Interactive Categorized Drawer */}
-      {isOpen && (
-        <div className="relative z-50">
-          <div className="absolute left-0 right-0 top-1 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col max-h-80">
-            {/* Search & Action Bar */}
-            <div className="p-2.5 border-b border-slate-800 bg-slate-950/90 sticky top-0 z-10 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="relative flex-1">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    autoFocus
-                    placeholder="Search interests & passions..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-8 pr-8 py-1.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-medium"
-                  />
-                  {searchQuery && (
-                    <button
-                      type="button"
-                      onClick={() => setSearchQuery('')}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsOpen(false)}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shrink-0 transition-colors"
-                >
-                  Done ({selectedInterests.length})
-                </button>
-              </div>
-
-              {/* Category Pills Slider */}
-              <div className="flex items-center space-x-1.5 overflow-x-auto pb-0.5 scrollbar-none text-[11px] font-medium select-none">
-                <button
-                  type="button"
-                  onClick={() => setSelectedCategory('all')}
-                  className={`px-2.5 py-1 rounded-lg shrink-0 transition-colors flex items-center space-x-1 ${
-                    selectedCategory === 'all'
-                      ? 'bg-indigo-600 text-white font-bold'
-                      : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
-                  }`}
-                >
-                  <Layers className="w-3 h-3" />
-                  <span>All Categories</span>
-                </button>
-
-                {INTEREST_CATEGORIES.map((cat) => (
-                  <button
-                    key={cat.key}
-                    type="button"
-                    onClick={() => setSelectedCategory(cat.key)}
-                    className={`px-2.5 py-1 rounded-lg shrink-0 transition-colors flex items-center space-x-1 ${
-                      selectedCategory === cat.key
-                        ? 'bg-indigo-600 text-white font-bold shadow'
-                        : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
-                    }`}
-                  >
-                    <span>{getCategoryIcon(cat.key, 'w-3 h-3')}</span>
-                    <span>{cat.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Categorized Interests Grid */}
-            <div className="overflow-y-auto p-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-1.5 max-h-56">
-              {filteredInterests.length === 0 ? (
-                <div className="col-span-full py-8 text-center text-xs text-slate-500 font-mono">
-                  No active interests found in this category.
-                </div>
-              ) : (
-                filteredInterests.map((interest) => {
-                  const isSelected = selectedNormalized.has(interest.name);
-                  return (
-                    <button
-                      key={interest.id}
-                      type="button"
-                      onClick={() => toggleInterest(interest.name)}
-                      className={`p-2 rounded-xl flex items-center justify-between text-left transition-all cursor-pointer select-none ${
-                        isSelected
-                          ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40 shadow-sm'
-                          : 'bg-slate-950/50 hover:bg-slate-800 border border-slate-800/60 text-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-2 min-w-0 pr-1">
-                        <span className={`p-1 rounded-md shrink-0 ${
-                          isSelected ? 'bg-indigo-500/20 text-indigo-300' : 'bg-slate-900 text-slate-400'
-                        }`}>
-                          {getCategoryIcon(interest.category, 'w-3 h-3')}
-                        </span>
-                        <span className={`text-xs font-bold truncate ${isSelected ? 'text-indigo-300' : 'text-white'}`}>
-                          {interest.name}
-                        </span>
-                      </div>
-
-                      <div className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 border transition-all ${
-                        isSelected
-                          ? 'bg-indigo-600 border-indigo-500 text-white'
-                          : 'border-slate-700 bg-slate-900'
-                      }`}>
-                        {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
-                      </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      {dropdownPanel}
     </div>
   );
 };

@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { X, Coins, PlusCircle, MinusCircle, ShieldCheck, Sparkles, User, RefreshCw } from 'lucide-react';
+import { X, PlusCircle, MinusCircle, RefreshCw } from 'lucide-react';
 import { UserProfile } from '../../types';
+import { postAdminFundingCredit } from '../../services/financeApi';
+import { coinsToUsd, getCoinUsdPeg, formatPegExample } from '../../../shared/finance/fx';
 
 interface ManualCoinModalProps {
   isOpen: boolean;
@@ -14,7 +16,7 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
   onClose,
   targetUserId,
 }) => {
-  const { users, manualGrantCoins } = useApp();
+  const { users, showToast, systemSettings } = useApp();
 
   const [selectedUserId, setSelectedUserId] = useState<string>('');
   const [amount, setAmount] = useState<number>(500);
@@ -22,6 +24,7 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
   const [reason, setReason] = useState<string>('🎁 Loyalty / Promotional Gift');
   const [customReason, setCustomReason] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (targetUserId) {
@@ -29,14 +32,14 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
     } else if (users.length > 0 && !selectedUserId) {
       setSelectedUserId(users[0].id);
     }
-  }, [targetUserId, users]);
+  }, [targetUserId, users, selectedUserId]);
 
   if (!isOpen) return null;
 
   const targetUser: UserProfile | undefined = users.find((u) => u.id === selectedUserId) || users[0];
   const currentBalance = targetUser?.coinBalance || 0;
+  const peg = getCoinUsdPeg(systemSettings);
 
-  // Calculate new balance preview
   let newBalancePreview = currentBalance;
   if (operation === 'add') {
     newBalancePreview = currentBalance + (Number(amount) || 0);
@@ -46,25 +49,70 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
     newBalancePreview = Math.max(0, Number(amount) || 0);
   }
 
-  const handleApply = (e: React.FormEvent) => {
+  let creditCoinsPreview = 0;
+  if (operation === 'add') {
+    creditCoinsPreview = Math.max(0, Number(amount) || 0);
+  } else if (operation === 'set') {
+    creditCoinsPreview = Math.max(0, (Number(amount) || 0) - (Number(targetUser?.coinBalance) || 0));
+  }
+  const pegValuePreview = coinsToUsd(creditCoinsPreview, peg);
+
+  const handleApply = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!targetUser) return;
 
-    setIsSubmitting(true);
+    setError(null);
     const numAmount = Math.max(0, Number(amount) || 0);
     const finalReason = reason === 'Other / Custom' ? customReason || 'Manual Admin Credit' : reason;
 
-    if (operation === 'add') {
-      manualGrantCoins(targetUser.id, numAmount, finalReason);
-    } else if (operation === 'subtract') {
-      manualGrantCoins(targetUser.id, -numAmount, finalReason);
-    } else if (operation === 'set') {
-      const currentBal = Number(targetUser.coinBalance) || 0;
-      const diff = numAmount - currentBal;
-      manualGrantCoins(targetUser.id, diff, `Balance Set to ${numAmount} (${finalReason})`);
+    let creditCoins = numAmount;
+    if (operation === 'subtract') {
+      setError('Coin debits are not supported in Phase 1. Use credit (+) only — ledger requires PURCHASE funding.');
+      return;
+    }
+    if (operation === 'set') {
+      const diff = numAmount - (Number(targetUser.coinBalance) || 0);
+      if (diff <= 0) {
+        setError(
+          diff === 0
+            ? 'Balance already matches target — no credit needed.'
+            : 'Setting a lower balance (debit) is not supported in Phase 1.'
+        );
+        return;
+      }
+      creditCoins = diff;
     }
 
+    if (creditCoins <= 0) {
+      setError('Enter a positive coin amount.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    const res = await postAdminFundingCredit({
+      userId: targetUser.id,
+      amountCoins: creditCoins,
+      reason:
+        operation === 'set'
+          ? `Balance Set to ${numAmount} (${finalReason})`
+          : finalReason,
+    });
     setIsSubmitting(false);
+
+    if (!res.success || !res.data) {
+      const msg = res.error?.message || 'Ledger post failed — balance was not updated.';
+      setError(msg);
+      showToast('Admin credit failed', msg, 'error');
+      return;
+    }
+
+    const newBalance = res.data.coinBalance;
+
+    showToast(
+      'Coins credited via ledger',
+      `+${creditCoins.toLocaleString()} PURCHASE (ADMIN_MANUAL) → ${(newBalance ?? 0).toLocaleString()} coins`,
+      'success'
+    );
     onClose();
   };
 
@@ -73,7 +121,6 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md overflow-y-auto">
       <div className="relative w-full max-w-lg bg-[#161920] border border-slate-800 rounded-xl shadow-2xl overflow-hidden my-6">
-        {/* Header */}
         <div className="flex items-center justify-between p-4 bg-[#0F1115] border-b border-slate-800">
           <div className="flex items-center space-x-2.5">
             <div className="w-8 h-8 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-sm shadow-md">
@@ -81,13 +128,15 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h2 className="text-sm font-black text-white uppercase tracking-wider font-mono">Manual Coin Credit & Debit</h2>
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono font-bold">
-                  ADMIN TOOL
+                <h2 className="text-sm font-black text-white uppercase tracking-wider font-mono">
+                  Admin Coin Credit (PURCHASE)
+                </h2>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono font-bold">
+                  LEDGER
                 </span>
               </div>
               <p className="text-[10px] text-slate-400 font-sans">
-                Instantly adjust coin balance for any user account with audit tracking.
+                Credits post via Financial Module — wallet_ledger PURCHASE + coin_purchases.
               </p>
             </div>
           </div>
@@ -100,7 +149,6 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
         </div>
 
         <form onSubmit={handleApply} className="p-5 space-y-4">
-          {/* User Selection */}
           <div>
             <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
               Select Target User Account
@@ -118,7 +166,6 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
             </select>
           </div>
 
-          {/* User Profile Card */}
           {targetUser && (
             <div className="flex items-center justify-between p-3 bg-[#0F1115] border border-slate-800/80 rounded-lg">
               <div className="flex items-center space-x-3">
@@ -128,15 +175,8 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
                   className="w-10 h-10 rounded-full object-cover border border-slate-700"
                 />
                 <div>
-                  <div className="font-bold text-xs text-white flex items-center space-x-1.5">
-                    <span>{targetUser.name}</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-500/10 text-indigo-400 font-mono">
-                      {targetUser.id}
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                    Role: <span className="text-slate-200 uppercase">{targetUser.role.replace('_', ' ')}</span>
-                  </div>
+                  <div className="font-bold text-xs text-white">{targetUser.name}</div>
+                  <div className="text-[10px] text-slate-400 font-mono mt-0.5">{targetUser.id}</div>
                 </div>
               </div>
               <div className="text-right font-mono">
@@ -146,7 +186,6 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
             </div>
           )}
 
-          {/* Operation Toggle */}
           <div>
             <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1.5">
               Adjustment Operation
@@ -164,20 +203,19 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
                 <PlusCircle className="w-3.5 h-3.5" />
                 <span>Credit (+)</span>
               </button>
-
               <button
                 type="button"
                 onClick={() => setOperation('subtract')}
-                className={`py-1.5 px-3 rounded text-xs font-mono font-bold flex items-center justify-center space-x-1 border transition-all ${
+                className={`py-1.5 px-3 rounded text-xs font-mono font-bold flex items-center justify-center space-x-1 border transition-all opacity-60 ${
                   operation === 'subtract'
-                    ? 'bg-rose-600 text-white border-rose-500 shadow-md shadow-rose-600/20'
-                    : 'bg-[#0F1115] text-slate-400 border-slate-800 hover:text-white'
+                    ? 'bg-rose-600 text-white border-rose-500'
+                    : 'bg-[#0F1115] text-slate-400 border-slate-800'
                 }`}
+                title="Debits not supported in Phase 1"
               >
                 <MinusCircle className="w-3.5 h-3.5" />
                 <span>Debit (-)</span>
               </button>
-
               <button
                 type="button"
                 onClick={() => setOperation('set')}
@@ -191,9 +229,13 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
                 <span>Set Exact (=)</span>
               </button>
             </div>
+            {operation !== 'add' && (
+              <p className="text-[10px] text-amber-400/90 mt-1.5 font-mono">
+                Only positive credits post to PURCHASE ledger in Phase 1.
+              </p>
+            )}
           </div>
 
-          {/* Quick Preset Buttons */}
           <div>
             <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1.5">
               Quick Preset Amount
@@ -216,7 +258,6 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
             </div>
           </div>
 
-          {/* Amount Input */}
           <div>
             <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
               Custom Amount (Coins)
@@ -225,7 +266,7 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
               <span className="absolute left-3 top-2.5 text-xs text-amber-400 font-mono">🪙</span>
               <input
                 type="number"
-                min="0"
+                min="1"
                 value={amount}
                 onChange={(e) => setAmount(Number(e.target.value))}
                 className="w-full pl-8 pr-3 py-2 bg-[#0F1115] border border-slate-800 rounded text-xs text-white font-mono focus:outline-none focus:border-indigo-500 font-bold"
@@ -233,7 +274,6 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
             </div>
           </div>
 
-          {/* Reason Selection */}
           <div>
             <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
               Reason / Transaction Note
@@ -249,7 +289,6 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
               <option value="🏆 VIP Welcome Reward">🏆 VIP Welcome Reward</option>
               <option value="Other / Custom">Other / Custom Note...</option>
             </select>
-
             {reason === 'Other / Custom' && (
               <input
                 type="text"
@@ -261,33 +300,37 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
             )}
           </div>
 
-          {/* Audit Impact Box */}
-          <div className="p-3 bg-[#0F1115] border border-slate-800 rounded-lg flex items-center justify-between text-xs font-mono">
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase font-bold">New Account Balance</div>
-              <div className="text-slate-400 font-bold">
-                {(currentBalance ?? 0).toLocaleString()} ➔{' '}
-                <span
-                  className={
-                    newBalancePreview > currentBalance
-                      ? 'text-emerald-400 font-extrabold'
-                      : newBalancePreview < currentBalance
-                      ? 'text-rose-400 font-extrabold'
-                      : 'text-amber-300 font-extrabold'
-                  }
-                >
-                  {(newBalancePreview ?? 0).toLocaleString()} Coins
-                </span>
-              </div>
+          {error && (
+            <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-700/50 text-rose-200 text-xs font-mono">
+              {error}
             </div>
-            <div className="text-right">
+          )}
+
+          <div className="p-3 bg-[#0F1115] border border-slate-800 rounded-lg space-y-2 text-xs font-mono">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[10px] text-slate-500 uppercase font-bold">Preview balance</div>
+                <div className="text-slate-400 font-bold">
+                  {(currentBalance ?? 0).toLocaleString()} ➔{' '}
+                  <span className="text-emerald-400 font-extrabold">
+                    {(newBalancePreview ?? 0).toLocaleString()} Coins
+                  </span>
+                </div>
+              </div>
               <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold">
-                VERIFIED ADMIN ACTION
+                PURCHASE · ADMIN_MANUAL
               </span>
             </div>
+            {operation === 'add' || (operation === 'set' && creditCoinsPreview > 0) ? (
+              <div className="text-[10px] text-slate-500 border-t border-slate-800 pt-2">
+                Peg estimate (no cash paid):{' '}
+                <span className="text-cyan-300 font-bold">${pegValuePreview.toFixed(4)}</span>
+                {' '}liability @ Fixed Peg ({formatPegExample(peg)}). Paid USD stays empty;
+                funding tab shows peg_value_usd.
+              </div>
+            ) : null}
           </div>
 
-          {/* Actions */}
           <div className="flex items-center space-x-3 pt-2">
             <button
               type="button"
@@ -299,9 +342,9 @@ export const ManualCoinModal: React.FC<ManualCoinModalProps> = ({
             <button
               type="submit"
               disabled={isSubmitting}
-              className="flex-1 py-2 rounded text-xs font-mono font-bold text-white bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 shadow-lg shadow-indigo-600/30 transition-all"
+              className="flex-1 py-2 rounded text-xs font-mono font-bold text-white bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 shadow-lg shadow-indigo-600/30 transition-all disabled:opacity-50"
             >
-              {isSubmitting ? 'Processing...' : 'Confirm Coin Adjustment'}
+              {isSubmitting ? 'Posting ledger…' : 'Confirm PURCHASE Credit'}
             </button>
           </div>
         </form>

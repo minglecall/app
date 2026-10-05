@@ -52,6 +52,9 @@ import { normalizeMediaUrl } from '../../utils/r2Storage';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { SvgFlag } from '../common/SvgFlag';
 import { getUserEffectiveLocation } from '../../utils/location';
+import { getCoinUsdPeg } from '../../../shared/finance/fx';
+import { getHostPeriodTargetProgress } from '../../../shared/finance/hostPeriodTargetProgress';
+import { HostPeriodTargetProgressPanel } from '../common/HostPeriodTargetProgressPanel';
 
 interface HostMathAnalyticsModalProps {
   hostItem: RankedCreatorItem | null;
@@ -91,12 +94,15 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
     return callLogs.filter((l) => l.receiverId === user.id);
   }, [callLogs, user.id]);
 
-  // Financial Metrics
-  const femalePayoutRatio = systemSettings.femalePayoutRatioUSD ?? 0.008;
-  const totalEarnedCoins = user.earningsCoins || metrics.totalTargetCoins || 0;
+  // Financial Metrics — lifetime wallet balance ≠ period target coins (close uses creator_metrics)
+  const femalePayoutRatio = getCoinUsdPeg(systemSettings);
+  const periodTargetCoins =
+    Number(metrics.totalTargetCoins) ||
+    (Number(metrics.coinsEarnedFromCalls) || 0) + (Number(metrics.coinsEarnedFromGifts) || 0);
+  const totalEarnedCoins = user.earningsCoins || 0;
   const totalEarnedUSD = Number((totalEarnedCoins * femalePayoutRatio).toFixed(2));
-  const callCoins = metrics.coinsEarnedFromCalls || Math.round(totalEarnedCoins * 0.75);
-  const giftCoins = metrics.coinsEarnedFromGifts || Math.round(totalEarnedCoins * 0.25);
+  const callCoins = metrics.coinsEarnedFromCalls || 0;
+  const giftCoins = metrics.coinsEarnedFromGifts || 0;
   const bonusUSD = metrics.bonusEarnedUSD || (tier === 'gold' ? systemSettings.creatorTargetGoldBonusUSD : tier === 'silver' ? systemSettings.creatorTargetSilverBonusUSD : 0) || 0;
 
   // Dynamic Live Online Seconds & Hours
@@ -126,26 +132,35 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
     { name: 'Missed', value: missedCount, color: '#ef4444' },
   ].filter((d) => d.value > 0);
 
-  // Target Cycle Thresholds
+  // Target Cycle — bronze gate for share true-up (same as burn/settlement)
   const targetCycle = systemSettings.creatorTargetCycle || 'weekly';
+  const bronzeProgress = getHostPeriodTargetProgress({
+    creatorId: user.id,
+    periodHours: liveActiveHours,
+    periodCoins: periodTargetCoins,
+    systemSettings: systemSettings as unknown as Record<string, unknown>,
+    coinEarnOverrideRate: user.coinEarnOverrideRate,
+  });
+
+  // Tier ladder display (cash bonus); true-up gate uses bronzeProgress above
   const targetHours =
     tier === 'gold'
-      ? systemSettings.creatorTargetGoldHours ?? 60
+      ? systemSettings.creatorTargetGoldHours ?? bronzeProgress.bronzeHours
       : tier === 'silver'
-      ? systemSettings.creatorTargetSilverHours ?? 40
-      : systemSettings.creatorTargetBronzeHours ?? 20;
+      ? systemSettings.creatorTargetSilverHours ?? bronzeProgress.bronzeHours
+      : bronzeProgress.bronzeHours;
 
   const targetCoins =
     tier === 'gold'
-      ? systemSettings.creatorTargetGoldCoins ?? 60000
+      ? systemSettings.creatorTargetGoldCoins ?? bronzeProgress.bronzeCoins
       : tier === 'silver'
-      ? systemSettings.creatorTargetSilverCoins ?? 20000
-      : systemSettings.creatorTargetBronzeCoins ?? 5000;
+      ? systemSettings.creatorTargetSilverCoins ?? bronzeProgress.bronzeCoins
+      : bronzeProgress.bronzeCoins;
 
-  const currentCoins = metrics.totalTargetCoins || totalEarnedCoins;
+  const currentCoins = bronzeProgress.periodCoins;
 
-  const hoursPct = Math.min(100, Math.round((liveActiveHours / Math.max(1, targetHours)) * 100));
-  const coinsPct = Math.min(100, Math.round((currentCoins / Math.max(1, targetCoins)) * 100));
+  const hoursPct = bronzeProgress.pctHours;
+  const coinsPct = bronzeProgress.pctCoins;
 
   // Projected Discovery Placement Label
   const placementLabel =
@@ -523,7 +538,7 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
                     🪙 {totalEarnedCoins.toLocaleString()} coins balance
                   </div>
                   <div className="text-[10px] text-slate-500 font-mono">
-                    Includes calls + gifts + bonuses
+                    Payout USD @ Coin USD Peg (Economy → D). Includes calls + gifts + bonuses.
                   </div>
                 </div>
               </div>
@@ -722,10 +737,9 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
             </div>
           )}
 
-          {/* ================= VIEW 3: DUAL TARGET ENGINE PROGRESS ================= */}
+          {/* ================= VIEW 3: BRONZE TRUE-UP GATE + TIER LADDER ================= */}
           {activeTab === 'targets' && (
             <div className="space-y-5 text-xs font-mono">
-              {/* Cycle Standing Banner */}
               <div className="p-4 bg-[#0F1115] border border-slate-800 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
                 <div>
                   <div className="flex items-center space-x-2">
@@ -740,59 +754,61 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
                 </div>
 
                 <div className="text-right font-mono">
-                  <span className="text-[10px] text-slate-400 uppercase block">Bonus for Completion</span>
+                  <span className="text-[10px] text-slate-400 uppercase block">Tier cash bonus (separate)</span>
                   <span className="text-lg font-black text-emerald-400">+${bonusUSD.toFixed(2)} USD</span>
                 </div>
               </div>
 
-              {/* Dual Goal Progress Trackers */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Goal 1: Hours */}
-                <div className="p-4 bg-[#0F1115] border border-slate-800 rounded-xl space-y-2.5">
-                  <div className="flex items-center justify-between font-bold">
-                    <span className="text-slate-300 flex items-center gap-1.5">
-                      <Clock className="w-4 h-4 text-indigo-400" />
-                      <span>Active Online Hours</span>
-                    </span>
-                    <span className="text-white">
-                      {liveActiveHours}h <span className="text-slate-500">/ {targetHours}h</span>
-                    </span>
-                  </div>
-                  <div className="w-full bg-slate-900 h-3 rounded-full overflow-hidden border border-slate-800 p-0.5">
-                    <div
-                      style={{ width: `${hoursPct}%` }}
-                      className="bg-gradient-to-r from-indigo-500 to-blue-400 h-full rounded-full"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span>{hoursPct}% Completed</span>
-                    <span>{Math.max(0, Number((targetHours - liveActiveHours).toFixed(1)))}h remaining</span>
-                  </div>
-                </div>
+              <HostPeriodTargetProgressPanel
+                progress={bronzeProgress}
+                variant="admin"
+                showDeepLinks
+              />
 
-                {/* Goal 2: Revenue */}
-                <div className="p-4 bg-[#0F1115] border border-slate-800 rounded-xl space-y-2.5">
-                  <div className="flex items-center justify-between font-bold">
-                    <span className="text-slate-300 flex items-center gap-1.5">
-                      <Coins className="w-4 h-4 text-amber-400" />
-                      <span>Coin Revenue</span>
-                    </span>
-                    <span className="text-amber-400">
-                      {currentCoins.toLocaleString()} <span className="text-slate-500">/ {targetCoins.toLocaleString()} 🪙</span>
-                    </span>
+              {/* Higher-tier ladder (cash bonus) — not the true-up gate */}
+              {(tier === 'bronze' || tier === 'silver') && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 opacity-90">
+                  <div className="p-4 bg-[#0F1115] border border-slate-800 rounded-xl space-y-2.5">
+                    <div className="flex items-center justify-between font-bold">
+                      <span className="text-slate-300 flex items-center gap-1.5">
+                        <Clock className="w-4 h-4 text-indigo-400" />
+                        <span>Next-tier hours ({tier === 'bronze' ? 'silver' : 'gold'})</span>
+                      </span>
+                      <span className="text-white">
+                        {liveActiveHours}h <span className="text-slate-500">/ {targetHours}h</span>
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-900 h-3 rounded-full overflow-hidden border border-slate-800 p-0.5">
+                      <div
+                        style={{
+                          width: `${Math.min(100, Math.round((liveActiveHours / Math.max(1, targetHours)) * 100))}%`,
+                        }}
+                        className="bg-gradient-to-r from-indigo-500/70 to-blue-400/70 h-full rounded-full"
+                      />
+                    </div>
                   </div>
-                  <div className="w-full bg-slate-900 h-3 rounded-full overflow-hidden border border-slate-800 p-0.5">
-                    <div
-                      style={{ width: `${coinsPct}%` }}
-                      className="bg-gradient-to-r from-amber-500 to-yellow-400 h-full rounded-full"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span>{coinsPct}% Completed</span>
-                    <span>{Math.max(0, targetCoins - currentCoins).toLocaleString()} coins remaining</span>
+                  <div className="p-4 bg-[#0F1115] border border-slate-800 rounded-xl space-y-2.5">
+                    <div className="flex items-center justify-between font-bold">
+                      <span className="text-slate-300 flex items-center gap-1.5">
+                        <Coins className="w-4 h-4 text-amber-400" />
+                        <span>Next-tier coins</span>
+                      </span>
+                      <span className="text-amber-400">
+                        {currentCoins.toLocaleString()}{' '}
+                        <span className="text-slate-500">/ {targetCoins.toLocaleString()}</span>
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-900 h-3 rounded-full overflow-hidden border border-slate-800 p-0.5">
+                      <div
+                        style={{
+                          width: `${Math.min(100, Math.round((currentCoins / Math.max(1, targetCoins)) * 100))}%`,
+                        }}
+                        className="bg-gradient-to-r from-amber-500/70 to-yellow-400/70 h-full rounded-full"
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
 
               {/* Agency Leader Association & Revenue Split */}
               {teamLeader ? (

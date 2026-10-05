@@ -17,7 +17,6 @@ import {
 interface AnalyticsDashboardHubProps {
   user?: UserProfile;
   onOpenStore?: () => void;
-  onOpenVip?: () => void;
   onStartCall?: (creatorId: string) => void;
   onOpenChat?: (creatorId: string) => void;
   onOpenCallLogs?: () => void;
@@ -26,7 +25,6 @@ interface AnalyticsDashboardHubProps {
 export const AnalyticsDashboardHub: React.FC<AnalyticsDashboardHubProps> = ({
   user,
   onOpenStore,
-  onOpenVip,
   onStartCall,
   onOpenChat,
   onOpenCallLogs,
@@ -37,11 +35,13 @@ export const AnalyticsDashboardHub: React.FC<AnalyticsDashboardHubProps> = ({
   // Mode Override: allow switching view for preview/testing
   const [viewRoleOverride, setViewRoleOverride] = useState<'auto' | 'female' | 'male'>('auto');
 
-  // Determine effective dashboard to render (Host view ONLY for female_creator/female_host)
+  // Host view for female creators/hosts; Team Leaders land on Host Activity hub (managed roster)
   const isHostCreator = activeUser.role === 'female_creator' || activeUser.role === 'female_host';
+  const isTeamLeader =
+    activeUser.role === 'team_leader' || activeUser.role === 'agency_manager';
   const effectiveRole =
     viewRoleOverride === 'auto'
-      ? isHostCreator
+      ? isHostCreator || isTeamLeader
         ? 'female'
         : 'male'
       : viewRoleOverride;
@@ -98,12 +98,12 @@ export const AnalyticsDashboardHub: React.FC<AnalyticsDashboardHubProps> = ({
           user={activeUser}
           onOpenCallLogs={onOpenCallLogs}
           onOpenChat={onOpenChat}
+          onStartCall={onStartCall}
         />
       ) : (
         <MaleUserAnalyticsDashboard
           user={activeUser}
           onOpenStore={onOpenStore}
-          onOpenVip={onOpenVip}
           onStartCall={onStartCall}
           onOpenChat={onOpenChat}
         />

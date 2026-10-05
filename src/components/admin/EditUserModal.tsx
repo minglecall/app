@@ -772,7 +772,7 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
               <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center space-x-3">
                 <div className="text-xl">🪙</div>
                 <div className="text-[11px] text-amber-300">
-                  <span className="font-bold">Coin Economy Controller:</span> Changes here will directly update user balances, call rates, VIP tiers, and payout cashout records.
+                  <span className="font-bold">Coin Economy Controller:</span> Changes here will directly update user balances, call rates, and payout cashout records.
                 </div>
               </div>
 
@@ -791,23 +791,6 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
                     />
                     <span className="absolute right-3 top-2.5 text-slate-500 font-mono">🪙 COINS</span>
                   </div>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
-                    VIP Member Tier
-                  </label>
-                  <select
-                    value={formData.vipTier || 'none'}
-                    onChange={(e) => setFormData({ ...formData, vipTier: e.target.value as any })}
-                    className="w-full px-3 py-2 bg-[#0C0E12] border border-slate-800 rounded-lg text-white font-mono font-bold focus:outline-none focus:border-indigo-500 uppercase"
-                  >
-                    <option value="none">None (Free Standard)</option>
-                    <option value="bronze">🥉 Bronze VIP</option>
-                    <option value="silver">🥈 Silver VIP</option>
-                    <option value="gold">🥇 Gold VIP</option>
-                    <option value="diamond">💎 Diamond VIP</option>
-                  </select>
                 </div>
               </div>
 

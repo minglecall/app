@@ -127,43 +127,51 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
           </p>
         </div>
 
-        {/* Quick Rate & Missed Stats Pills */}
-        <div className="flex flex-wrap items-center gap-3">
+        {/* Quick Rate & Missed Stats — equal cards, one row on mobile */}
+        <div
+          className={`grid gap-2 w-full md:w-auto ${
+            missedLogsCount > 0 ? 'grid-cols-2 md:min-w-[280px]' : 'grid-cols-1 md:min-w-[140px]'
+          }`}
+        >
           {missedLogsCount > 0 && (
-            <div className="bg-rose-950/80 border border-rose-500/40 p-4 rounded-2xl shadow-xl flex items-center space-x-3 animate-pulse">
-              <div className="p-3 bg-rose-500/20 border border-rose-500/30 rounded-xl text-rose-400">
-                <PhoneCall className="w-5 h-5" />
+            <div className="h-full min-w-0 bg-rose-950/80 border border-rose-500/40 p-2.5 rounded-xl shadow-xl flex items-center gap-2">
+              <div className="p-2 bg-rose-500/20 border border-rose-500/30 rounded-lg text-rose-400 shrink-0">
+                <PhoneCall className="w-4 h-4" />
               </div>
-              <div>
-                <div className="text-xs font-semibold text-rose-300">Missed Calls</div>
-                <div className="text-lg font-black text-rose-400">{missedLogsCount} Missed</div>
-                <div className="text-[10px] text-slate-400">
-                  {isCreatorOrAdmin ? 'Call back to convert' : 'Redial host'}
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold text-rose-300 truncate">Missed Calls</div>
+                <div className="text-sm font-black text-rose-400 truncate">{missedLogsCount} Missed</div>
+                <div className="text-[9px] text-slate-400 truncate">
+                  {isCreatorOrAdmin ? 'Call back' : 'Redial'}
                 </div>
               </div>
             </div>
           )}
 
           {isCreatorOrAdmin ? (
-            <div className="bg-slate-900/90 border border-indigo-500/40 p-4 rounded-2xl shadow-xl flex items-center space-x-4">
-              <div className="p-3 bg-pink-500/10 border border-pink-500/20 rounded-xl text-pink-400">
-                <Users className="w-6 h-6" />
+            <div className="h-full min-w-0 bg-slate-900/90 border border-indigo-500/40 p-2.5 rounded-xl shadow-xl flex items-center gap-2">
+              <div className="p-2 bg-pink-500/10 border border-pink-500/20 rounded-lg text-pink-400 shrink-0">
+                <Users className="w-4 h-4" />
               </div>
-              <div>
-                <div className="text-xs font-semibold text-slate-400">Friend Call Rates</div>
-                <div className="text-lg font-black text-emerald-400">{systemSettings.coinBurnRateFriendPerMin ?? 80} 🪙/min</div>
-                <div className="text-[10px] text-slate-500">vs {systemSettings.coinBurnRatePerMin ?? 120} 🪙/min Standard Rate</div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold text-slate-400 truncate">Friend Call Rates</div>
+                <div className="text-sm font-black text-emerald-400 truncate">
+                  {systemSettings.coinBurnRateFriendPerMin ?? 80} 🪙/min
+                </div>
+                <div className="text-[9px] text-slate-500 truncate">
+                  vs {systemSettings.coinBurnRatePerMin ?? 120}/min
+                </div>
               </div>
             </div>
           ) : (
-            <div className="bg-slate-900/90 border border-indigo-500/40 p-4 rounded-2xl shadow-xl flex items-center space-x-4">
-              <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-xl text-indigo-400">
-                <Coins className="w-6 h-6" />
+            <div className="h-full min-w-0 bg-slate-900/90 border border-indigo-500/40 p-2.5 rounded-xl shadow-xl flex items-center gap-2">
+              <div className="p-2 bg-indigo-500/10 border border-indigo-500/20 rounded-lg text-indigo-400 shrink-0">
+                <Coins className="w-4 h-4" />
               </div>
-              <div>
-                <div className="text-xs font-semibold text-slate-400">Total Calls</div>
-                <div className="text-lg font-black text-amber-400">{myLogs.length} Sessions</div>
-                <div className="text-[10px] text-slate-500">Completed & Missed</div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold text-slate-400 truncate">Total Calls</div>
+                <div className="text-sm font-black text-amber-400 truncate">{myLogs.length} Sessions</div>
+                <div className="text-[9px] text-slate-500 truncate">Completed & Missed</div>
               </div>
             </div>
           )}
@@ -316,7 +324,11 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
                       {isMissedCall ? (
                         <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-bold flex items-center space-x-1">
                           <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block animate-ping"></span>
-                          <span>Missed Call 🔴</span>
+                          <span>
+                            {log.status === 'declined' || log.status === 'rejected'
+                              ? 'Declined 🚫'
+                              : 'Missed Call 🔴'}
+                          </span>
                         </span>
                       ) : (
                         <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold flex items-center space-x-1">
@@ -392,51 +404,73 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Friend Request / Actions */}
-                  <div className="flex items-center space-x-2">
-                    {userIsFriend ? (
-                      <div className="px-3.5 py-2 bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-extrabold text-xs rounded-xl flex items-center space-x-1.5">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                        <span>Friends Connected</span>
+                  {/* Friend status + equal icon-only actions */}
+                  <div className="flex flex-col items-end gap-2 min-w-0">
+                    {(userIsFriend || pendingRequest) && (
+                      <div className="max-w-full">
+                        {userIsFriend ? (
+                          <div className="px-3 py-1.5 bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-extrabold text-[10px] sm:text-xs rounded-xl flex items-center space-x-1.5 truncate">
+                            <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400 shrink-0" />
+                            <span className="truncate">Friends Connected</span>
+                          </div>
+                        ) : (
+                          <div className="px-3 py-1.5 bg-amber-950/60 border border-amber-500/40 text-amber-300 font-extrabold text-[10px] sm:text-xs rounded-xl flex items-center space-x-1.5 truncate">
+                            <Clock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-400 animate-pulse shrink-0" />
+                            <span className="truncate">Request Sent ⏳</span>
+                          </div>
+                        )}
                       </div>
-                    ) : pendingRequest ? (
-                      <div className="px-3.5 py-2 bg-amber-950/60 border border-amber-500/40 text-amber-300 font-extrabold text-xs rounded-xl flex items-center space-x-1.5">
-                        <Clock className="w-4 h-4 text-amber-400 animate-pulse" />
-                        <span>Request Sent ⏳</span>
-                      </div>
-                    ) : isCreatorOrAdmin ? (
+                    )}
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {!userIsFriend && !pendingRequest && isCreatorOrAdmin && (
+                        <button
+                          type="button"
+                          onClick={() => sendFriendRequest(currentUser.id, targetUserId, log.id)}
+                          className="h-10 w-10 flex items-center justify-center rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white shadow-lg shadow-pink-600/20 transition-all cursor-pointer"
+                          title="Add Friend"
+                          aria-label="Add Friend"
+                        >
+                          <UserPlus className="w-4 h-4 text-pink-200" />
+                        </button>
+                      )}
+
                       <button
-                        onClick={() => sendFriendRequest(currentUser.id, targetUserId, log.id)}
-                        className="px-4 py-2.5 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-pink-600/20 transition-all flex items-center space-x-1.5 cursor-pointer"
-                        title="Send Friend Request to give this caller discounted friend call rates"
+                        type="button"
+                        onClick={() => onOpenChat(targetUserId)}
+                        className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-all cursor-pointer"
+                        title="Open Direct Chat"
+                        aria-label="Open Direct Chat"
                       >
-                        <UserPlus className="w-4 h-4 text-pink-200" />
-                        <span>Add Friend</span>
+                        <MessageCircle className="w-4 h-4 text-indigo-400" />
                       </button>
-                    ) : null}
 
-                    {/* Quick Message */}
-                    <button
-                      onClick={() => onOpenChat(targetUserId)}
-                      className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl transition-all cursor-pointer"
-                      title="Open Direct Chat"
-                    >
-                      <MessageCircle className="w-4 h-4 text-indigo-400" />
-                    </button>
-
-                    {/* Call Back Button */}
-                    <button
-                      onClick={() => onStartCall(targetUserId)}
-                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer shadow-md ${
-                        isMissedCall
-                          ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
-                          : 'bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40'
-                      }`}
-                      title={isMissedCall ? 'Call Back / Redial' : 'Start 1-on-1 Video Call'}
-                    >
-                      <Video className="w-4 h-4" />
-                      <span>{isMissedCall ? (isCreatorOrAdmin ? 'Call Back' : 'Redial') : 'Call'}</span>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => onStartCall(targetUserId)}
+                        className={`h-10 w-10 flex items-center justify-center rounded-xl transition-all cursor-pointer shadow-md ${
+                          isMissedCall
+                            ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
+                            : 'bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40'
+                        }`}
+                        title={
+                          isMissedCall
+                            ? isCreatorOrAdmin
+                              ? 'Call Back'
+                              : 'Redial'
+                            : 'Start Video Call'
+                        }
+                        aria-label={
+                          isMissedCall
+                            ? isCreatorOrAdmin
+                              ? 'Call Back'
+                              : 'Redial'
+                            : 'Start Video Call'
+                        }
+                      >
+                        <Video className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

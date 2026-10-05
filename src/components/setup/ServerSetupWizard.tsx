@@ -72,7 +72,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     adminPassword: '',
     coinBurnRatePerMin: 120,
     coinBurnRateFriendPerMin: 80,
-    femaleHostSharePercent: 40,
+    femaleHostSharePercent: 30,
     teamLeaderSharePercent: 10,
     lockInstaller: true,
   });
@@ -1172,7 +1172,8 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                     <span>Step 6: Master Admin Security & Platform Economy</span>
                   </h2>
                   <p className="text-xs text-slate-400 mt-1">
-                    Set a new Super Admin password and configure baseline coin economics.
+                    Set a new Super Admin password. Coin burn, shares, and Fixed Peg are configured only in Admin →
+                    Coin Burn &amp; Economy after launch (not here).
                   </p>
                 </div>
 
@@ -1189,59 +1190,19 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                     inputClassName="w-full pr-10 pl-10 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-purple-500"
                   />
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Standard Coin Burn Rate (Coins / Min)
-                      </label>
-                      <input
-                        type="number"
-                        min="1"
-                        value={formData.coinBurnRatePerMin}
-                        onChange={(e) => setFormData({ ...formData, coinBurnRatePerMin: Number(e.target.value) })}
-                        className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-amber-300 font-mono focus:outline-none focus:border-amber-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Friend Discount Rate (Coins / Min)
-                      </label>
-                      <input
-                        type="number"
-                        min="1"
-                        value={formData.coinBurnRateFriendPerMin}
-                        onChange={(e) => setFormData({ ...formData, coinBurnRateFriendPerMin: Number(e.target.value) })}
-                        className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-emerald-300 font-mono focus:outline-none focus:border-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Female Host Share (%)
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        value={formData.femaleHostSharePercent}
-                        onChange={(e) => setFormData({ ...formData, femaleHostSharePercent: Number(e.target.value) })}
-                        className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-pink-300 font-mono focus:outline-none focus:border-pink-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Team Leader Share (%)
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        value={formData.teamLeaderSharePercent}
-                        onChange={(e) => setFormData({ ...formData, teamLeaderSharePercent: Number(e.target.value) })}
-                        className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-indigo-300 font-mono focus:outline-none focus:border-indigo-500"
-                      />
+                  <div className="p-4 rounded-2xl bg-slate-950/80 border border-amber-500/30 space-y-2">
+                    <div className="text-xs font-bold text-amber-200">Configured in Economy (read-only here)</div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Global burn rates, host/TL call shares, gift shares, and Coin USD Peg live exclusively in{' '}
+                      <span className="text-amber-300 font-semibold">Admin → Coin Burn &amp; Economy</span>. Schema
+                      defaults apply until an admin edits them there. This wizard does not persist economy knobs.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-slate-500 pt-1">
+                      <div>Burn defaults: {formData.coinBurnRatePerMin}/{formData.coinBurnRateFriendPerMin} 🪙/min</div>
+                      <div>
+                        Shares defaults: host {formData.femaleHostSharePercent}% · TL{' '}
+                        {formData.teamLeaderSharePercent}%
+                      </div>
                     </div>
                   </div>
                 </div>

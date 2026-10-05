@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Sparkles,
   ShieldCheck,
-  Globe,
   CheckCircle2,
   AlertCircle,
   Upload,
@@ -15,8 +14,6 @@ import {
   Check,
   Video,
   Loader2,
-  ChevronDown,
-  Search,
 } from 'lucide-react';
 import { UserProfile, OnboardingFormData, getUserRoleLabel, getFemaleRoleMark } from '../../types';
 import { completeUserProfileOnboarding } from '../../services/supabaseAuthService';
@@ -29,30 +26,14 @@ import { CountrySelector } from '../common/CountrySelector';
 import { LanguageSelector } from '../common/LanguageSelector';
 import { ZodiacSelector } from '../common/ZodiacSelector';
 import { InterestSelector } from '../common/InterestSelector';
+import { getAccessToken } from '../../utils/apiClient';
+import { isSupabaseConfigured } from '../../lib/supabase';
 
 interface OnboardingWizardProps {
   user: UserProfile;
   onComplete: (updatedUser: UserProfile) => void;
   onCancel?: () => void;
 }
-
-const POPULAR_LANGUAGES = [
-  'English', 'Spanish', 'French', 'German', 'Italian',
-  'Portuguese', 'Russian', 'Japanese', 'Korean', 'Chinese (Mandarin)',
-  'Arabic', 'Hindi', 'Turkish', 'Vietnamese', 'Thai', 'Urdu', 'Indonesian'
-];
-
-const MALE_INTERESTS = [
-  'Gaming', 'Fitness & Gym', 'Music & Concerts', 'Travel & Adventure',
-  'Movies & Anime', 'Nightlife & Dining', 'Photography', 'Technology',
-  'Deep Conversations', 'Karaoke', 'Fashion', 'Sports'
-];
-
-const FEMALE_HOST_TAGS = [
-  'Singer & Vocalist', 'Gamer & Streamer', 'Model & Fashion', 'Dancer',
-  'Cosplayer', 'Fitness & Wellness', 'Artist & Creative', 'Late Night Chats',
-  'ASMR & Chill', 'Language Tutor', 'Comedian', 'Life Coach'
-];
 
 const FALLBACK_FEMALE_AVATAR = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400';
 const FALLBACK_MALE_AVATAR = 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400';
@@ -63,7 +44,14 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   onCancel,
 }) => {
   const { systemSettings, updateUserProfile, showToast } = useApp();
-  const isFemaleHost = user.role === 'female_creator';
+  const isFemaleHost = user.role === 'female_creator' || user.role === 'female_host';
+  const lockedGender =
+    user.gender ||
+    (isFemaleHost || user.role === 'female_user'
+      ? 'female'
+      : user.role === 'other_user'
+        ? 'other'
+        : 'male');
 
   const [currentStep, setCurrentStep] = useState(1);
   const totalSteps = 4;
@@ -79,26 +67,26 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     return matched || allowedCountries[0] || { name: 'United States', code: 'US', flag: '🇺🇸', region: 'North America' };
   }, [user.countryCode, user.nationality, allowedCountries]);
 
-  // Form State
+  // Form State — gender locked from account role; terms must be explicitly accepted
   const [formData, setFormData] = useState<OnboardingFormData>({
     dob: user.dob || '2000-01-01',
     age: user.age || 24,
-    gender: user.gender || (isFemaleHost ? 'female' : user.role === 'other_user' ? 'other' : 'male'),
+    gender: lockedGender,
     nationality: user.nationality || initialCountry.name,
     countryCode: user.countryCode || initialCountry.code,
     zodiac: user.zodiac || '',
     spokenLanguages: user.spokenLanguages.length > 0 ? user.spokenLanguages : ['English'],
     bio: user.bio || '',
-    interests: user.interests.length > 0 ? user.interests : (isFemaleHost ? ['Late Night Chats', 'Music & Concerts'] : ['Travel & Adventure', 'Gaming']),
+    interests: user.interests.length > 0 ? user.interests : [],
     interestedIn: user.interestedIn && user.interestedIn.length > 0 
       ? user.interestedIn 
       : ((user.gender === 'female' || isFemaleHost || user.role === 'female_user' || user.role === 'female_creator') ? ['male'] : ['female']),
-    tags: user.tags && user.tags.length > 0 ? user.tags : (isFemaleHost ? ['Late Night Chats', 'Model & Fashion'] : []),
-    hourlyCoinRate: systemSettings.coinBurnRatePerMin || 120,
+    tags: user.tags && user.tags.length > 0 ? user.tags : [],
+    hourlyCoinRate: user.hourlyCoinRate || (isFemaleHost ? 10 : 0),
     avatarUrl: user.avatarUrl || (isFemaleHost ? FALLBACK_FEMALE_AVATAR : FALLBACK_MALE_AVATAR),
     gallery: user.gallery.length > 0 ? user.gallery : [],
     introVideoUrl: user.introVideoUrl || undefined,
-    agreedToTerms: true,
+    agreedToTerms: false,
     agreedToAdultTerms: false,
     agreedToHostTerms: false,
   });
@@ -319,6 +307,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
         setValidationError('Please select at least one interest or hobby.');
         return false;
       }
+      if (!formData.interestedIn || formData.interestedIn.length === 0) {
+        setValidationError('Please choose who you are interested in connecting with.');
+        return false;
+      }
       return true;
     }
 
@@ -366,24 +358,45 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     }
   };
 
-  // Final Registration Submission with guaranteed database persistence
+  // Final Registration Submission — only mark onboarded after DB persistence succeeds
   const handleSubmitFinal = async () => {
     if (!validateCurrentStep()) return;
+    if (isSubmitting) return;
 
     setIsSubmitting(true);
     setValidationError(null);
     try {
-      const result = await completeUserProfileOnboarding(user, formData);
+      if (isSupabaseConfigured()) {
+        const token = await getAccessToken();
+        if (!token) {
+          const msg = 'Your session expired. Please sign in again to finish profile setup.';
+          setValidationError(msg);
+          showToast('Session Required', msg, 'error');
+          return;
+        }
+      }
+
+      // Keep gender locked to account role — never escalate role from the client
+      const lockedForm: OnboardingFormData = {
+        ...formData,
+        gender: lockedGender,
+      };
+
+      const result = await completeUserProfileOnboarding(user, lockedForm);
       if (result.success && result.updatedProfile) {
-        // Synchronize with AppContext (persists to LocalStorage, Supabase, and Server memory)
         updateUserProfile(result.updatedProfile.id, result.updatedProfile);
-        showToast('Registration Complete! 🎉', 'Your profile and settings have been saved to the database.', 'success');
+        showToast('Registration Complete! 🎉', 'Your profile has been saved.', 'success');
         onComplete(result.updatedProfile);
       } else {
-        setValidationError(result.error || 'Failed to complete profile registration in database.');
+        const msg = result.error || 'Failed to complete profile registration. Please try again.';
+        setValidationError(msg);
+        showToast('Save Failed', msg, 'error');
       }
     } catch (e: any) {
-      setValidationError(e.message || 'An unexpected error occurred during profile registration.');
+      console.error('Onboarding submit error:', e);
+      const msg = 'An unexpected error occurred during profile registration.';
+      setValidationError(msg);
+      showToast('Save Failed', msg, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -526,7 +539,17 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   </label>
                   <div className="flex items-center h-12 px-4 bg-[#0F1115] border border-slate-800 rounded-2xl text-xs text-slate-300 font-medium capitalize">
                     <User className="w-4 h-4 text-slate-500 mr-2" />
-                    <span>{formData.gender} ({isFemaleHost ? 'Creator Host' : user.role === 'other_user' ? 'Member (Other)' : 'Male Consumer'})</span>
+                    <span>
+                      {formData.gender} (
+                      {isFemaleHost
+                        ? 'Creator Host'
+                        : user.role === 'female_user'
+                          ? 'Female Member'
+                          : user.role === 'other_user'
+                            ? 'Member (Other)'
+                            : 'Male Consumer'}
+                      )
+                    </span>
                     <Lock className="w-3.5 h-3.5 text-slate-600 ml-auto" />
                   </div>
                   <p className="text-[10px] text-slate-500">Assigned role from account creation.</p>
@@ -585,7 +608,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 <textarea
                   rows={4}
                   value={formData.bio}
-                  onChange={(e) => setFormData({ ...formData, bio: e.target.value })}
+                  onChange={(e) => {
+                    const bio = e.target.value;
+                    setFormData((prev) => ({ ...prev, bio }));
+                  }}
                   placeholder={
                     isFemaleHost
                       ? 'Introduce your hosting style, personality, streaming schedule, and conversation interests...'
@@ -599,13 +625,13 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 </div>
               </div>
 
-              {/* Categorized Multi-Select Interests */}
+              {/* Categorized Multi-Select Interests — portal dropdown avoids modal overflow clipping */}
               <InterestSelector
                 selectedInterests={formData.interests}
                 onChange={(interests) =>
                   setFormData((prev) => ({
                     ...prev,
-                    interests: interests,
+                    interests,
                     tags: isFemaleHost ? interests : prev.tags,
                   }))
                 }
@@ -613,41 +639,48 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 placeholder="Select hobbies and passions..."
               />
 
-                  {/* Interested In */}
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-2">
-                      INTERESTED IN CONNECTING WITH
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                      {[
-                        { id: 'female', label: 'Women', sub: 'Creators & Users', icon: '👩' },
-                        { id: 'male', label: 'Men', sub: 'Male Users', icon: '👨' },
-                        { id: 'everyone', label: 'Everyone', sub: 'All Users & Creators', icon: '👥' },
-                      ].map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => setFormData({ ...formData, interestedIn: [opt.id] })}
-                          className={`p-3 rounded-2xl border text-xs font-bold text-left transition-all cursor-pointer ${
-                            formData.interestedIn.includes(opt.id)
-                              ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-lg'
-                              : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center space-x-2">
-                              <span className="text-lg">{opt.icon}</span>
-                              <div>
-                                <div className="text-white font-bold">{opt.label}</div>
-                                <div className="text-[10px] text-slate-400 font-normal">{opt.sub}</div>
-                              </div>
-                            </div>
-                            {formData.interestedIn.includes(opt.id) && <Check className="w-4 h-4 text-indigo-400 shrink-0 ml-1" />}
+              {/* Interested In — functional updater so interests chips are never wiped */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-2">
+                  INTERESTED IN CONNECTING WITH *
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {[
+                    { id: 'female', label: 'Women', sub: 'Creators & Users', icon: '👩' },
+                    { id: 'male', label: 'Men', sub: 'Male Users', icon: '👨' },
+                    { id: 'everyone', label: 'Everyone', sub: 'All Users & Creators', icon: '👥' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          interestedIn: [opt.id],
+                        }))
+                      }
+                      className={`p-3 rounded-2xl border text-xs font-bold text-left transition-all cursor-pointer ${
+                        formData.interestedIn.includes(opt.id)
+                          ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-lg'
+                          : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-lg">{opt.icon}</span>
+                          <div>
+                            <div className="text-white font-bold">{opt.label}</div>
+                            <div className="text-[10px] text-slate-400 font-normal">{opt.sub}</div>
                           </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                        </div>
+                        {formData.interestedIn.includes(opt.id) && (
+                          <Check className="w-4 h-4 text-indigo-400 shrink-0 ml-1" />
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 

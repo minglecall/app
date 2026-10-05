@@ -17,10 +17,10 @@ import { VideoCallStudio } from './components/videocall/VideoCallStudio';
 import { PostCallRatingModal } from './components/videocall/PostCallRatingModal';
 import { CoinStoreModal } from './components/store/CoinStoreModal';
 import { AuthModal } from './components/auth/AuthModal';
-import { VipModal } from './components/vip/VipModal';
 import { DailyRewardsModal } from './components/rewards/DailyRewardsModal';
 import { ChatDrawer } from './components/chat/ChatDrawer';
 import { FriendsFavoritesDrawer } from './components/social/FriendsFavoritesDrawer';
+import { BlockReportModal } from './components/social/BlockReportModal';
 import { GlobalBottomNav } from './components/navigation/GlobalBottomNav';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { OnboardingWizard } from './components/onboarding/OnboardingWizard';
@@ -45,6 +45,8 @@ const MainApp: React.FC = () => {
     setPendingRatingCall,
     isDailyRewardsModalOpen,
     closeDailyRewardsModal,
+    blockReportModal,
+    closeBlockReportModal,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<string>('home');
@@ -122,7 +124,6 @@ const MainApp: React.FC = () => {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'register'>('login');
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
-  const [isVipOpen, setIsVipOpen] = useState(false);
   const [isSocialCircleOpen, setIsSocialCircleOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isMatchOpen, setIsMatchOpen] = useState(false);
@@ -145,34 +146,31 @@ const MainApp: React.FC = () => {
     setIsMatchOpen(false);
     setIsSocialCircleOpen(false);
     setIsStoreOpen(false);
-    setIsVipOpen(false);
     setIsAuthOpen(false);
     setSelectedDeckUser(null);
   };
 
   return (
-    <div className="min-h-screen bg-[#0F1115] text-slate-300 flex flex-col font-sans selection:bg-indigo-600 selection:text-white">
+    <div className="min-h-screen bg-app text-app flex flex-col font-sans selection-brand">
       {/* App Header */}
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         onOpenStore={() => setIsStoreOpen(true)}
         onOpenAuth={(mode) => handleOpenAuth(mode || 'register')}
-        onOpenVip={() => setIsVipOpen(true)}
         onOpenSocialCircle={() => setIsSocialCircleOpen(true)}
         onOpenChat={(id) => handleOpenChat(id)}
         onOpenMatch={() => setIsMatchOpen(true)}
       />
 
       {/* Main View Content */}
-      <main className={`flex-1 ${isLoggedIn ? 'pb-20 md:pb-10' : 'pb-6'}`}>
+      <main className={`flex-1 app-fade-up ${isLoggedIn ? 'pb-24 md:pb-10' : 'pb-6'}`}>
         {activeTab === 'home' && (
           <HomePage
             onStartCall={(id) => startCall(id)}
             onOpenChat={(id) => handleOpenChat(id)}
             onOpenMatch={() => setIsMatchOpen(true)}
             onOpenStore={() => setIsStoreOpen(true)}
-            onOpenVip={() => setIsVipOpen(true)}
             onOpenAuth={(mode) => handleOpenAuth(mode || 'register')}
             onNavigateToTab={(tab) => setActiveTab(tab)}
           />
@@ -210,7 +208,6 @@ const MainApp: React.FC = () => {
         {activeTab === 'earnings' && (
           <FemaleEarningsDashboard
             onOpenStore={() => setIsStoreOpen(true)}
-            onOpenVip={() => setIsVipOpen(true)}
             onStartCall={(id) => startCall(id)}
             onOpenChat={(id) => setChatUserId(id)}
             onOpenCallLogs={() => setActiveTab('call_logs')}
@@ -227,7 +224,6 @@ const MainApp: React.FC = () => {
         {activeTab === 'profile' && (
           <UserProfilePage
             onOpenStore={() => setIsStoreOpen(true)}
-            onOpenVip={() => setIsVipOpen(true)}
             onOpenChat={(id) => handleOpenChat(id)}
             onNavigateToTab={(tab) => setActiveTab(tab)}
           />
@@ -244,19 +240,18 @@ const MainApp: React.FC = () => {
         {activeTab === 'admin' && isLoggedIn && currentUser.role === 'admin' && <AdminDashboard />}
       </main>
 
-      {/* High Density Terminal System Footer */}
-      <footer className="h-8 bg-[#161920] border-t border-slate-800 px-4 sm:px-8 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+      <footer className="h-8 bg-app-surface border-t border-app px-4 sm:px-8 flex items-center justify-between text-[10px] text-app-muted">
         <div className="flex gap-4 items-center">
-          <span className="text-slate-500">SYSTEM: <span className="text-slate-300">LIVE-NODE</span></span>
-          <span className="hidden sm:inline text-slate-500">WEBRTC: <span className="text-emerald-400 font-bold">READY</span></span>
-          <span className="hidden md:inline text-slate-500">REGISTRY: <span className="text-indigo-400">{users.length} PROFILES</span></span>
+          <span>LiveCall</span>
+          <span className="hidden sm:inline">Video ready</span>
+          <span className="hidden md:inline">{users.length} people nearby</span>
         </div>
         <div className="flex gap-4 items-center">
-          <span className="flex items-center gap-1 text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-            REAL-TIME ECONOMY SYNCED
+          <span className="flex items-center gap-1.5 text-emerald-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+            Live
           </span>
-          <span className="hidden sm:inline text-slate-400">{currentUtcTime}</span>
+          <span className="hidden sm:inline text-app-muted">{currentUtcTime}</span>
         </div>
       </footer>
 
@@ -281,11 +276,17 @@ const MainApp: React.FC = () => {
           onCancel={() => setIsOnboardingOpen(false)}
         />
       )}
-      <VipModal isOpen={isVipOpen} onClose={() => setIsVipOpen(false)} />
       <DailyRewardsModal
         isOpen={isDailyRewardsModalOpen}
         onClose={closeDailyRewardsModal}
         onNavigateTab={(tab) => setActiveTab(tab)}
+      />
+      <BlockReportModal
+        key={blockReportModal ? `${blockReportModal.userId}-${blockReportModal.action}` : 'closed'}
+        isOpen={!!blockReportModal}
+        onClose={closeBlockReportModal}
+        targetUserId={blockReportModal?.userId ?? null}
+        initialAction={blockReportModal?.action ?? 'report'}
       />
       <QuickMatchRoulette
         isOpen={isMatchOpen}
@@ -313,14 +314,15 @@ const MainApp: React.FC = () => {
           creatorId={pendingRatingCall.creatorId}
           creatorName={pendingRatingCall.creatorName}
           creatorAvatar={pendingRatingCall.creatorAvatar}
-          callLogId={pendingRatingCall.callLogId}
+          callLogId={pendingRatingCall.callLogId || undefined}
           durationSeconds={pendingRatingCall.durationSeconds}
+          ratingRequestMessageId={pendingRatingCall.ratingRequestMessageId}
           onClose={() => setPendingRatingCall(null)}
         />
       )}
 
-      {/* Global Bottom Sticky Navigation Bar - Persists across all modals and screens in signed-in state */}
-      {isLoggedIn && (
+      {/* Global Bottom Sticky Navigation — hidden entirely during 1-on-1 call */}
+      {isLoggedIn && !activeCall && (
         <GlobalBottomNav
           activeTab={activeTab}
           setActiveTab={setActiveTab}
@@ -332,14 +334,14 @@ const MainApp: React.FC = () => {
         />
       )}
 
-      {/* PWA Install Banner Prompt */}
-      <PWAInstallPrompt />
+      {/* PWA Install Banner Prompt — hide during call so it never covers End Call */}
+      {!activeCall && <PWAInstallPrompt />}
 
       {/* Toast Notification Banner - Positioned directly below top header for clear visibility in mobile & desktop */}
       {toast && (
         <div
           id="global-toast-alert"
-          className="fixed top-16 left-1/2 -translate-x-1/2 z-[9999] w-[calc(100%-1.25rem)] max-w-md pointer-events-none transition-all animate-in slide-in-from-top-3 fade-in duration-200"
+          className="fixed top-16 left-1/2 -translate-x-1/2 z-[11000] w-[calc(100%-1.25rem)] max-w-md pointer-events-none transition-all animate-in slide-in-from-top-3 fade-in duration-200"
         >
           <div
             className={`p-3.5 sm:p-4 rounded-2xl border shadow-2xl backdrop-blur-xl flex items-start space-x-3 text-xs pointer-events-auto overflow-hidden relative ${

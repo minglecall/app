@@ -16,8 +16,8 @@ export default defineConfig(() => {
           name: 'LiveCall Dating & Monetization',
           short_name: 'LiveCall',
           description: 'Live 1-on-1 video calling, creator monetization, interactive matching, and discovery platform.',
-          theme_color: '#0F1115',
-          background_color: '#0F1115',
+          theme_color: '#09090C',
+          background_color: '#09090C',
           display: 'standalone',
           orientation: 'portrait-primary',
           icons: [

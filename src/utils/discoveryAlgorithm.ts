@@ -1,4 +1,9 @@
 import { UserProfile, CreatorMetrics, CreatorTier, SystemSettings } from '../types';
+import {
+  computePerformanceTier,
+  resolveTargetThresholds,
+  type TargetTierThresholds,
+} from '../../shared/finance/targetBonus';
 
 export interface CreatorScoreBreakdown {
   onlineScore: number;
@@ -75,6 +80,8 @@ export function getDetailedCreatorScoreBreakdown(
     peakHoursEnabled?: boolean;
     weights?: DynamicAlgorithmWeights;
     disableJitter?: boolean;
+    /** system_configs / SystemSettings — tiers via shared/finance/targetBonus */
+    targetThresholds?: TargetTierThresholds | Record<string, unknown> | SystemSettings | null;
   }
 ): CreatorScoreBreakdown {
   const isFemale = user.gender === 'female' || user.role === 'female_creator' || user.role === 'female_host';
@@ -134,8 +141,15 @@ export function getDetailedCreatorScoreBreakdown(
     onlineScore = w.busyInCall;
   }
 
-  // 2. Performance Tier Weight
-  const tier = m.performanceTier || 'bronze';
+  // 2. Performance Tier Weight — recompute from config via shared targetBonus helper
+  const thresholds = resolveTargetThresholds(
+    (options?.targetThresholds || null) as Record<string, unknown> | null
+  );
+  const hours = Number(m.activeOnlineHours || 0);
+  const coins =
+    Number(m.totalTargetCoins || 0) ||
+    Number(m.coinsEarnedFromCalls || 0) + Number(m.coinsEarnedFromGifts || 0);
+  const tier = computePerformanceTier(hours, coins, thresholds);
   let tierScore = w.bronzeTier;
   if (tier === 'gold') tierScore = w.goldTier;
   else if (tier === 'silver') tierScore = w.silverTier;
@@ -211,14 +225,19 @@ export function rankCreatorsForDiscovery(
     readyNowOnly?: boolean;
     weights?: DynamicAlgorithmWeights;
     disableJitter?: boolean;
+    targetThresholds?: TargetTierThresholds | Record<string, unknown> | SystemSettings | null;
   }
 ): RankedCreatorItem[] {
+  const thresholds = resolveTargetThresholds(
+    (options?.targetThresholds || null) as Record<string, unknown> | null
+  );
   const peakConfig = {
     peakHoursStart: options?.peakHoursStart || '18:00',
     peakHoursEnd: options?.peakHoursEnd || '00:00',
     peakHoursEnabled: options?.peakHoursEnabled ?? true,
     weights: options?.weights,
     disableJitter: options?.disableJitter,
+    targetThresholds: thresholds,
   };
 
   const isPeak = peakConfig.peakHoursEnabled ? isCurrentlyPeakHour(peakConfig.peakHoursStart, peakConfig.peakHoursEnd) : true;
@@ -234,8 +253,8 @@ export function rankCreatorsForDiscovery(
     const metrics = creatorMetricsMap[user.id] || {
       creatorId: user.id,
       agencyLeaderId: user.teamLeaderId,
-      activeOnlineSeconds: (user.totalCallMinutes || 0) * 60,
-      activeOnlineHours: Number(((user.totalCallMinutes || 0) / 60).toFixed(2)),
+      activeOnlineSeconds: 0,
+      activeOnlineHours: 0,
       coinsEarnedFromCalls: user.earningsCoins || 0,
       coinsEarnedFromGifts: 0,
       totalTargetCoins: user.earningsCoins || 0,
@@ -252,8 +271,12 @@ export function rankCreatorsForDiscovery(
       lastActiveDate: new Date().toISOString().split('T')[0],
     };
 
+    const hours = Number(metrics.activeOnlineHours || 0);
+    const coins =
+      Number(metrics.totalTargetCoins || 0) ||
+      Number(metrics.coinsEarnedFromCalls || 0) + Number(metrics.coinsEarnedFromGifts || 0);
+    const tier = computePerformanceTier(hours, coins, thresholds);
     const isReadyNow = Boolean(metrics.isReadyNowActive) && isPeak && user.onlineStatus === 'online';
-    const tier = metrics.performanceTier || 'bronze';
     const isTrending = tier === 'gold' || tier === 'silver' || isReadyNow;
     const hasStreakBoost = metrics.streakBoostUntil ? new Date(metrics.streakBoostUntil).getTime() > Date.now() : (metrics.currentStreakDays >= 7);
 

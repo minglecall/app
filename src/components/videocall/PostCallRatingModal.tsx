@@ -10,6 +10,7 @@ interface PostCallRatingModalProps {
   creatorAvatar: string;
   callLogId?: string;
   durationSeconds?: number;
+  ratingRequestMessageId?: string;
   onClose: () => void;
 }
 
@@ -37,6 +38,7 @@ export const PostCallRatingModal: React.FC<PostCallRatingModalProps> = ({
   creatorAvatar,
   callLogId,
   durationSeconds = 60,
+  ratingRequestMessageId,
   onClose,
 }) => {
   const { currentUser, submitCreatorReview } = useApp();
@@ -56,17 +58,21 @@ export const PostCallRatingModal: React.FC<PostCallRatingModalProps> = ({
     );
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setIsSubmitting(true);
 
-    submitCreatorReview({
+    const ok = await submitCreatorReview({
       creatorId,
+      creatorName,
+      creatorAvatar,
       callerId: currentUser.id,
       callerName: currentUser.name,
       callerAvatar: currentUser.avatarUrl,
       callerCountry: currentUser.nationality,
       callLogId,
+      ratingRequestMessageId,
       stars: stars || 5,
       communication,
       friendliness,
@@ -78,7 +84,7 @@ export const PostCallRatingModal: React.FC<PostCallRatingModalProps> = ({
     });
 
     setIsSubmitting(false);
-    onClose();
+    if (ok) onClose();
   };
 
   const activeStarCount = hoveredStar !== null ? hoveredStar : stars;
@@ -99,9 +105,11 @@ export const PostCallRatingModal: React.FC<PostCallRatingModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm sm:text-base font-black text-white uppercase tracking-wider font-mono">
-                Rate Your Call Session
+                Rate This Session
               </h2>
-              <p className="text-[11px] text-slate-400 font-mono">Help maintain top-tier creator quality</p>
+              <p className="text-[11px] text-slate-400 font-mono">
+                Rating requested by {creatorName}
+              </p>
             </div>
           </div>
 
@@ -151,8 +159,8 @@ export const PostCallRatingModal: React.FC<PostCallRatingModalProps> = ({
             </div>
 
             <div className="text-right shrink-0">
-              <span className="px-2.5 py-1 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-mono text-[10px] font-bold">
-                Call Completed 🟢
+              <span className="px-2.5 py-1 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-[10px] font-bold">
+                Feedback requested
               </span>
             </div>
           </div>

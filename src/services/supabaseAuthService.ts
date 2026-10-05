@@ -1,7 +1,8 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { UserProfile, UserRole, OnboardingFormData } from '../types';
-import { mapDbProfileToUserProfile, upsertProfileToSupabase, generateValidUuid, isValidUuid } from './supabaseService';
+import { mapDbProfileToUserProfile, upsertProfileToSupabase, isValidUuid } from './supabaseService';
 import { getPasswordPolicyError } from '../../shared/passwordPolicy';
+import { authFetch, getAccessToken } from '../utils/apiClient';
 
 export interface SupabaseAuthResult {
   success: boolean;
@@ -12,6 +13,44 @@ export interface SupabaseAuthResult {
   session?: any;
   otpCode?: string;
   showOtpInForm?: boolean;
+}
+
+const PUBLIC_SIGNUP_ROLES: UserRole[] = [
+  'male_user',
+  'female_user',
+  'female_creator',
+  'female_host',
+  'other_user',
+];
+
+function sanitizeClientSignupRole(role: UserRole | string | undefined): UserRole {
+  return PUBLIC_SIGNUP_ROLES.includes(role as UserRole) ? (role as UserRole) : 'male_user';
+}
+
+function lockedGenderFromRole(role: UserRole): UserProfile['gender'] {
+  if (role === 'female_user' || role === 'female_creator' || role === 'female_host') return 'female';
+  if (role === 'other_user') return 'other';
+  return 'male';
+}
+
+function userSafeAuthError(err: unknown, fallback: string): string {
+  if (!err) return fallback;
+  const message = typeof err === 'string' ? err : (err as any)?.message;
+  if (typeof message !== 'string' || !message.trim()) return fallback;
+  const lower = message.toLowerCase();
+  if (
+    lower.includes('stack') ||
+    lower.includes('supabase') ||
+    lower.includes('postgres') ||
+    lower.includes('smtp') ||
+    lower.includes('service_role') ||
+    lower.includes('econn') ||
+    lower.includes('enotfound') ||
+    message.length > 180
+  ) {
+    return fallback;
+  }
+  return message;
 }
 
 /**
@@ -29,14 +68,172 @@ export async function signUpWithEmailOtp(params: {
     return { success: false, error: passwordError ?? 'Password is required.' };
   }
   const cleanEmail = email.trim().toLowerCase();
-  const safeRole = ['male_user', 'female_user', 'female_creator', 'female_host', 'other_user'].includes(role)
-    ? role
-    : 'male_user';
+  if (!cleanEmail.includes('@')) {
+    return { success: false, error: 'Please provide a valid email address.' };
+  }
+  const safeRole = sanitizeClientSignupRole(role);
+  const lockedGender = lockedGenderFromRole(safeRole);
 
+  // 1. Create Supabase Auth user with the submitted password BEFORE sending OTP
+  let createdUserId: string | null = null;
   let capturedOtpCode: string | undefined;
   let capturedShowOtpInForm: boolean | undefined;
+  let clientSignUpFailedForBootstrap = false;
 
-  // 1. Dispatch our server email with prominent 6-digit OTP code & confirmation link, and register credentials
+  if (isSupabaseConfigured()) {
+    try {
+      // Existing profile for this email → user must log in / reset password (do not soft-continue)
+      const { data: existingByEmail } = await supabase
+        .from('profiles')
+        .select('id, is_onboarded')
+        .ilike('email', cleanEmail)
+        .maybeSingle();
+      const existingRow = existingByEmail as { id: string; is_onboarded?: boolean } | null;
+      if (existingRow?.id) {
+        return {
+          success: false,
+          error: 'An account with this email is already registered. Please log in or use Forgot Password.',
+        };
+      }
+
+      const { data, error } = await supabase.auth.signUp({
+        email: cleanEmail,
+        password,
+        options: {
+          data: {
+            full_name: name,
+            display_name: name,
+            name,
+            role: safeRole,
+            gender: lockedGender,
+            is_onboarded: false,
+          },
+        },
+      });
+
+      if ((import.meta as any)?.env?.DEV) {
+        console.debug('[signUpWithEmailOtp] signUp result', {
+          error: error?.message,
+          status: (error as any)?.status,
+          userId: data?.user?.id,
+          identitiesLen: Array.isArray((data?.user as any)?.identities)
+            ? (data?.user as any).identities.length
+            : null,
+        });
+      }
+
+      if (error) {
+        const lower = (error.message || '').toLowerCase();
+        if (lower.includes('already registered') || lower.includes('already been registered')) {
+          return {
+            success: false,
+            error: 'An account with this email is already registered. Please log in or use Forgot Password.',
+          };
+        }
+
+        const isRateLimit =
+          lower.includes('rate limit') ||
+          lower.includes('over_email_send_rate_limit') ||
+          lower.includes('too many requests') ||
+          (error as any).status === 429;
+
+        const isDbTriggerError =
+          lower.includes('database error saving new user') ||
+          lower.includes('database error') ||
+          lower.includes('unexpected_failure');
+
+        if (isRateLimit || isDbTriggerError) {
+          // Prefer server bootstrap rather than the confirmation-settings dead-end
+          // Still use user id if Supabase returned one despite the error/rate-limit.
+          if (data?.user?.id && isValidUuid(data.user.id)) {
+            const identities = (data.user as any).identities;
+            if (!(Array.isArray(identities) && identities.length === 0)) {
+              createdUserId = data.user.id;
+            }
+          }
+          if (!createdUserId) {
+            clientSignUpFailedForBootstrap = true;
+            console.warn('[signUpWithEmailOtp] Client signUp recoverable failure:', error.message);
+          }
+        } else {
+          return {
+            success: false,
+            error: userSafeAuthError(error.message, 'Sign up failed. Please try again.'),
+          };
+        }
+      }
+
+      if (!clientSignUpFailedForBootstrap && data?.user?.id && isValidUuid(data.user.id)) {
+        // Supabase may return a user object without identities when the email is already
+        // registered (anti-enumeration). That path does NOT set the submitted password.
+        const identities = (data.user as any).identities;
+        if (Array.isArray(identities) && identities.length === 0) {
+          return {
+            success: false,
+            error: 'An account with this email is already registered. Please log in or use Forgot Password.',
+          };
+        }
+        createdUserId = data.user.id;
+      } else if (!clientSignUpFailedForBootstrap && !data?.user) {
+        // Empty user without error — treat as already-registered / orphan Auth
+        clientSignUpFailedForBootstrap = true;
+        console.warn('[signUpWithEmailOtp] signUp returned no user; trying register-bootstrap');
+      }
+    } catch (err: any) {
+      console.warn('[signUpWithEmailOtp] exception:', err);
+      clientSignUpFailedForBootstrap = true;
+    }
+
+    // Resilient path: service-role bootstrap for orphan Auth / trigger / empty-user cases
+    if (!createdUserId && (clientSignUpFailedForBootstrap || !createdUserId)) {
+      try {
+        const bootRes = await fetch('/api/auth/register-bootstrap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: cleanEmail,
+            password,
+            name,
+            role: safeRole,
+          }),
+        });
+        const bootData = await bootRes.json().catch(() => ({}));
+        if (bootRes.ok && bootData?.success && bootData?.userId && isValidUuid(bootData.userId)) {
+          createdUserId = bootData.userId;
+        } else if (bootData?.code === 'ALREADY_REGISTERED' || /already registered/i.test(String(bootData?.error || ''))) {
+          return {
+            success: false,
+            error: 'An account with this email is already registered. Please log in or use Forgot Password.',
+          };
+        } else if (!createdUserId) {
+          return {
+            success: false,
+            error: userSafeAuthError(
+              bootData?.error,
+              'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.'
+            ),
+          };
+        }
+      } catch (bootErr) {
+        console.warn('[signUpWithEmailOtp] register-bootstrap failed:', bootErr);
+        return {
+          success: false,
+          error:
+            'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.',
+        };
+      }
+    }
+
+    if (!createdUserId) {
+      return {
+        success: false,
+        error:
+          'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.',
+      };
+    }
+  }
+
+  // 2. Dispatch custom 6-digit OTP (also stores pending password for post-verify Auth confirm)
   try {
     const sRes = await fetch('/api/auth/send-otp', {
       method: 'POST',
@@ -48,90 +245,46 @@ export async function signUpWithEmailOtp(params: {
         password,
       }),
     });
-    if (sRes.ok) {
-      const sData = await sRes.json();
-      capturedOtpCode = sData.otpCode;
-      capturedShowOtpInForm = sData.showOtpInForm;
+    const sData = await sRes.json().catch(() => ({}));
+    if (!sRes.ok) {
+      return {
+        success: false,
+        error: userSafeAuthError(sData.error, 'Could not send verification email. Please try again.'),
+      };
     }
+    capturedOtpCode = sData.otpCode;
+    capturedShowOtpInForm = sData.showOtpInForm;
   } catch (err) {
     console.warn('Server OTP dispatch error:', err);
+    return { success: false, error: 'Could not send verification email. Please try again.' };
   }
 
-  // 2. Also register with Supabase Auth if configured
-  let createdUserId: string | null = null;
-
-  if (isSupabaseConfigured()) {
-    try {
-      // Prefer an already-persisted profile for this email (avoids duplicate males)
-      const { data: existingByEmail } = await supabase
-        .from('profiles')
-        .select('id')
-        .ilike('email', cleanEmail)
-        .maybeSingle();
-      const existingRow = existingByEmail as { id: string } | null;
-      if (existingRow?.id) {
-        createdUserId = existingRow.id;
-      }
-
-      const { data, error } = await supabase.auth.signUp({
-        email: cleanEmail,
-        password,
-        options: {
-          data: {
-            full_name: name,
-            display_name: name,
-            role: safeRole,
-            is_onboarded: false,
-          },
-        },
-      });
-
-      if (data?.user?.id && isValidUuid(data.user.id)) {
-        // Auth user id is canonical when available
-        createdUserId = data.user.id;
-      }
-
-      if (error) {
-        // If user already exists, suggest login or try resending OTP
-        if (error.message.toLowerCase().includes('already registered')) {
-          // Reuse existing auth/profile rather than inventing a second male row
-          if (!createdUserId) {
-            return {
-              success: false,
-              error: 'An account with this email is already registered. Please log in instead.',
-            };
-          }
-        } else {
-          // Catch Supabase built-in email rate limit ("email rate limit exceeded", "over_email_send_rate_limit", 429)
-          const isRateLimit =
-            error.message.toLowerCase().includes('rate limit') ||
-            error.message.toLowerCase().includes('over_email_send_rate_limit') ||
-            error.message.toLowerCase().includes('too many requests') ||
-            (error as any).status === 429;
-
-          if (!isRateLimit) {
-            return { success: false, error: error.message };
-          }
-        }
-      }
-    } catch (err: any) {
-      return { success: false, error: err?.message || 'Sign up failed.' };
-    }
+  if (!createdUserId && !isSupabaseConfigured()) {
+    return {
+      success: true,
+      message: `A 6-digit verification code has been dispatched to ${cleanEmail}. Please check your email inbox.`,
+      needsOnboarding: true,
+      otpCode: capturedOtpCode,
+      showOtpInForm: capturedShowOtpInForm,
+    };
   }
 
   if (!createdUserId) {
-    return { success: false, error: 'Could not create an authenticated account. Check email confirmation settings and try again.' };
+    return {
+      success: false,
+      error:
+        'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.',
+    };
   }
 
-  // 3. Immediately persist initial pending profile to Supabase profiles table
-  const isFemaleRole = safeRole === 'female_user' || safeRole === 'female_creator';
-  const isOtherRole = safeRole === 'other_user';
+  // 3. Persist a minimal pending profile — force sanitized public role/gender (overwrite stale TL)
+  const isFemaleRole = lockedGender === 'female';
   const initialProfile: UserProfile = {
     id: createdUserId,
     authId: createdUserId,
     name,
     email: cleanEmail,
-    gender: isFemaleRole ? 'female' : isOtherRole ? 'other' : 'male',
+    gender: lockedGender,
     genderLocked: true,
     role: safeRole,
     age: 24,
@@ -154,6 +307,8 @@ export async function signUpWithEmailOtp(params: {
     earningsCoins: 0,
     totalLifetimeEarnedUSD: 0,
     emailVerified: false,
+    agencyName: undefined,
+    commissionPercent: undefined,
   };
 
   try {
@@ -183,6 +338,7 @@ export async function verifyEmailOtp(
         type?: 'signup' | 'email' | 'recovery';
         role?: UserRole;
         name?: string;
+        password?: string;
       }
     | string,
   tokenArg?: string,
@@ -194,6 +350,7 @@ export async function verifyEmailOtp(
   let type: 'signup' | 'email' | 'recovery' = 'signup';
   let role: UserRole | undefined = roleArg;
   let name: string | undefined = nameArg;
+  let password: string | undefined;
 
   if (typeof paramsOrEmail === 'string') {
     email = paramsOrEmail;
@@ -204,6 +361,7 @@ export async function verifyEmailOtp(
     if (paramsOrEmail.type) type = paramsOrEmail.type;
     if (paramsOrEmail.role) role = paramsOrEmail.role;
     if (paramsOrEmail.name) name = paramsOrEmail.name;
+    if (paramsOrEmail.password) password = paramsOrEmail.password;
   }
 
   const cleanEmail = email.trim().toLowerCase();
@@ -251,13 +409,26 @@ export async function verifyEmailOtp(
         let profile: UserProfile;
         if (dbProfile) {
           profile = mapDbProfileToUserProfile(dbProfile);
-          // Keep auth linkage + verified flag on the canonical row
+          // Public signup verify: force sanitized role/gender (overwrite stale team_leader)
+          const forcedRole = role ? sanitizeClientSignupRole(role) : null;
           profile = {
             ...profile,
-            authId: profile.authId || userId,
+            authId: userId,
             emailVerified: true,
+            ...(forcedRole
+              ? {
+                  role: forcedRole,
+                  gender: lockedGenderFromRole(forcedRole),
+                  genderLocked: true,
+                  agencyName: undefined,
+                  commissionPercent: undefined,
+                }
+              : {}),
           };
-          if (!profile.authId || profile.id !== userId) {
+          const needsRoleFix =
+            Boolean(forcedRole) &&
+            (dbProfile.role !== forcedRole || dbProfile.gender !== lockedGenderFromRole(forcedRole!));
+          if (!dbProfile.auth_id || dbProfile.auth_id !== userId || needsRoleFix) {
             await upsertProfileToSupabase({
               ...profile,
               id: profile.id || userId,
@@ -266,16 +437,18 @@ export async function verifyEmailOtp(
             });
           }
         } else {
-          // Initialize pending onboarding profile
-          const metaRole = (data.user.user_metadata?.role as UserRole) || role || 'male_user';
-          const isMetaFemale = metaRole === 'female_user' || metaRole === 'female_creator';
-          const isMetaOther = metaRole === 'other_user';
+          // Initialize pending onboarding profile — never trust privileged metadata from client
+          const metaRole = sanitizeClientSignupRole(
+            (role as UserRole) || (data.user.user_metadata?.role as UserRole) || 'male_user'
+          );
+          const lockedGender = lockedGenderFromRole(metaRole);
+          const isMetaFemale = lockedGender === 'female';
           profile = {
             id: userId,
             authId: userId,
-            name: data.user.user_metadata?.full_name || name || 'New Member',
+            name: data.user.user_metadata?.full_name || name || cleanEmail.split('@')[0] || 'User',
             email: cleanEmail,
-            gender: isMetaFemale ? 'female' : isMetaOther ? 'other' : 'male',
+            gender: lockedGender,
             genderLocked: true,
             role: metaRole,
             age: 21,
@@ -319,73 +492,129 @@ export async function verifyEmailOtp(
     }
   }
 
-  // Server-side OTP verification fallback check
+  // Server-side OTP verification fallback (custom email OTP when Supabase verifyOtp fails)
   try {
     const serverVerifyRes = await fetch('/api/auth/verify-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: cleanEmail, token: cleanToken }),
+      body: JSON.stringify({
+        email: cleanEmail,
+        token: cleanToken,
+        // Activates Auth password + email_confirm for pending signups (required for first login)
+        ...(password ? { password } : {}),
+      }),
     });
     if (serverVerifyRes.ok) {
       const sData = await serverVerifyRes.json();
       if (sData.success) {
-        const metaRole = (sData.metadata?.role as UserRole) || role || 'male_user';
-        const isMetaFemale = metaRole === 'female_user' || metaRole === 'female_creator';
-        const isMetaOther = metaRole === 'other_user';
+        const metaRole = sanitizeClientSignupRole(
+          (role as UserRole) || (sData.metadata?.role as UserRole) || 'male_user'
+        );
+        const lockedGender = lockedGenderFromRole(metaRole);
+        const isMetaFemale = lockedGender === 'female';
+        const isMetaOther = lockedGender === 'other';
 
-        // Reuse canonical profile by email — never mint a second UUID for the same inbox
+        // Require a real auth/profile identity — never mint orphan UUIDs for the same inbox
         let resolvedId: string | null = null;
+        let existingProfile: UserProfile | null = null;
+
         if (isSupabaseConfigured()) {
           try {
+            const { data: sessionData } = await supabase.auth.getSession();
+            if (sessionData.session?.user?.id) {
+              resolvedId = sessionData.session.user.id;
+            }
+
             const { data: existingByEmail } = await supabase
               .from('profiles')
-              .select('id')
+              .select('*')
               .ilike('email', cleanEmail)
               .maybeSingle();
-            if (existingByEmail && (existingByEmail as { id?: string }).id) {
-              resolvedId = (existingByEmail as { id: string }).id;
+            if (existingByEmail) {
+              existingProfile = mapDbProfileToUserProfile(existingByEmail);
+              resolvedId = resolvedId || existingProfile.id || existingProfile.authId || null;
+            }
+
+            if (!resolvedId) {
+              const { data: listData } = await supabase.auth.getUser();
+              if (listData.user?.id && listData.user.email?.toLowerCase() === cleanEmail) {
+                resolvedId = listData.user.id;
+              }
             }
           } catch (e) {
             console.warn('Email profile lookup during OTP fallback failed:', e);
           }
         }
-        if (!resolvedId) {
-          resolvedId = generateValidUuid();
+
+        if (!resolvedId || !isValidUuid(resolvedId)) {
+          return {
+            success: false,
+            error:
+              'Email code verified, but no authenticated account was found. Please complete registration again or sign in.',
+          };
         }
 
-        const verifiedUser: UserProfile = {
-          id: resolvedId,
-          authId: resolvedId,
-          name: sData.metadata?.name || name || 'New Member',
-          email: cleanEmail,
-          gender: isMetaFemale ? 'female' : isMetaOther ? 'other' : 'male',
-          genderLocked: true,
-          role: metaRole,
-          age: 21,
-          dob: '2003-01-01',
-          nationality: 'United States',
-          countryCode: 'US',
-          spokenLanguages: ['English'],
-          bio: '',
-          interests: [],
-          avatarUrl: isMetaFemale
-            ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'
-            : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
-          gallery: [],
-          isVerified: false,
-          isOnboarded: false,
-          onlineStatus: 'online',
-          createdAt: new Date().toISOString().split('T')[0],
-          coinBalance: isMetaFemale ? 0 : 50,
-          hourlyCoinRate: metaRole === 'female_creator' ? 10 : 0,
-          earningsCoins: 0,
-          totalLifetimeEarnedUSD: 0,
-          emailVerified: true,
-        };
+        const displayName =
+          existingProfile?.name ||
+          sData.metadata?.name ||
+          name ||
+          cleanEmail.split('@')[0] ||
+          'User';
 
-        // Persist verified status directly to Supabase
+        const verifiedUser: UserProfile = existingProfile
+          ? {
+              ...existingProfile,
+              id: existingProfile.id || resolvedId,
+              authId: existingProfile.authId || resolvedId,
+              name: existingProfile.name && existingProfile.name !== 'New Member' && existingProfile.name !== 'Member'
+                ? existingProfile.name
+                : displayName,
+              // Force public signup role over stale TL/admin rows
+              role: metaRole,
+              gender: lockedGender,
+              genderLocked: true,
+              agencyName: undefined,
+              commissionPercent: undefined,
+              emailVerified: true,
+              isOnboarded: Boolean(existingProfile.isOnboarded),
+            }
+          : {
+              id: resolvedId,
+              authId: resolvedId,
+              name: displayName,
+              email: cleanEmail,
+              gender: lockedGender,
+              genderLocked: true,
+              role: metaRole,
+              age: 21,
+              dob: '2003-01-01',
+              nationality: 'United States',
+              countryCode: 'US',
+              spokenLanguages: ['English'],
+              bio: '',
+              interests: [],
+              avatarUrl: isMetaFemale
+                ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'
+                : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
+              gallery: [],
+              isVerified: false,
+              isOnboarded: false,
+              onlineStatus: 'online',
+              createdAt: new Date().toISOString().split('T')[0],
+              coinBalance: isMetaFemale ? 0 : 50,
+              hourlyCoinRate: metaRole === 'female_creator' ? 10 : 0,
+              earningsCoins: 0,
+              totalLifetimeEarnedUSD: 0,
+              emailVerified: true,
+            };
+
         try {
-          await upsertProfileToSupabase(verifiedUser);
+          await upsertProfileToSupabase({
+            ...verifiedUser,
+            role: metaRole,
+            gender: lockedGender,
+            emailVerified: true,
+          });
         } catch (e) {
           console.warn('Upsert verified user error:', e);
         }
@@ -393,8 +622,16 @@ export async function verifyEmailOtp(
         return {
           success: true,
           user: verifiedUser,
-          needsOnboarding: true,
+          needsOnboarding: !verifiedUser.isOnboarded,
           message: '6-digit OTP code verified successfully!',
+        };
+      }
+    } else {
+      const failData = await serverVerifyRes.json().catch(() => ({}));
+      if (failData?.error) {
+        return {
+          success: false,
+          error: userSafeAuthError(failData.error, 'Invalid or expired 6-digit verification code.'),
         };
       }
     }
@@ -502,6 +739,14 @@ export async function signInWithEmailPassword(
       });
 
       if (error || !data?.user) {
+        const raw = (error?.message || '').toLowerCase();
+        if (raw.includes('email not confirmed') || raw.includes('not confirmed')) {
+          return {
+            success: false,
+            error:
+              'Please verify your email with the 6-digit code we sent before signing in. You can also use Forgot Password.',
+          };
+        }
         return {
           success: false,
           error: 'Invalid email or password. Please check your credentials.',
@@ -560,38 +805,11 @@ export async function signInWithEmailPassword(
         };
       }
 
-      // Auth succeeded — return minimal profile from Auth user (trigger should create row)
+      // Auth OK but no profiles row — deleted / orphan Auth. Never invent a synthetic profile.
+      await supabase.auth.signOut();
       return {
-        success: true,
-        user: {
-          id: data.user.id,
-          authId: data.user.id,
-          name: data.user.user_metadata?.full_name || cleanEmail.split('@')[0] || 'Member',
-          email: cleanEmail,
-          gender: 'male',
-          genderLocked: true,
-          role: 'male_user',
-          isOnboarded: false,
-          onlineStatus: 'online',
-          coinBalance: 50,
-          hourlyCoinRate: 0,
-          earningsCoins: 0,
-          totalLifetimeEarnedUSD: 0,
-          avatarUrl: '',
-          gallery: [],
-          interests: [],
-          tags: [],
-          spokenLanguages: ['English'],
-          nationality: 'United States',
-          countryCode: 'US',
-          age: 24,
-          dob: '2000-01-01',
-          bio: '',
-          isVerified: false,
-          createdAt: new Date().toISOString().split('T')[0],
-        } as UserProfile,
-        needsOnboarding: true,
-        session: data.session,
+        success: false,
+        error: 'Account not found or was deleted. Please register again.',
       };
     } catch (err: any) {
       console.warn('Supabase signIn exception:', err);
@@ -735,12 +953,23 @@ export async function updateUserPassword(params: {
   email?: string;
   newPassword: string;
 }): Promise<{ success: boolean; message: string; error?: string }> {
-  const { userId, email, newPassword } = params;
+  const { newPassword } = params;
 
   const passwordError = getPasswordPolicyError(newPassword);
   if (passwordError) {
     return { success: false, message: passwordError, error: passwordError };
   }
+
+  const token = await getAccessToken();
+  if (!token && isSupabaseConfigured()) {
+    return {
+      success: false,
+      message: 'You must be signed in to change your password.',
+      error: 'You must be signed in to change your password.',
+    };
+  }
+
+  let clientUpdated = false;
 
   // 1. Try updating active Supabase client session if available
   if (isSupabaseConfigured()) {
@@ -751,10 +980,10 @@ export async function updateUserPassword(params: {
       if (error) {
         console.warn('Client Supabase updateUser notice:', error.message);
       } else {
-        console.log('Supabase Auth password successfully updated via client session');
+        clientUpdated = true;
       }
     } catch (e: any) {
-      console.warn('Supabase client password update exception:', e.message);
+      console.warn('Supabase client password update exception:', e?.message || e);
     }
   }
 
@@ -763,37 +992,78 @@ export async function updateUserPassword(params: {
     const res = await fetch('/api/auth/update-password', {
       method: 'POST',
       headers: await (await import('../utils/apiClient')).authHeaders(),
-      body: JSON.stringify({ userId, email, newPassword }),
+      body: JSON.stringify({ newPassword }),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (res.ok && data.success) {
       return { success: true, message: data.message || 'Password updated successfully!' };
     }
-    if (data.error) {
-      return { success: false, message: data.error, error: data.error };
+    if (!clientUpdated) {
+      const errMsg = userSafeAuthError(data.error, 'Failed to update password.');
+      return { success: false, message: errMsg, error: errMsg };
     }
+    // Client session updated even if server echo failed
+    return { success: true, message: 'Password updated successfully!' };
   } catch (err: any) {
     console.warn('Server password update API exception:', err);
+    if (clientUpdated) {
+      return { success: true, message: 'Password updated successfully!' };
+    }
+    return {
+      success: false,
+      message: 'Failed to update password. Please try again.',
+      error: 'Failed to update password. Please try again.',
+    };
   }
-
-  return { success: true, message: 'Password updated successfully!' };
 }
 
 
 /**
- * Step 2: Complete Profile Onboarding Wizard & save to Supabase
+ * Step 2: Complete Profile Onboarding Wizard & save to Supabase (via authenticated Express path)
  */
 export async function completeUserProfileOnboarding(
   currentUser: UserProfile,
   formData: OnboardingFormData
-): Promise<{ success: boolean; updatedProfile: UserProfile; error?: string }> {
-  const isFemale = currentUser.role === 'female_creator' || formData.gender === 'female';
+): Promise<{ success: boolean; updatedProfile?: UserProfile; error?: string }> {
+  if (!currentUser?.id) {
+    return { success: false, error: 'Missing authenticated user. Please sign in again.' };
+  }
 
-  const updatedProfile: UserProfile = {
-    ...currentUser,
+  if (isSupabaseConfigured()) {
+    const token = await getAccessToken();
+    if (!token) {
+      return {
+        success: false,
+        error: 'Your session expired. Please sign in again to finish profile setup.',
+      };
+    }
+  }
+
+  if (!formData.agreedToTerms) {
+    return { success: false, error: 'You must agree to the Platform Terms of Service.' };
+  }
+
+  const lockedRole = sanitizeClientSignupRole(currentUser.role);
+  const lockedGender = lockedGenderFromRole(lockedRole);
+  const isFemaleHost = lockedRole === 'female_creator' || lockedRole === 'female_host';
+
+  if (formData.age < 18) {
+    return { success: false, error: 'You must be 18 years or older to use this service.' };
+  }
+
+  if (!isFemaleHost && !formData.agreedToAdultTerms) {
+    return { success: false, error: 'You must acknowledge the 18+ Adult & Content Policy.' };
+  }
+
+  if (isFemaleHost && !formData.agreedToHostTerms) {
+    return { success: false, error: 'You must accept the Host Code of Conduct.' };
+  }
+
+  // Safe onboarding fields only — never send wallet/role/ban privileged mutations
+  const safeUpdates: Partial<UserProfile> = {
     dob: formData.dob,
     age: formData.age,
-    gender: formData.gender,
+    gender: lockedGender,
     genderLocked: true,
     nationality: formData.nationality,
     countryCode: formData.countryCode,
@@ -803,7 +1073,6 @@ export async function completeUserProfileOnboarding(
     interests: formData.interests,
     interestedIn: formData.interestedIn,
     tags: formData.tags,
-    hourlyCoinRate: isFemale ? (formData.hourlyCoinRate || 10) : 0,
     avatarUrl: formData.avatarUrl || currentUser.avatarUrl,
     gallery: formData.gallery.length > 0 ? formData.gallery : currentUser.gallery,
     introVideoUrl: formData.introVideoUrl || currentUser.introVideoUrl,
@@ -812,19 +1081,70 @@ export async function completeUserProfileOnboarding(
     agreedToHostTerms: formData.agreedToHostTerms,
     isOnboarded: true,
     onboardingStep: 4,
-    kycStatus: 'unsubmitted', // KYC is NOT required during registration
+    kycStatus: 'unsubmitted',
+  };
+
+  // Host rate may be set during onboarding; stripPrivileged keeps role/wallet/ban off the wire
+  if (isFemaleHost) {
+    safeUpdates.hourlyCoinRate = formData.hourlyCoinRate || currentUser.hourlyCoinRate || 10;
+  }
+
+  const updatedProfile: UserProfile = {
+    ...currentUser,
+    ...safeUpdates,
+    role: lockedRole,
+    gender: lockedGender,
+    genderLocked: true,
+    // Preserve authoritative privileged fields from existing profile — do not invent client values
+    coinBalance: currentUser.coinBalance,
+    earningsCoins: currentUser.earningsCoins,
+    totalLifetimeEarnedUSD: currentUser.totalLifetimeEarnedUSD,
+    isBanned: currentUser.isBanned,
+    isVerified: currentUser.isVerified,
+    isOnboarded: true,
   };
 
   try {
-    await upsertProfileToSupabase(updatedProfile);
-  } catch (err) {
-    console.warn('Error upserting onboarded profile to Supabase:', err);
-  }
+    const res = await authFetch('/api/supabase/update-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: currentUser.id,
+        updates: safeUpdates,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      // Fallback: authenticated upsert (also strips privileged fields server-side for non-admins)
+      const upsertRes = await authFetch('/api/supabase/upsert-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedProfile),
+      });
+      const upsertData = await upsertRes.json().catch(() => ({}));
+      if (!upsertRes.ok || !upsertData.success) {
+        return {
+          success: false,
+          error: userSafeAuthError(
+            data.error || upsertData.error,
+            'Could not save your profile. Please try again.'
+          ),
+        };
+      }
+      const persisted = upsertData.user
+        ? { ...updatedProfile, ...upsertData.user, isOnboarded: true, role: lockedRole }
+        : updatedProfile;
+      return { success: true, updatedProfile: persisted };
+    }
 
-  return {
-    success: true,
-    updatedProfile,
-  };
+    return { success: true, updatedProfile };
+  } catch (err) {
+    console.error('Error completing onboarding profile:', err);
+    return {
+      success: false,
+      error: 'Could not save your profile. Please try again.',
+    };
+  }
 }
 
 /**

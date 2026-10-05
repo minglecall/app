@@ -1,29 +1,21 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { UserProfile } from '../../types';
-import { getCountryFlag } from '../../utils/flags';
 import { getUserEffectiveLocation } from '../../utils/location';
 import { SvgFlag } from '../common/SvgFlag';
-import { ZodiacIcon } from '../common/ZodiacIcon';
 import {
   Heart,
   X,
   Star,
   Video,
   MapPin,
-  Globe,
-  Lock,
   CheckCircle2,
   Sparkles,
-  ShieldCheck,
   Languages,
   Flame,
   Info,
-  ChevronRight,
-  Target,
   Crown,
   Award,
-  Zap,
 } from 'lucide-react';
 import { rankCreatorsForDiscovery, isCurrentlyPeakHour } from '../../utils/discoveryAlgorithm';
 
@@ -32,16 +24,51 @@ interface SwipeMatchDeckProps {
 }
 
 export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModal }) => {
-  const { users, currentUser, startCall, toggleFavorite, favorites, creatorGoals, contributeToGoal, isFriend, systemSettings, recordQuickMatch, creatorMetricsMap } = useApp();
+  const {
+    users,
+    currentUser,
+    startCall,
+    favorites,
+    isFriend,
+    systemSettings,
+    likeUser,
+    passUser,
+    creatorMetricsMap,
+    blockedUserIds,
+    blockedByUserIds,
+    userMatchRecords,
+  } = useApp();
+
+  const [swipeDirection, setSwipeDirection] = useState<'left' | 'right' | 'super' | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
 
   // Dynamic Interest Filter: matches users strictly according to currentUser.interestedIn
-  const userInterestedIn = currentUser.interestedIn && currentUser.interestedIn.length > 0
-    ? currentUser.interestedIn
-    : (currentUser.gender === 'female' ? ['male'] : ['female']);
+  // (same logic as DiscoveryGrid — no always-true fallback)
+  const userInterestedIn =
+    currentUser.interestedIn && currentUser.interestedIn.length > 0
+      ? currentUser.interestedIn
+      : currentUser.gender === 'female'
+        ? ['male']
+        : ['female'];
+
+  const excludedByMatch = useMemo(() => {
+    const ids = new Set<string>();
+    for (const m of userMatchRecords) {
+      // Hide passed, already matched, and one-sided likes we already sent
+      if (m.status === 'rejected' || m.status === 'matched') {
+        ids.add(m.otherUserId);
+      } else if (m.status === 'pending' && m.initiatedBy === currentUser.id) {
+        ids.add(m.otherUserId);
+      }
+    }
+    return ids;
+  }, [userMatchRecords, currentUser.id]);
 
   const filteredCandidates = users.filter((u) => {
     if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
     if (u.id === currentUser.id) return false;
+    if (blockedUserIds.includes(u.id) || blockedByUserIds.includes(u.id)) return false;
+    if (excludedByMatch.has(u.id)) return false;
 
     const isFemaleTarget = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
     const isMaleTarget = u.gender === 'male' || u.role === 'male_user';
@@ -52,59 +79,76 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
     if (isMaleTarget && userInterestedIn.includes('male')) return true;
     if (isOtherTarget && (userInterestedIn.includes('other') || userInterestedIn.includes('others'))) return true;
 
-    return true;
+    return false;
   });
 
   const matchingCandidates = rankCreatorsForDiscovery(filteredCandidates, creatorMetricsMap, {
     peakHoursStart: systemSettings.peakHoursStart,
     peakHoursEnd: systemSettings.peakHoursEnd,
     peakHoursEnabled: systemSettings.peakHoursEnabled,
+    targetThresholds: systemSettings,
   }).map((r) => r.user);
 
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [swipeDirection, setSwipeDirection] = useState<'left' | 'right' | 'super' | null>(null);
-
-  const currentCreator = matchingCandidates.length > 0 ? matchingCandidates[currentIndex % matchingCandidates.length] : null;
+  const currentCreator = matchingCandidates.length > 0 ? matchingCandidates[0] : null;
   const isFav = currentCreator ? favorites.includes(currentCreator.id) : false;
 
-  const handlePass = () => {
+  const advanceDeck = () => {
+    setSwipeDirection(null);
+    // Do not bump index: the passed/liked user is removed from the pool, so the
+    // same index now points at the next remaining candidate.
+    setActionBusy(false);
+  };
+
+  const handlePass = async () => {
+    if (!currentCreator || actionBusy) return;
+    setActionBusy(true);
     setSwipeDirection('left');
+    const ok = await passUser(currentCreator.id);
     setTimeout(() => {
-      setSwipeDirection(null);
-      setCurrentIndex((prev) => prev + 1);
+      if (ok) advanceDeck();
+      else {
+        setSwipeDirection(null);
+        setActionBusy(false);
+      }
     }, 250);
   };
 
-  const handleLike = () => {
+  const handleLike = async () => {
+    if (!currentCreator || actionBusy) return;
+    setActionBusy(true);
     setSwipeDirection('right');
-    if (currentCreator) {
-      if (!isFav) toggleFavorite(currentCreator.id);
-      recordQuickMatch(currentCreator);
-    }
+    // Like → pending match via backend; do NOT favorite or recordQuickMatch
+    const ok = await likeUser(currentCreator.id);
     setTimeout(() => {
-      setSwipeDirection(null);
-      setCurrentIndex((prev) => prev + 1);
+      if (ok) advanceDeck();
+      else {
+        setSwipeDirection(null);
+        setActionBusy(false);
+      }
     }, 250);
   };
 
-  const handleSuperLike = () => {
+  const handleSuperLike = async () => {
+    if (!currentCreator || actionBusy) return;
+    setActionBusy(true);
     setSwipeDirection('super');
-    if (currentCreator) {
-      if (!isFav) toggleFavorite(currentCreator.id);
-      recordQuickMatch(currentCreator, 50);
-    }
+    // Super like = like with flag only; no fake coin gift credit
+    const ok = await likeUser(currentCreator.id, { superLike: true });
     setTimeout(() => {
-      setSwipeDirection(null);
-      setCurrentIndex((prev) => prev + 1);
+      if (ok) advanceDeck();
+      else {
+        setSwipeDirection(null);
+        setActionBusy(false);
+      }
     }, 300);
   };
 
   if (!currentCreator) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[400px] p-8 bg-[#161920] border border-slate-800 rounded-2xl text-center">
-        <Sparkles className="w-12 h-12 text-indigo-400 animate-pulse mb-3" />
-        <h3 className="text-lg font-bold text-white font-mono">No More Profiles in Swipe Deck</h3>
-        <p className="text-xs text-slate-400 mt-1">Check back soon or explore creators in Grid View.</p>
+      <div className="flex flex-col items-center justify-center min-h-[400px] p-8 bg-app-card border border-hairline rounded-app-xl text-center">
+        <Sparkles className="w-12 h-12 text-brand mb-3" />
+        <h3 className="text-lg font-display font-bold text-app-heading">No more profiles</h3>
+        <p className="text-xs text-app-muted mt-1">Check back soon or browse Discover.</p>
       </div>
     );
   }
@@ -114,19 +158,19 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
       {/* Top Header Badge */}
       <div className="w-full flex items-center justify-between mb-3 px-2">
         <div className="flex items-center space-x-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
-          <span className="text-xs font-mono font-bold text-slate-300 uppercase tracking-wider">
-            SWIPE & DISCOVER • {(currentIndex % matchingCandidates.length) + 1} / {matchingCandidates.length}
+          <span className="online-dot" />
+          <span className="text-xs font-semibold text-app-muted">
+            {matchingCandidates.length} left
           </span>
         </div>
-        <div className="text-[10px] font-mono text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-full font-bold">
-          98% Match Rate
+        <div className="text-[11px] text-brand bg-brand-soft border border-brand/25 px-2.5 py-0.5 rounded-md font-semibold">
+          {isFav ? 'Favorited' : 'Swipe'}
         </div>
       </div>
 
       {/* Main Swipe Card */}
       <div
-        className={`relative w-full aspect-[3/4] max-h-[520px] bg-[#161920] border border-slate-800 rounded-3xl overflow-hidden shadow-2xl transition-all duration-300 transform ${
+        className={`relative w-full aspect-[9/16] max-h-[70vh] bg-app-card border border-hairline rounded-app-xl overflow-hidden shadow-app transition-all duration-300 transform ${
           swipeDirection === 'left'
             ? '-translate-x-32 -rotate-12 opacity-0'
             : swipeDirection === 'right'
@@ -144,7 +188,7 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
         />
 
         {/* Gradient Overlay */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent pointer-events-none" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/35 to-transparent pointer-events-none" />
 
         {/* Top Badges */}
         <div className="absolute top-4 left-4 right-4 flex items-center justify-between pointer-events-auto">
@@ -209,16 +253,6 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
               </span>
             )}
           </div>
-
-          {/* Hourly Rate Badge */}
-          <div className="px-2.5 py-1 rounded-full border border-slate-700 bg-slate-900/80 backdrop-blur-md font-mono text-xs font-extrabold text-amber-300 flex items-center space-x-1">
-            <span>
-              🪙{' '}
-              {isFriend(currentCreator.id)
-                ? (systemSettings.coinBurnRateFriendPerMin ?? 80)
-                : (systemSettings.coinBurnRatePerMin || 120)}/min
-            </span>
-          </div>
         </div>
 
         {/* Swipe Feedback Overlay Indicator */}
@@ -239,23 +273,30 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
         )}
 
         {/* Bottom Details Section */}
-        <div className="absolute bottom-0 inset-x-0 p-5 space-y-2 text-white">
+        <div className="absolute bottom-0 inset-x-0 p-5 space-y-2 text-on-media">
           {/* Name, Age, Country Flag & Zodiac */}
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-xl font-black flex items-center space-x-2 flex-wrap">
-                <span>{currentCreator.name}, {currentCreator.age}</span>
+              <h2 className="text-xl font-display font-bold flex items-center space-x-2 flex-wrap text-on-media">
+                <span>
+                  {currentCreator.name}, {currentCreator.age}
+                </span>
                 <SvgFlag countryCode={currentCreator.countryCode} nationality={currentCreator.nationality} size="sm" />
               </h2>
-              <div className="flex items-center space-x-3 text-xs text-slate-300 font-mono mt-0.5">
+              <div className="flex items-center space-x-3 text-xs text-on-media-muted mt-0.5">
                 <span className="flex items-center space-x-1">
-                  <MapPin className={`w-3 h-3 ${getUserEffectiveLocation(currentCreator).isMock ? 'text-pink-400' : 'text-emerald-400'}`} />
+                  <MapPin
+                    className={`w-3 h-3 ${getUserEffectiveLocation(currentCreator).isMock ? 'text-pink-400' : 'text-emerald-400'}`}
+                  />
                   <span>{getUserEffectiveLocation(currentCreator).displayCity}</span>
                   {getUserEffectiveLocation(currentCreator).isMock && (
                     <span className="px-1 py-0.2 rounded bg-pink-600 text-[8px] font-bold text-white">MOCK</span>
                   )}
                 </span>
-                <span className="flex items-center space-x-1 text-slate-400" title={`Primary: ${currentCreator.spokenLanguages?.[0] || 'English'}`}>
+                <span
+                  className="flex items-center space-x-1 text-slate-400"
+                  title={`Primary: ${currentCreator.spokenLanguages?.[0] || 'English'}`}
+                >
                   <Languages className="w-3 h-3 text-amber-400" />
                   <span>{currentCreator.spokenLanguages?.[0] || 'English'}</span>
                 </span>
@@ -289,8 +330,9 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
       <div className="flex items-center justify-evenly w-full mt-4 px-4">
         {/* Pass Button */}
         <button
-          onClick={handlePass}
-          className="w-12 h-12 rounded-full bg-[#161920] border border-rose-500/40 text-rose-400 hover:bg-rose-500 hover:text-white flex items-center justify-center shadow-lg transition-all transform active:scale-95 group shrink-0"
+          onClick={() => void handlePass()}
+          disabled={actionBusy}
+          className="w-12 h-12 rounded-full bg-app-card border border-app text-app-muted hover:border-brand/40 hover:text-brand flex items-center justify-center transition-all transform active:scale-95 group shrink-0 disabled:opacity-50"
           title="Pass (Swipe Left)"
         >
           <X className="w-5 h-5 transition-transform group-hover:scale-110" />
@@ -298,8 +340,9 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
 
         {/* Superlike Button */}
         <button
-          onClick={handleSuperLike}
-          className="w-12 h-12 rounded-full bg-[#161920] border border-cyan-400/40 text-cyan-300 hover:bg-cyan-400 hover:text-slate-950 flex items-center justify-center shadow-lg transition-all transform active:scale-95 group shrink-0"
+          onClick={() => void handleSuperLike()}
+          disabled={actionBusy}
+          className="w-12 h-12 rounded-full bg-app-card border border-brand/30 text-brand hover:bg-brand hover:text-white flex items-center justify-center transition-all transform active:scale-95 group shrink-0 disabled:opacity-50"
           title="Super Like"
         >
           <Star className="w-5 h-5 fill-current transition-transform group-hover:scale-110" />
@@ -307,8 +350,9 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
 
         {/* Like Button */}
         <button
-          onClick={handleLike}
-          className="w-12 h-12 rounded-full bg-[#161920] border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500 hover:text-white flex items-center justify-center shadow-lg transition-all transform active:scale-95 group shrink-0"
+          onClick={() => void handleLike()}
+          disabled={actionBusy}
+          className="w-12 h-12 rounded-full bg-app-card border border-brand/40 text-brand hover:bg-brand hover:text-white flex items-center justify-center transition-all transform active:scale-95 group shrink-0 disabled:opacity-50"
           title="Like (Swipe Right)"
         >
           <Heart className="w-5 h-5 fill-current transition-transform group-hover:scale-110" />
@@ -317,10 +361,15 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
         {/* Direct Call Button */}
         <button
           onClick={() => startCall(currentCreator.id)}
-          className="w-12 h-12 rounded-full bg-gradient-to-r from-rose-500 to-indigo-600 hover:from-rose-400 hover:to-indigo-500 text-white flex items-center justify-center shadow-xl shadow-indigo-600/30 transition-all transform active:scale-95 group shrink-0 border border-white/20"
+          className="w-12 h-12 rounded-full bg-flirt hover:brightness-110 text-white flex items-center justify-center shadow-brand transition-all transform active:scale-95 group shrink-0 relative"
           title="Start 1-on-1 Direct Video Call"
         >
           <Video className="w-5 h-5 fill-current transition-transform group-hover:scale-110" />
+          {isFriend(currentCreator.id) && (
+            <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap glass-pill px-1.5 py-0.5 rounded-md text-[9px] font-ticker text-white">
+              {systemSettings.coinBurnRateFriendPerMin ?? 80}/m
+            </span>
+          )}
         </button>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
+import { getCoinUsdPeg, coinsToUsd } from '../../../shared/finance/fx';
 import {
   User,
   MapPin,
@@ -65,6 +66,8 @@ import { SvgFlag } from '../common/SvgFlag';
 import { ZodiacIcon } from '../common/ZodiacIcon';
 import { PasswordStrengthField } from '../auth/PasswordStrengthField';
 import { getPasswordPolicyError, isPasswordPolicyValid } from '../../../shared/passwordPolicy';
+import { authFetch } from '../../utils/apiClient';
+import { signOutSupabase } from '../../services/supabaseAuthService';
 
 const PRESET_AVATARS = [
   'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
@@ -79,14 +82,12 @@ const PRESET_AVATARS = [
 
 interface UserProfilePageProps {
   onOpenStore?: () => void;
-  onOpenVip?: () => void;
   onOpenChat?: (userId?: string) => void;
   onNavigateToTab?: (tab: string) => void;
 }
 
 export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   onOpenStore,
-  onOpenVip,
   onOpenChat,
   onNavigateToTab,
 }) => {
@@ -101,6 +102,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     dailyBonusClaimed,
     feedPosts,
     callLogs,
+    logoutUser,
   } = useApp();
 
   const isTeamLeader = currentUser.role === 'team_leader' || currentUser.role === 'agency_manager';
@@ -126,6 +128,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [passwordSubmitting, setPasswordSubmitting] = useState(false);
+
+  // Self-delete account state (hidden for admin)
+  const [deleteConfirmPhrase, setDeleteConfirmPhrase] = useState('');
+  const [deletePasswordInput, setDeletePasswordInput] = useState('');
+  const [showDeletePassword, setShowDeletePassword] = useState(false);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
 
   // Avatar upload & R2 storage modal state
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
@@ -273,6 +281,73 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       setCurrentPasswordInput('');
       setNewPasswordInput('');
       setConfirmPasswordInput('');
+    }
+  };
+
+  const handleSelfDeleteAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isAdmin) return;
+
+    const phrase = deleteConfirmPhrase.trim();
+    const email = (currentUser.email || '').trim().toLowerCase();
+    const phraseOk =
+      phrase.toUpperCase() === 'DELETE' || (email && phrase.toLowerCase() === email);
+    if (!phraseOk) {
+      showToast('Confirmation Required', 'Type DELETE or your account email to continue.', 'warning');
+      return;
+    }
+    if (!deletePasswordInput.trim()) {
+      showToast('Password Required', 'Enter your password to permanently delete this account.', 'warning');
+      return;
+    }
+
+    const ok = window.confirm(
+      'This permanently deletes your account, login, and profile data. This cannot be undone. Continue?'
+    );
+    if (!ok) return;
+
+    setDeleteSubmitting(true);
+    try {
+      const res = await authFetch('/api/users/me/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirmPhrase: phrase,
+          password: deletePasswordInput,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        const errMsg =
+          (typeof data?.error === 'string' && data.error) ||
+          data?.error?.message ||
+          'Could not delete your account.';
+        showToast('Delete Failed', errMsg, 'error');
+        return;
+      }
+
+      showToast('Account Deleted', 'Your account has been permanently removed.', 'success');
+      setDeleteConfirmPhrase('');
+      setDeletePasswordInput('');
+      try {
+        await signOutSupabase();
+      } catch {
+        /* ignore */
+      }
+      logoutUser();
+      try {
+        localStorage.removeItem('livecall_logged_in');
+        localStorage.removeItem('livecall_current_user_id');
+      } catch {
+        /* ignore */
+      }
+      if (typeof window !== 'undefined') {
+        window.location.assign('/');
+      }
+    } catch (err: any) {
+      showToast('Delete Failed', err?.message || 'Network error during account deletion.', 'error');
+    } finally {
+      setDeleteSubmitting(false);
     }
   };
 
@@ -493,7 +568,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       />
 
       {/* 1. Header Banner & Profile Hero Card */}
-      <div className="relative rounded-3xl bg-gradient-to-b from-[#181C26] via-[#12151D] to-[#0D0F14] border border-slate-800/90 p-5 sm:p-7 shadow-2xl overflow-hidden">
+      <div className="relative rounded-3xl bg-app-card border border-hairline p-5 sm:p-7 shadow-app-lg overflow-hidden">
         {/* Glow ambient decoration */}
         <div
           className={`absolute -top-24 -right-24 w-80 h-80 rounded-full blur-3xl pointer-events-none opacity-20 ${
@@ -512,7 +587,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 onError={(e) => {
                   (e.target as HTMLImageElement).src = getFallbackAvatar(currentUser.name, currentUser.gender, currentUser.role);
                 }}
-                className={`w-20 h-20 sm:w-24 sm:h-24 rounded-2xl object-cover ring-4 shadow-xl transition-all group-hover:brightness-75 bg-slate-900 ${
+                className={`w-20 h-20 sm:w-24 sm:h-24 rounded-2xl object-cover ring-4 shadow-xl transition-all group-hover:brightness-75 bg-app-input ${
                   isFemale ? 'ring-pink-500/50' : 'ring-indigo-500/50'
                 }`}
               />
@@ -530,14 +605,14 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 ) : (
                   <>
                     <Camera className="w-5 h-5 text-indigo-300 drop-shadow" />
-                    <span className="text-[10px] font-mono font-bold mt-1 text-slate-200">Change</span>
+                    <span className="text-[10px] font-mono font-bold mt-1 text-app-heading">Change</span>
                   </>
                 )}
               </button>
 
               {/* Online status indicator */}
               <span
-                className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-[#12151D] shadow-sm z-10 ${
+                className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-[var(--app-card)] shadow-sm z-10 ${
                   currentUser.onlineStatus === 'online'
                     ? 'bg-emerald-400'
                     : currentUser.onlineStatus === 'busy' || currentUser.onlineStatus === 'in_call'
@@ -550,7 +625,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               {/* Cloudflare R2 Badge */}
               <div
                 onClick={() => setIsAvatarModalOpen(true)}
-                className="absolute -top-1.5 -left-1.5 p-1 rounded-full bg-slate-900/90 border border-indigo-500/40 text-indigo-300 shadow-md cursor-pointer hover:scale-110 transition-transform"
+                className="absolute -top-1.5 -left-1.5 p-1 rounded-full bg-app-input border border-indigo-500/40 text-indigo-300 shadow-md cursor-pointer hover:scale-110 transition-transform"
                 title="Cloudflare R2 Synced Avatar"
               >
                 <Cloud className="w-3 h-3" />
@@ -559,7 +634,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
             <div className="min-w-0 space-y-1.5">
               <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight truncate">
+                <h1 className="text-xl sm:text-2xl font-black text-app-heading tracking-tight truncate">
                   {currentUser.name}
                 </h1>
                 {currentUser.isVerified && (
@@ -593,7 +668,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsAvatarModalOpen(true)}
-                  className="px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] font-mono font-bold flex items-center space-x-1 cursor-pointer transition-all hover:text-white"
+                  className="px-2 py-0.5 rounded-lg bg-app-input hover:bg-brand-soft text-app-muted border border-hairline text-[10px] font-mono font-bold flex items-center space-x-1 cursor-pointer transition-all hover:text-app-heading"
                 >
                   <Camera className="w-3 h-3 text-indigo-400" />
                   <span>Change Photo</span>
@@ -610,7 +685,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   <button
                     type="button"
                     onClick={handleCopyEmail}
-                    className="p-0.5 hover:text-white transition-colors"
+                    className="p-0.5 hover:text-app-heading transition-colors"
                     title="Copy Email Address"
                   >
                     <Copy className="w-3 h-3" />
@@ -619,10 +694,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               </div>
 
               {/* Effective Location Banner & Zodiac with Vector Graphics */}
-              <div className="flex items-center space-x-2 text-xs text-slate-300 flex-wrap gap-y-1">
-                <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-900/80 border border-slate-800">
+              <div className="flex items-center space-x-2 text-xs text-app-muted flex-wrap gap-y-1">
+                <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-app-input border border-hairline">
                   <MapPin className={`w-3.5 h-3.5 ${effectiveLocation.isMock ? 'text-pink-400' : 'text-emerald-400'}`} />
-                  <span className="font-semibold text-slate-200">
+                  <span className="font-semibold text-app-heading">
                     {effectiveLocation.displayCity}
                   </span>
                   <SvgFlag
@@ -638,22 +713,22 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   )}
                 </div>
 
-                <div className="flex items-center space-x-2 text-slate-400 font-mono text-xs">
-                  <span>Age: <strong className="text-white">{currentUser.age || 24}</strong></span>
+                <div className="flex items-center space-x-2 text-app-muted font-mono text-xs">
+                  <span>Age: <strong className="text-app-heading">{currentUser.age || 24}</strong></span>
                   {currentUser.zodiac && (
                     <ZodiacIcon sign={currentUser.zodiac} withBadge={true} size="xs" />
                   )}
                 </div>
               </div>
 
-              <p className="text-xs text-slate-400 line-clamp-2 max-w-xl pt-0.5">
+              <p className="text-xs text-app-muted line-clamp-2 max-w-xl pt-0.5">
                 {currentUser.bio || 'No bio yet. Click edit profile to add your introduction!'}
               </p>
             </div>
           </div>
 
           {/* Quick Action Badges (Gender Differentiated) */}
-          <div className="flex flex-row md:flex-col items-center md:items-end gap-2 shrink-0 w-full md:w-auto justify-between md:justify-start pt-3 md:pt-0 border-t md:border-t-0 border-slate-800/80">
+          <div className="flex flex-row md:flex-col items-center md:items-end gap-2 shrink-0 w-full md:w-auto justify-between md:justify-start pt-3 md:pt-0 border-t md:border-t-0 border-hairline">
             {/* Team Leader Agency Badge */}
             {isTeamLeader && (
               <div className="flex items-center space-x-2">
@@ -681,7 +756,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 {canEarnCoins ? (
                   <>
                     <div className="text-right">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Call Host Rate</div>
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Call Host Rate</div>
                       <div className="text-sm font-black text-pink-300 font-mono flex items-center space-x-1">
                         <span>🪙</span>
                         <span>{systemSettings.coinBurnRatePerMin || 120} coins/min</span>
@@ -699,7 +774,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   </>
                 ) : (
                   <div className="text-right">
-                    <div className="text-[10px] text-slate-400 font-mono uppercase">Host Account</div>
+                    <div className="text-[10px] text-app-muted font-mono uppercase">Host Account</div>
                     <div className="text-xs font-bold text-pink-300 font-mono">
                       Community Creator
                     </div>
@@ -708,11 +783,11 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               </div>
             )}
 
-            {/* Male User Wallet / VIP */}
+            {/* Male User Wallet */}
             {isMale && (
               <div className="flex items-center space-x-2">
                 <div className="text-right">
-                  <div className="text-[10px] text-slate-400 font-mono uppercase">My Wallet</div>
+                  <div className="text-[10px] text-app-muted font-mono uppercase">My Wallet</div>
                   <div className="text-sm font-black text-amber-300 font-mono flex items-center space-x-1">
                     <span>🪙</span>
                     <span>{currentUser.coinBalance} coins</span>
@@ -740,8 +815,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             )}
 
               {/* Availability Status Switcher */}
-            <div className="flex items-center space-x-1 bg-slate-900/90 p-1 rounded-xl border border-slate-800">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+            <div className="flex items-center space-x-1 bg-app-input p-1 rounded-xl border border-hairline">
+              <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                 PR-1.1
               </span>
               <button
@@ -749,7 +824,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 className={`px-2 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
                   currentUser.onlineStatus === 'online'
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50'
-                    : 'text-slate-400 hover:text-white'
+                    : 'text-app-muted hover:text-app-heading'
                 }`}
               >
                 Online
@@ -759,7 +834,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 className={`px-2 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
                   currentUser.onlineStatus === 'busy' || currentUser.onlineStatus === 'in_call'
                     ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50'
-                    : 'text-slate-400 hover:text-white'
+                    : 'text-app-muted hover:text-app-heading'
                 }`}
               >
                 Busy
@@ -769,7 +844,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 className={`px-2 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
                   currentUser.onlineStatus === 'offline'
                     ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50'
-                    : 'text-slate-400 hover:text-white'
+                    : 'text-app-muted hover:text-app-heading'
                 }`}
               >
                 Offline
@@ -779,16 +854,16 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
         </div>
 
         {/* Section Navigation Tabs Bar */}
-        <div className="flex items-center space-x-1 mt-6 pt-4 border-t border-slate-800/80 overflow-x-auto pb-1 scrollbar-none">
+        <div className="flex items-center space-x-1 mt-6 pt-4 border-t border-hairline overflow-x-auto pb-1 scrollbar-none">
           <button
             onClick={() => setProfileSection('overview')}
             className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
               profileSection === 'overview'
-                ? 'bg-white text-slate-950 shadow-md'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                ? 'bg-app-card text-app-heading shadow-app-sm border border-hairline'
+                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
             }`}
           >
-            <span className="px-1 py-0.2 rounded bg-slate-950/70 border border-slate-700/70 text-[9px] font-mono font-bold text-slate-400">
+            <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-[9px] font-mono font-bold text-app-muted">
               PR-T1
             </span>
             <User className="w-3.5 h-3.5" />
@@ -800,10 +875,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
               profileSection === 'location'
                 ? 'bg-pink-600 text-white shadow-md shadow-pink-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
             }`}
           >
-            <span className="px-1 py-0.2 rounded bg-slate-950/70 border border-slate-700/70 text-[9px] font-mono font-bold text-slate-400">
+            <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-[9px] font-mono font-bold text-app-muted">
               PR-T2
             </span>
             <MapPin className="w-3.5 h-3.5 text-pink-400" />
@@ -820,10 +895,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
               profileSection === 'edit_bio'
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
             }`}
           >
-            <span className="px-1 py-0.2 rounded bg-slate-950/70 border border-slate-700/70 text-[9px] font-mono font-bold text-slate-400">
+            <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-[9px] font-mono font-bold text-app-muted">
               PR-T3
             </span>
             <Edit3 className="w-3.5 h-3.5 text-indigo-400" />
@@ -837,10 +912,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
                   profileSection === 'rates_earnings'
                     ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                    : 'text-app-muted hover:text-app-heading hover:bg-app-input'
                 }`}
               >
-                <span className="px-1 py-0.2 rounded bg-slate-950/70 border border-slate-700/70 text-[9px] font-mono font-bold text-slate-400">
+                <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-[9px] font-mono font-bold text-app-muted">
                   PR-T4
                 </span>
                 <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
@@ -853,14 +928,14 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
                 profileSection === 'rates_earnings'
                   ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                  : 'text-app-muted hover:text-app-heading hover:bg-app-input'
               }`}
             >
-              <span className="px-1 py-0.2 rounded bg-slate-950/70 border border-slate-700/70 text-[9px] font-mono font-bold text-slate-400">
+              <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-[9px] font-mono font-bold text-app-muted">
                 PR-T4
               </span>
               <Coins className="w-3.5 h-3.5 text-amber-400" />
-              <span>Wallet & VIP Tier</span>
+              <span>Wallet</span>
             </button>
           )}
 
@@ -869,10 +944,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
               profileSection === 'media'
                 ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
             }`}
           >
-            <span className="px-1 py-0.2 rounded bg-slate-950/70 border border-slate-700/70 text-[9px] font-mono font-bold text-slate-400">
+            <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-[9px] font-mono font-bold text-app-muted">
               PR-T5
             </span>
             <Camera className="w-3.5 h-3.5 text-purple-400" />
@@ -885,10 +960,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
               profileSection === 'security'
                 ? 'bg-rose-600 text-white shadow-md shadow-rose-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
             }`}
           >
-            <span className="px-1 py-0.2 rounded bg-slate-950/70 border border-slate-700/70 text-[9px] font-mono font-bold text-slate-400">
+            <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-[9px] font-mono font-bold text-app-muted">
               PR-T6
             </span>
             <KeyRound className="w-3.5 h-3.5 text-rose-400" />
@@ -904,10 +979,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           <div className="lg:col-span-2 space-y-6">
             
             {/* About Me / Creator Story Card */}
-            <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-2xl space-y-4">
+            <div className="p-5 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-white font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                <h3 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center space-x-2">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-2.1
                   </span>
                   <Sparkles className="w-4 h-4 text-indigo-400" />
@@ -922,15 +997,15 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 </button>
               </div>
 
-              <div className="space-y-3 text-xs leading-relaxed text-slate-300">
-                <div className="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 text-slate-200 italic font-serif text-sm">
+              <div className="space-y-3 text-xs leading-relaxed text-app-muted">
+                <div className="p-3.5 rounded-xl bg-app-input border border-hairline text-app-heading italic font-serif text-sm">
                   "{currentUser.bio || 'No short bio provided.'}"
                 </div>
 
                 {currentUser.extendedBio && (
                   <div className="space-y-1">
-                    <h4 className="text-[11px] font-bold text-slate-400 font-mono uppercase">Full Story & Background</h4>
-                    <p className="whitespace-pre-line text-slate-300 text-xs bg-slate-900/40 p-3 rounded-xl border border-slate-800/60">
+                    <h4 className="text-[11px] font-bold text-app-muted font-mono uppercase">Full Story & Background</h4>
+                    <p className="whitespace-pre-line text-app-muted text-xs bg-app-input p-3 rounded-xl border border-hairline">
                       {currentUser.extendedBio}
                     </p>
                   </div>
@@ -938,10 +1013,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               </div>
 
               {/* Tags & Spoken Languages */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-slate-800">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-hairline">
                 <div>
-                  <h4 className="text-[11px] font-bold text-slate-400 font-mono uppercase mb-2 flex items-center space-x-1.5">
-                    <span className="px-1 py-0.2 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                  <h4 className="text-[11px] font-bold text-app-muted font-mono uppercase mb-2 flex items-center space-x-1.5">
+                    <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                       PR-2.2
                     </span>
                     <span>Spoken Languages</span>
@@ -950,7 +1025,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     {(currentUser.spokenLanguages || ['English']).map((lang, idx) => (
                       <span
                         key={idx}
-                        className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono"
+                        className="px-2.5 py-1 rounded-lg bg-app-input border border-hairline text-app-heading text-xs font-mono"
                       >
                         🗣️ {lang}
                       </span>
@@ -959,7 +1034,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 </div>
 
                 <div>
-                  <h4 className="text-[11px] font-bold text-slate-400 font-mono uppercase mb-2">Interests & Topics</h4>
+                  <h4 className="text-[11px] font-bold text-app-muted font-mono uppercase mb-2">Interests & Topics</h4>
                   <div className="flex flex-wrap gap-1.5">
                     {(currentUser.interests || ['Music', 'Travel']).map((tag, idx) => (
                       <span
@@ -977,34 +1052,34 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             {/* Highlights / Performance Grid */}
             <div className="space-y-1.5">
               <div className="flex items-center space-x-1.5 px-1">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                   PR-2.3
                 </span>
-                <span className="text-[11px] font-bold text-slate-400 font-mono uppercase">Activity & Highlights</span>
+                <span className="text-[11px] font-bold text-app-muted font-mono uppercase">Activity & Highlights</span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {isFemale ? (
                   <>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Calls Hosted</div>
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Calls Hosted</div>
                       <div className="text-lg font-black text-pink-400 font-mono mt-0.5">
                         {currentUser.totalCallsHosted || 142}
                       </div>
                     </div>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Call Minutes</div>
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Call Minutes</div>
                       <div className="text-lg font-black text-indigo-400 font-mono mt-0.5">
                         {currentUser.totalCallMinutes || 840}m
                       </div>
                     </div>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Gifts Received</div>
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Gifts Received</div>
                       <div className="text-lg font-black text-amber-400 font-mono mt-0.5">
                         {currentUser.totalGiftsReceivedCount || 95}
                       </div>
                     </div>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Response Rate</div>
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Response Rate</div>
                       <div className="text-xs font-bold text-emerald-400 font-mono mt-1">
                         {currentUser.responseRate || '99% (< 1m)'}
                       </div>
@@ -1012,29 +1087,29 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   </>
                 ) : (
                   <>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">VIP Status</div>
-                      <div className="text-sm font-black text-amber-400 font-mono mt-1 uppercase">
-                        {currentUser.vipTier || 'Free Member'}
-                      </div>
-                    </div>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Coins Balance</div>
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Coins Balance</div>
                       <div className="text-lg font-black text-amber-400 font-mono mt-0.5">
                         {currentUser.coinBalance} 🪙
                       </div>
                     </div>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Member Since</div>
-                      <div className="text-xs font-bold text-slate-300 font-mono mt-1">
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Member Since</div>
+                      <div className="text-xs font-bold text-app-muted font-mono mt-1">
                         {currentUser.createdAt || '2026-01-10'}
                       </div>
                     </div>
-                    <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl">
-                      <div className="text-[10px] text-slate-400 font-mono uppercase">Account Security</div>
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Account Security</div>
                       <div className="text-xs font-bold text-emerald-400 font-mono mt-1 flex items-center space-x-1">
                         <ShieldCheck className="w-3.5 h-3.5" />
                         <span>Protected</span>
+                      </div>
+                    </div>
+                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
+                      <div className="text-[10px] text-app-muted font-mono uppercase">Friend Call Rate</div>
+                      <div className="text-xs font-bold text-indigo-300 font-mono mt-1">
+                        Discounted when friends
                       </div>
                     </div>
                   </>
@@ -1046,10 +1121,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           {/* Right Column: Location Quick Card & Account Governance */}
           <div className="space-y-6">
             {/* Location Status Card */}
-            <div className="p-5 bg-[#13161F] border border-slate-800 rounded-2xl space-y-4">
+            <div className="p-5 bg-app-card border border-hairline rounded-2xl space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-white font-mono uppercase tracking-wider flex items-center space-x-1.5">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                <h3 className="text-xs font-bold text-app-heading font-mono uppercase tracking-wider flex items-center space-x-1.5">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-2.4
                   </span>
                   <MapPin className="w-4 h-4 text-pink-400" />
@@ -1063,16 +1138,16 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 </button>
               </div>
 
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+              <div className="p-4 rounded-xl bg-app-input border border-hairline space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-slate-400 font-mono uppercase">Display City</span>
+                  <span className="text-[10px] text-app-muted font-mono uppercase">Display City</span>
                   {effectiveLocation.isMock && (
                     <span className="px-1.5 py-0.2 rounded bg-pink-500/20 text-pink-300 font-mono font-bold text-[9px] border border-pink-500/40">
                       MOCK ACTIVE
                     </span>
                   )}
                 </div>
-                <div className="text-base font-bold text-white flex items-center space-x-2">
+                <div className="text-base font-bold text-app-heading flex items-center space-x-2">
                   <span>{effectiveLocation.displayCity}</span>
                   <SvgFlag
                     countryCode={currentUser.countryCode}
@@ -1081,7 +1156,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     rounded={true}
                   />
                 </div>
-                <div className="text-[11px] text-slate-400">
+                <div className="text-[11px] text-app-muted">
                   {effectiveLocation.isMock
                     ? 'Virtual location is broadcast on Discovery, Quick Match & Calls.'
                     : 'Real device / profile location is displayed.'}
@@ -1092,7 +1167,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               <button
                 onClick={handleDetectExactLocation}
                 disabled={isDetectingGps}
-                className="w-full py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-bold transition-all flex items-center justify-center space-x-2 border border-slate-700 cursor-pointer"
+                className="w-full py-2.5 px-3 rounded-xl bg-app-input hover:bg-brand-soft text-app-heading text-xs font-mono font-bold transition-all flex items-center justify-center space-x-2 border border-hairline cursor-pointer"
               >
                 <Navigation className={`w-3.5 h-3.5 text-indigo-400 ${isDetectingGps ? 'animate-spin' : ''}`} />
                 <span>{isDetectingGps ? 'Querying GPS Satellite...' : 'Detect Exact GPS Location'}</span>
@@ -1100,10 +1175,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             </div>
 
             {/* Registered Account Email & Cloud Sync Card */}
-            <div className="p-5 bg-[#13161F] border border-slate-800 rounded-2xl space-y-3 text-xs">
+            <div className="p-5 bg-app-card border border-hairline rounded-2xl space-y-3 text-xs">
               <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2 text-white font-mono font-bold">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                <div className="flex items-center space-x-2 text-app-heading font-mono font-bold">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-2.5
                   </span>
                   <Mail className="w-4 h-4 text-indigo-400" />
@@ -1113,42 +1188,42 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   Verified
                 </span>
               </div>
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between">
+              <div className="p-3 bg-app-input rounded-xl border border-hairline flex items-center justify-between">
                 <div className="min-w-0 pr-2">
-                  <div className="text-[10px] text-slate-400 font-mono uppercase">Primary Address</div>
-                  <div className="text-xs font-mono font-bold text-white truncate">
+                  <div className="text-[10px] text-app-muted font-mono uppercase">Primary Address</div>
+                  <div className="text-xs font-mono font-bold text-app-heading truncate">
                     {currentUser.email || `${currentUser.id.slice(0, 8)}@livecall.app`}
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={handleCopyEmail}
-                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-[10px] font-bold flex items-center space-x-1 shrink-0 border border-slate-700 transition-colors"
+                  className="px-2.5 py-1.5 rounded-lg bg-app-input hover:bg-brand-soft text-app-heading font-mono text-[10px] font-bold flex items-center space-x-1 shrink-0 border border-hairline transition-colors"
                   title="Copy email to clipboard"
                 >
                   <Copy className="w-3 h-3" />
                   <span>Copy</span>
                 </button>
               </div>
-              <div className="flex items-center space-x-1.5 text-[10px] font-mono text-slate-400">
+              <div className="flex items-center space-x-1.5 text-[10px] font-mono text-app-muted">
                 <Cloud className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
                 <span>Synced with Cloudflare R2 & Supabase Auth</span>
               </div>
             </div>
 
             {/* Permanent Gender Lock & Policy Card */}
-            <div className="p-5 bg-[#13161F] border border-slate-800 rounded-2xl space-y-3 text-xs">
-              <div className="flex items-center space-x-2 text-white font-mono font-bold">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+            <div className="p-5 bg-app-card border border-hairline rounded-2xl space-y-3 text-xs">
+              <div className="flex items-center space-x-2 text-app-heading font-mono font-bold">
+                <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                   PR-2.6
                 </span>
                 <Lock className="w-4 h-4 text-emerald-400" />
                 <span>Gender Lock Status</span>
               </div>
-              <p className="text-slate-400 leading-relaxed text-[11px]">
-                Your registered gender is locked to <strong className="text-white uppercase">{currentUser.gender}</strong> to protect the 1-on-1 coin economy and prevent fraudulent role switching.
+              <p className="text-app-muted leading-relaxed text-[11px]">
+                Your registered gender is locked to <strong className="text-app-heading uppercase">{currentUser.gender}</strong> to protect the 1-on-1 coin economy and prevent fraudulent role switching.
               </p>
-              <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 text-[10px] text-slate-300 font-mono flex items-center justify-between">
+              <div className="p-2.5 rounded-lg bg-app-input border border-hairline text-[10px] text-app-muted font-mono flex items-center justify-between">
                 <span>Lock Protocol:</span>
                 <span className="text-emerald-400 font-bold">ACTIVE & VERIFIED</span>
               </div>
@@ -1162,28 +1237,28 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
         <div className="space-y-6">
           
           {/* Header Description */}
-          <div className="p-5 bg-[#13161F] border border-slate-800 rounded-2xl space-y-2">
+          <div className="p-5 bg-app-card border border-hairline rounded-2xl space-y-2">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                   PR-3
                 </span>
                 <div className="w-8 h-8 rounded-xl bg-pink-500/20 border border-pink-500/40 flex items-center justify-center text-pink-400">
                   <MapPin className="w-4 h-4" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-black text-white font-mono uppercase tracking-wider">
+                  <h2 className="text-sm font-black text-app-heading font-mono uppercase tracking-wider">
                     Geolocation & Mock Location Studio
                   </h2>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-app-muted">
                     Manage your exact physical GPS telemetry and virtual broadcast coordinates.
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center space-x-2">
-                <span className="text-xs font-mono text-slate-400">Current Broadcast:</span>
-                <span className="px-3 py-1 rounded-xl bg-slate-900 border border-slate-700 text-white font-bold text-xs flex items-center space-x-1.5 shadow-sm">
+                <span className="text-xs font-mono text-app-muted">Current Broadcast:</span>
+                <span className="px-3 py-1 rounded-xl bg-app-input border border-hairline text-app-heading font-bold text-xs flex items-center space-x-1.5 shadow-sm">
                   <span>{effectiveLocation.displayCity}</span>
                   <span>{effectiveLocation.flag}</span>
                   {effectiveLocation.isMock && (
@@ -1199,14 +1274,14 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             
             {/* SECTION A: EXACT DEVICE GPS TELEMETRY (For All Users) */}
-            <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-2xl space-y-4">
+            <div className="p-5 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-3.1
                   </span>
                   <Navigation className="w-4 h-4 text-emerald-400" />
-                  <h3 className="text-xs font-bold text-white font-mono uppercase tracking-wider">
+                  <h3 className="text-xs font-bold text-app-heading font-mono uppercase tracking-wider">
                     Real Device GPS Coordinates
                   </h3>
                 </div>
@@ -1217,33 +1292,33 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 )}
               </div>
 
-              <p className="text-xs text-slate-400 leading-relaxed">
+              <p className="text-xs text-app-muted leading-relaxed">
                 Connects with your device's browser Geolocation API to fetch physical latitude, longitude, and country ISO data with satellite precision.
               </p>
 
               {/* Exact Location Card Display */}
               {currentUser.exactLocation ? (
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3 font-mono text-xs">
+                <div className="p-4 rounded-xl bg-app-input border border-hairline space-y-3 font-mono text-xs">
                   <div className="grid grid-cols-2 gap-2 text-[11px]">
                     <div>
-                      <span className="text-slate-500 block">Latitude:</span>
-                      <span className="text-white font-bold">{(currentUser.exactLocation.latitude ?? 0).toFixed(5)}° N</span>
+                      <span className="text-app-muted block">Latitude:</span>
+                      <span className="text-app-heading font-bold">{(currentUser.exactLocation.latitude ?? 0).toFixed(5)}° N</span>
                     </div>
                     <div>
-                      <span className="text-slate-500 block">Longitude:</span>
-                      <span className="text-white font-bold">{(currentUser.exactLocation.longitude ?? 0).toFixed(5)}° E</span>
+                      <span className="text-app-muted block">Longitude:</span>
+                      <span className="text-app-heading font-bold">{(currentUser.exactLocation.longitude ?? 0).toFixed(5)}° E</span>
                     </div>
                     <div>
-                      <span className="text-slate-500 block">Detected City:</span>
+                      <span className="text-app-muted block">Detected City:</span>
                       <span className="text-emerald-400 font-bold">{currentUser.exactLocation.city}, {currentUser.exactLocation.country}</span>
                     </div>
                     <div>
-                      <span className="text-slate-500 block">Accuracy Radius:</span>
+                      <span className="text-app-muted block">Accuracy Radius:</span>
                       <span className="text-indigo-400 font-bold">±{currentUser.exactLocation.accuracyMeters || 15} meters</span>
                     </div>
                   </div>
 
-                  <div className="pt-2 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                  <div className="pt-2 border-t border-hairline text-[10px] text-app-muted flex items-center justify-between">
                     <span>Detected: {currentUser.exactLocation.detectedAt || 'Just now'}</span>
                     <span className="text-emerald-400 flex items-center space-x-1">
                       <CheckCircle2 className="w-3 h-3" />
@@ -1252,10 +1327,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   </div>
                 </div>
               ) : (
-                <div className="p-4 rounded-xl bg-slate-950/60 border border-dashed border-slate-800 text-center space-y-2 py-6">
-                  <Compass className="w-8 h-8 text-slate-600 mx-auto" />
-                  <p className="text-xs text-slate-400">No exact GPS coordinates stored yet.</p>
-                  <p className="text-[11px] text-slate-500">
+                <div className="p-4 rounded-xl bg-app-input border border-dashed border-hairline text-center space-y-2 py-6">
+                  <Compass className="w-8 h-8 text-app-muted mx-auto" />
+                  <p className="text-xs text-app-muted">No exact GPS coordinates stored yet.</p>
+                  <p className="text-[11px] text-app-muted">
                     Click the button below to allow your browser to detect your current city and location.
                   </p>
                 </div>
@@ -1280,14 +1355,14 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             </div>
 
             {/* SECTION B: FEMALE HOST MOCK LOCATION (Special Feature) */}
-            <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-2xl space-y-4">
+            <div className="p-5 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-3.2
                   </span>
                   <Sparkles className="w-4 h-4 text-pink-400" />
-                  <h3 className="text-xs font-bold text-white font-mono uppercase tracking-wider">
+                  <h3 className="text-xs font-bold text-app-heading font-mono uppercase tracking-wider">
                     Female Host Mock Location Spoof
                   </h3>
                 </div>
@@ -1307,15 +1382,15 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               {isFemale ? (
                 currentUser.allowMockLocation ? (
                   <div className="space-y-4">
-                    <p className="text-xs text-slate-300 leading-relaxed">
+                    <p className="text-xs text-app-muted leading-relaxed">
                       As an authorized female host, you can choose a virtual location (e.g. Miami, Paris, Tokyo) to protect your real physical privacy and match with callers from specific countries.
                     </p>
 
                     {/* Mock Location Master Switch */}
-                    <div className="p-4 rounded-xl bg-slate-950 border border-pink-500/30 flex items-center justify-between">
+                    <div className="p-4 rounded-xl bg-app-input border border-pink-500/30 flex items-center justify-between">
                       <div>
-                        <div className="font-bold text-white text-xs flex items-center space-x-2">
-                          <span className="px-1 py-0.2 rounded bg-slate-900 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                        <div className="font-bold text-app-heading text-xs flex items-center space-x-2">
+                          <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                             PR-3.3
                           </span>
                           <span>Enable Virtual Mock Location</span>
@@ -1325,7 +1400,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                             </span>
                           )}
                         </div>
-                        <p className="text-[11px] text-slate-400 mt-0.5">
+                        <p className="text-[11px] text-app-muted mt-0.5">
                           {currentUser.isUsingMockLocation
                             ? `Broadcasting: ${currentUser.mockLocationCity || 'Miami'}, ${currentUser.mockLocationCountry || 'United States'}`
                             : 'Currently using your real profile location.'}
@@ -1337,7 +1412,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                         className={`px-3 py-1.5 rounded-xl font-mono font-bold text-xs transition-all cursor-pointer ${
                           currentUser.isUsingMockLocation
                             ? 'bg-pink-600 text-white border border-pink-500 shadow-md shadow-pink-600/30'
-                            : 'bg-slate-800 text-slate-400 border border-slate-700 hover:text-white'
+                            : 'bg-app-input text-app-muted border border-hairline hover:text-app-heading'
                         }`}
                       >
                         {currentUser.isUsingMockLocation ? '✓ Mock ON' : '○ Mock OFF'}
@@ -1346,8 +1421,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
                     {/* Popular City Preset Grid */}
                     <div className="space-y-2">
-                      <label className="block text-[11px] font-bold text-slate-400 font-mono uppercase flex items-center space-x-1.5">
-                        <span className="px-1 py-0.2 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                      <label className="block text-[11px] font-bold text-app-muted font-mono uppercase flex items-center space-x-1.5">
+                        <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                           PR-3.4
                         </span>
                         <span>Quick Mock Location Presets</span>
@@ -1363,19 +1438,19 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                               onClick={() => handleSelectMockPreset(preset)}
                               className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
                                 isSelected
-                                  ? 'bg-pink-500/20 border-pink-500 text-white ring-1 ring-pink-500/40 shadow-sm'
-                                  : 'bg-slate-950/70 border-slate-800 text-slate-300 hover:border-slate-700 hover:bg-slate-900'
+                                  ? 'bg-pink-500/20 border-pink-500 text-app-heading ring-1 ring-pink-500/40 shadow-sm'
+                                  : 'bg-app-input border-hairline text-app-muted hover:border-hairline hover:bg-app-input'
                               }`}
                             >
                               <div className="flex items-center justify-between">
                                 <span className="text-sm">{preset.flag}</span>
-                                <span className="text-[9px] font-mono text-slate-400 uppercase">
+                                <span className="text-[9px] font-mono text-app-muted uppercase">
                                   {preset.countryCode}
                                 </span>
                               </div>
                               <div className="mt-1">
                                 <div className="font-bold text-xs truncate">{preset.city}</div>
-                                <div className="text-[10px] text-slate-400 truncate">{preset.country}</div>
+                                <div className="text-[10px] text-app-muted truncate">{preset.country}</div>
                               </div>
                             </button>
                           );
@@ -1384,8 +1459,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     </div>
 
                     {/* Custom Mock City Input */}
-                    <div className="pt-3 border-t border-slate-800 space-y-2">
-                      <label className="block text-[11px] font-bold text-slate-400 font-mono uppercase">
+                    <div className="pt-3 border-t border-hairline space-y-2">
+                      <label className="block text-[11px] font-bold text-app-muted font-mono uppercase">
                         Or Enter Custom Virtual Location
                       </label>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1399,7 +1474,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                             })
                           }
                           placeholder="City name (e.g. Rome)"
-                          className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-pink-500"
+                          className="px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-pink-500"
                         />
                         <input
                           type="text"
@@ -1411,17 +1486,17 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                             })
                           }
                           placeholder="Country (e.g. Italy)"
-                          className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-pink-500"
+                          className="px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-pink-500"
                         />
                       </div>
                     </div>
                   </div>
                 ) : (
-                  <div className="p-5 rounded-2xl bg-slate-950/80 border border-slate-800 text-center space-y-3 py-8">
+                  <div className="p-5 rounded-2xl bg-app-input border border-hairline text-center space-y-3 py-8">
                     <Lock className="w-8 h-8 text-amber-400 mx-auto" />
-                    <h4 className="font-bold text-white text-xs">Mock Location Permission Locked</h4>
-                    <p className="text-[11px] text-slate-400 max-w-sm mx-auto leading-relaxed">
-                      To activate the virtual location spoofer, the platform admin must toggle <strong className="text-white font-mono">"Allow Mock Location"</strong> on your creator account in the Admin Terminal.
+                    <h4 className="font-bold text-app-heading text-xs">Mock Location Permission Locked</h4>
+                    <p className="text-[11px] text-app-muted max-w-sm mx-auto leading-relaxed">
+                      To activate the virtual location spoofer, the platform admin must toggle <strong className="text-app-heading font-mono">"Allow Mock Location"</strong> on your creator account in the Admin Terminal.
                     </p>
                     <div className="inline-block px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-mono font-bold">
                       Status: Waiting for Admin Enablement
@@ -1429,11 +1504,11 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   </div>
                 )
               ) : (
-                <div className="p-5 rounded-2xl bg-slate-950/80 border border-slate-800 text-center space-y-3 py-8">
+                <div className="p-5 rounded-2xl bg-app-input border border-hairline text-center space-y-3 py-8">
                   <ShieldCheck className="w-8 h-8 text-indigo-400 mx-auto" />
-                  <h4 className="font-bold text-white text-xs">Caller Real Location Policy</h4>
-                  <p className="text-[11px] text-slate-400 max-w-sm mx-auto leading-relaxed">
-                    Mock locations are exclusively reserved for verified female creators to protect creator privacy. Male callers and VIP members broadcast their genuine device location.
+                  <h4 className="font-bold text-app-heading text-xs">Caller Real Location Policy</h4>
+                  <p className="text-[11px] text-app-muted max-w-sm mx-auto leading-relaxed">
+                    Mock locations are exclusively reserved for verified female creators to protect creator privacy. Male callers broadcast their genuine device location.
                   </p>
                 </div>
               )}
@@ -1444,17 +1519,17 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
       {/* 4. TAB CONTENT 3: EDIT BIO & PROFILE INFORMATION */}
       {profileSection === 'edit_bio' && (
-        <form onSubmit={handleSaveProfile} className="p-5 sm:p-7 bg-[#13161F] border border-slate-800 rounded-2xl space-y-5">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+        <form onSubmit={handleSaveProfile} className="p-5 sm:p-7 bg-app-card border border-hairline rounded-2xl space-y-5">
+          <div className="flex items-center justify-between border-b border-hairline pb-4">
             <div className="flex items-center space-x-2">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+              <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                 PR-4
               </span>
               <div>
-                <h2 className="text-sm font-bold text-white font-mono uppercase tracking-wider">
+                <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider">
                   Edit Bio & Profile Information
                 </h2>
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-app-muted">
                   Update your public introduction, languages, and personal details.
                 </p>
               </div>
@@ -1470,14 +1545,14 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           </div>
 
           {/* Avatar & Email Profile Controls */}
-          <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-2xl space-y-4">
+          <div className="p-4 bg-app-input border border-hairline rounded-2xl space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                   PR-4.1
                 </span>
                 <Camera className="w-4 h-4 text-indigo-400" />
-                <span className="text-xs font-bold text-white font-mono uppercase">
+                <span className="text-xs font-bold text-app-heading font-mono uppercase">
                   Profile Picture & Cloudflare R2 Storage
                 </span>
               </div>
@@ -1527,15 +1602,15 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   <button
                     type="button"
                     onClick={() => setIsAvatarModalOpen(true)}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono font-bold text-xs transition-all border border-slate-700 cursor-pointer"
+                    className="px-3 py-1.5 rounded-xl bg-app-input hover:bg-brand-soft text-app-heading font-mono font-bold text-xs transition-all border border-hairline cursor-pointer"
                   >
                     <span>Choose Preset or URL</span>
                   </button>
                 </div>
 
-                <div className="text-[11px] text-slate-400 font-mono flex items-center space-x-1">
+                <div className="text-[11px] text-app-muted font-mono flex items-center space-x-1">
                   <span>Image URL:</span>
-                  <span className="text-slate-300 truncate max-w-md">
+                  <span className="text-app-muted truncate max-w-md">
                     {formData.avatarUrl || currentUser.avatarUrl}
                   </span>
                 </div>
@@ -1545,14 +1620,14 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
           <div className="space-y-1.5">
             <div className="flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+              <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                 PR-4.2
               </span>
-              <span className="text-[11px] font-bold text-slate-300 font-mono uppercase">Demographics & Taxonomies</span>
+              <span className="text-[11px] font-bold text-app-muted font-mono uppercase">Demographics & Taxonomies</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
+                <label className="block text-[11px] font-bold text-app-muted font-mono mb-1">
                   Display Name *
                 </label>
                 <input
@@ -1563,12 +1638,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     isDirtyRef.current = true;
                     setFormData({ ...formData, name: e.target.value });
                   }}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white font-semibold text-xs focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-heading font-semibold text-xs focus:outline-none focus:border-indigo-500"
                 />
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
+                <label className="block text-[11px] font-bold text-app-muted font-mono mb-1">
                   Account Email (Registered)
                 </label>
                 <div className="relative">
@@ -1576,12 +1651,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     type="email"
                     disabled
                     value={currentUser.email || `${currentUser.id.slice(0, 8)}@livecall.app`}
-                    className="w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-400 font-mono text-xs cursor-not-allowed pr-16"
+                    className="w-full px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-muted font-mono text-xs cursor-not-allowed pr-16"
                   />
                   <button
                     type="button"
                     onClick={handleCopyEmail}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono font-bold text-slate-300"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-0.5 rounded bg-app-input hover:bg-brand-soft text-[10px] font-mono font-bold text-app-muted"
                   >
                     Copy
                   </button>
@@ -1654,13 +1729,13 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
           <div className="space-y-4">
             <div className="flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+              <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                 PR-4.3
               </span>
-              <span className="text-[11px] font-bold text-slate-300 font-mono uppercase">Story & Tagline</span>
+              <span className="text-[11px] font-bold text-app-muted font-mono uppercase">Story & Tagline</span>
             </div>
             <div>
-              <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
+              <label className="block text-[11px] font-bold text-app-muted font-mono mb-1">
                 Catchy Tagline / Short Bio
               </label>
               <input
@@ -1670,13 +1745,13 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   isDirtyRef.current = true;
                   setFormData({ ...formData, bio: e.target.value });
                 }}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white text-xs focus:outline-none focus:border-indigo-500"
+                className="w-full px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-heading text-xs focus:outline-none focus:border-indigo-500"
                 placeholder="A short sentence summarizing your vibe..."
               />
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
+              <label className="block text-[11px] font-bold text-app-muted font-mono mb-1">
                 Extended About Me Story
               </label>
               <textarea
@@ -1686,7 +1761,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   isDirtyRef.current = true;
                   setFormData({ ...formData, extendedBio: e.target.value });
                 }}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white text-xs focus:outline-none focus:border-indigo-500 resize-none"
+                className="w-full px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-heading text-xs focus:outline-none focus:border-indigo-500 resize-none"
                 placeholder="Tell callers about your background, hobbies, stream schedule, languages, and what you enjoy discussing..."
               />
             </div>
@@ -1694,8 +1769,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
           {/* Connection / Gender Preference */}
           <div>
-            <label className="block text-[11px] font-bold text-slate-300 font-mono mb-2 uppercase flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+            <label className="block text-[11px] font-bold text-app-muted font-mono mb-2 uppercase flex items-center space-x-1.5">
+              <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                 PR-4.4
               </span>
               <span>Interested in Connecting With (Dating & Match Preferences)</span>
@@ -1715,16 +1790,16 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   }}
                   className={`p-3 rounded-xl border text-xs font-bold text-left transition-all cursor-pointer ${
                     formData.interestedIn === opt.id
-                      ? 'bg-indigo-600/25 border-indigo-500 text-white shadow-md shadow-indigo-500/20'
-                      : 'bg-slate-950/80 border-slate-800 text-slate-400 hover:border-slate-700'
+                      ? 'bg-indigo-600/25 border-indigo-500 text-app-heading shadow-md shadow-indigo-500/20'
+                      : 'bg-app-input border-hairline text-app-muted hover:border-hairline'
                   }`}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <span className="text-base">{opt.icon}</span>
                       <div>
-                        <div className="text-white font-bold">{opt.label}</div>
-                        <div className="text-[10px] text-slate-400 font-normal">{opt.sub}</div>
+                        <div className="text-app-heading font-bold">{opt.label}</div>
+                        <div className="text-[10px] text-app-muted font-normal">{opt.sub}</div>
                       </div>
                     </div>
                     {formData.interestedIn === opt.id && <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />}
@@ -1735,27 +1810,27 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           </div>
 
           {isFemale && canEarnCoins && (
-            <div className="p-4 bg-slate-950/90 border border-pink-500/20 rounded-xl grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="p-4 bg-app-input border border-pink-500/20 rounded-xl grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Platform Governed Call Rate (Read-Only) */}
               <div className="space-y-1">
                 <label className="block text-[11px] font-bold text-pink-300 font-mono mb-1 flex items-center space-x-1.5">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-4.5
                   </span>
                   <span>1-on-1 Call & Earning Rate</span>
-                  <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 text-slate-400 text-[9px] font-normal">
+                  <span className="px-1.5 py-0.2 rounded bg-app-input border border-hairline text-app-muted text-[9px] font-normal">
                     🔒 Admin Governed
                   </span>
                 </label>
-                <div className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-between">
+                <div className="p-2.5 bg-app-input border border-hairline rounded-xl flex items-center justify-between">
                   <div>
-                    <div className="text-[10px] text-slate-400 font-mono uppercase">Caller Burn Rate</div>
+                    <div className="text-[10px] text-app-muted font-mono uppercase">Caller Burn Rate</div>
                     <div className="text-sm font-bold text-amber-300 font-mono">
                       🪙 {systemSettings.coinBurnRatePerMin ?? 120} / min
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-[10px] text-slate-400 font-mono uppercase">Your Host Earning</div>
+                    <div className="text-[10px] text-app-muted font-mono uppercase">Your Host Earning</div>
                     <div className="text-sm font-bold text-emerald-400 font-mono">
                       🪙 {currentUser.coinEarnOverrideRate ?? systemSettings.femaleEarningRatePerMin ?? 48} / min
                     </div>
@@ -1775,10 +1850,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     isDirtyRef.current = true;
                     setFormData({ ...formData, responseRate: e.target.value });
                   }}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-pink-500"
+                  className="w-full px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-pink-500"
                   placeholder="e.g. 99% Instant Reply"
                 />
-                <p className="text-[10px] text-slate-500 mt-1">
+                <p className="text-[10px] text-app-muted mt-1">
                   Custom badge displayed on your profile card (e.g. "99% Instant Reply", "⚡ Fast Pickup").
                 </p>
               </div>
@@ -1802,20 +1877,20 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
         <div className="space-y-6">
           {isFemale ? (
             /* Female Creator Studio & Payouts Card */
-            <div className="p-5 sm:p-7 bg-[#13161F] border border-slate-800 rounded-2xl space-y-6">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div className="p-5 sm:p-7 bg-app-card border border-hairline rounded-2xl space-y-6">
+              <div className="flex items-center justify-between border-b border-hairline pb-4">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-5.1
                   </span>
                   <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
                     <DollarSign className="w-4 h-4" />
                   </div>
                   <div>
-                    <h2 className="text-sm font-bold text-white font-mono uppercase tracking-wider">
+                    <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider">
                       Female Creator Earnings & Payouts Studio
                     </h2>
-                    <p className="text-xs text-slate-400">
+                    <p className="text-xs text-app-muted">
                       Real-time coin conversion, hosted call logs, and payout requests.
                     </p>
                   </div>
@@ -1832,54 +1907,54 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-1">
-                  <div className="text-[10px] text-slate-400 font-mono uppercase">Unclaimed Coins</div>
+                <div className="p-4 bg-app-input border border-hairline rounded-xl space-y-1">
+                  <div className="text-[10px] text-app-muted font-mono uppercase">Unclaimed Coins</div>
                   <div className="text-2xl font-black text-amber-400 font-mono flex items-center space-x-1">
                     <span>🪙</span>
                     <span>{currentUser.earningsCoins || 8400}</span>
                   </div>
-                  <div className="text-[11px] text-slate-400">
-                    Value: ~${((currentUser.earningsCoins || 8400) * 0.008).toFixed(2)} USD
+                  <div className="text-[11px] text-app-muted">
+                    Value: ~${coinsToUsd(currentUser.earningsCoins || 8400, getCoinUsdPeg(systemSettings)).toFixed(2)} USD
                   </div>
                 </div>
 
-                <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-1">
-                  <div className="text-[10px] text-slate-400 font-mono uppercase">Lifetime USD Earned</div>
+                <div className="p-4 bg-app-input border border-hairline rounded-xl space-y-1">
+                  <div className="text-[10px] text-app-muted font-mono uppercase">Lifetime USD Earned</div>
                   <div className="text-2xl font-black text-emerald-400 font-mono">
                     ${(currentUser.totalLifetimeEarnedUSD || 672.00).toFixed(2)}
                   </div>
                   <div className="text-[11px] text-emerald-400 flex items-center space-x-1">
                     <TrendingUp className="w-3 h-3" />
-                    <span>Payout rate: $0.008 / coin</span>
+                    <span>Fixed Peg: ${getCoinUsdPeg(systemSettings)} / coin</span>
                   </div>
                 </div>
 
-                <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-1">
-                  <div className="text-[10px] text-slate-400 font-mono uppercase">Call Host Rate</div>
+                <div className="p-4 bg-app-input border border-hairline rounded-xl space-y-1">
+                  <div className="text-[10px] text-app-muted font-mono uppercase">Call Host Rate</div>
                   <div className="text-2xl font-black text-pink-400 font-mono">
                     {systemSettings.coinBurnRatePerMin || 120} 🪙/min
                   </div>
-                  <div className="text-[11px] text-slate-400">60% host cut + 100% gift share</div>
+                  <div className="text-[11px] text-app-muted">Shares from Economy config (call + gift %)</div>
                 </div>
               </div>
             </div>
           ) : (
-            /* Male User Wallet & VIP Tier */
-            <div className="p-5 sm:p-7 bg-[#13161F] border border-slate-800 rounded-2xl space-y-6">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            /* Male User Wallet */
+            <div className="p-5 sm:p-7 bg-app-card border border-hairline rounded-2xl space-y-6">
+              <div className="flex items-center justify-between border-b border-hairline pb-4">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                  <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                     PR-5.2
                   </span>
                   <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
                     <Coins className="w-4 h-4" />
                   </div>
                   <div>
-                    <h2 className="text-sm font-bold text-white font-mono uppercase tracking-wider">
-                      Wallet & VIP Membership
+                    <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider">
+                      Coin Wallet
                     </h2>
-                    <p className="text-xs text-slate-400">
-                      Manage your call balance and premium perks.
+                    <p className="text-xs text-app-muted">
+                      Manage your call balance and top-ups.
                     </p>
                   </div>
                 </div>
@@ -1894,44 +1969,20 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="p-5 bg-slate-950 border border-amber-500/30 rounded-2xl space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-slate-400 font-mono uppercase">Available Coins</span>
-                    <span className="text-xs font-mono text-amber-400 font-bold">10 coins = 1 min</span>
-                  </div>
-                  <div className="text-3xl font-black text-amber-300 font-mono flex items-center space-x-2">
-                    <span>🪙</span>
-                    <span>{currentUser.coinBalance}</span>
-                  </div>
-                  <p className="text-xs text-slate-400">
-                    Coins are spent per minute on 1-on-1 private video calls and for sending virtual gifts.
-                  </p>
+              <div className="p-5 bg-app-input border border-amber-500/30 rounded-2xl space-y-3 max-w-lg">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-app-muted font-mono uppercase">Available Coins</span>
+                  <span className="text-xs font-mono text-amber-400 font-bold">
+                    Friend rates apply when matched as friends
+                  </span>
                 </div>
-
-                <div className="p-5 bg-slate-950 border border-purple-500/30 rounded-2xl space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-slate-400 font-mono uppercase">VIP Membership</span>
-                    <span className="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-[10px] font-bold">
-                      {currentUser.vipTier?.toUpperCase() || 'FREE TIER'}
-                    </span>
-                  </div>
-                  <div className="text-lg font-bold text-white flex items-center space-x-2">
-                    <Crown className="w-5 h-5 text-amber-400" />
-                    <span>Exclusive Calling Perks</span>
-                  </div>
-                  <p className="text-xs text-slate-400">
-                    VIP members enjoy priority connection in Quick Match roulette and 50% discount on friend calls.
-                  </p>
-                  {onOpenVip && (
-                    <button
-                      onClick={onOpenVip}
-                      className="text-xs font-bold text-purple-400 hover:text-purple-300 font-mono flex items-center space-x-1"
-                    >
-                      <span>Upgrade Membership Tier ➔</span>
-                    </button>
-                  )}
+                <div className="text-3xl font-black text-amber-300 font-mono flex items-center space-x-2">
+                  <span>🪙</span>
+                  <span>{currentUser.coinBalance}</span>
                 </div>
+                <p className="text-xs text-app-muted">
+                  Coins are spent per minute on 1-on-1 private video calls and for sending virtual gifts.
+                </p>
               </div>
             </div>
           )}
@@ -1940,18 +1991,18 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
       {/* 6. TAB CONTENT 5: MEDIA & GALLERY */}
       {profileSection === 'media' && (
-        <div className="p-5 sm:p-7 bg-[#13161F] border border-slate-800 rounded-2xl space-y-5">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+        <div className="p-5 sm:p-7 bg-app-card border border-hairline rounded-2xl space-y-5">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-hairline pb-4">
             <div className="flex items-center space-x-2">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+              <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                 PR-6
               </span>
               <div>
-                <h2 className="text-sm font-bold text-white font-mono uppercase tracking-wider flex items-center gap-2">
+                <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
                   <ImageIcon className="w-4 h-4 text-pink-400" />
                   <span>Photo Gallery & Moments Feed</span>
                 </h2>
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-app-muted">
                   High-resolution pictures uploaded directly to Cloudflare R2 and synced with your public profile.
                 </p>
               </div>
@@ -1972,16 +2023,16 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             <button
               type="button"
               onClick={() => setIsAddGalleryModalOpen(true)}
-              className="aspect-square rounded-2xl border-2 border-dashed border-slate-800 hover:border-pink-500/60 bg-slate-950/60 hover:bg-slate-900/60 flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
+              className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input hover:bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
             >
-              <span className="px-1 py-0.2 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold mb-1">
+              <span className="px-1 py-0.2 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold mb-1">
                 PR-6.1
               </span>
               <div className="w-10 h-10 rounded-xl bg-pink-500/10 group-hover:bg-pink-500/20 text-pink-400 flex items-center justify-center mb-1.5 transition-colors">
                 <Plus className="w-5 h-5" />
               </div>
-              <span className="font-bold text-white text-xs">Upload Photo</span>
-              <span className="text-[10px] text-slate-500 font-mono">Cloudflare R2</span>
+              <span className="font-bold text-app-heading text-xs">Upload Photo</span>
+              <span className="text-[10px] text-app-muted font-mono">Cloudflare R2</span>
             </button>
 
             {/* 2. Gallery Images */}
@@ -1991,11 +2042,11 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             ).map((img, idx) => (
               <div
                 key={idx}
-                className="relative aspect-square rounded-2xl overflow-hidden border border-slate-800 group shadow-md bg-slate-950"
+                className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
               >
                 <img src={img} alt="gallery" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5">
-                  <span className="text-[10px] text-white font-mono font-bold">Photo #{idx + 1}</span>
+                  <span className="text-[10px] text-app-heading font-mono font-bold">Photo #{idx + 1}</span>
                   {currentUser.gallery && currentUser.gallery.length > 1 && (
                     <button
                       type="button"
@@ -2016,20 +2067,20 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       {profileSection === 'security' && (
         <div id="profile-security-section" className="space-y-6">
           {/* Main Password Change Card */}
-          <div className="p-5 sm:p-7 bg-[#13161F] border border-slate-800 rounded-2xl space-y-6">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+          <div className="p-5 sm:p-7 bg-app-card border border-hairline rounded-2xl space-y-6">
+            <div className="flex items-center justify-between border-b border-hairline pb-4">
               <div className="flex items-center space-x-3">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+                <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                   PR-7.1
                 </span>
                 <div className="w-10 h-10 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
                   <KeyRound className="w-5 h-5" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-bold text-white font-mono uppercase tracking-wider">
+                  <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider">
                     Change Account Password
                   </h2>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-app-muted">
                     Update your security credentials for profile protection and seamless login.
                   </p>
                 </div>
@@ -2047,7 +2098,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             <form onSubmit={handleChangePasswordSubmit} className="space-y-4 max-w-xl">
               {currentUser.hasPasswordSet && (
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-300 font-mono mb-1">
+                  <label className="block text-[11px] font-bold text-app-muted font-mono mb-1">
                     Current Password *
                   </label>
                   <div className="relative">
@@ -2057,12 +2108,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                       value={currentPasswordInput}
                       onChange={(e) => setCurrentPasswordInput(e.target.value)}
                       placeholder="Enter your current password"
-                      className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 pr-10"
+                      className="w-full px-3 py-2.5 bg-app-input border border-hairline rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-rose-500 pr-10"
                     />
                     <button
                       type="button"
                       onClick={() => setShowCurrentPassword(!showCurrentPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-app-muted hover:text-app-heading"
                     >
                       {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
@@ -2077,7 +2128,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 onChange={setNewPasswordInput}
                 placeholder="Create a strong password"
                 autoComplete="new-password"
-                inputClassName="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 pl-10 pr-10"
+                inputClassName="w-full px-3 py-2.5 bg-app-input border border-hairline rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-rose-500 pl-10 pr-10"
               />
 
               <PasswordStrengthField
@@ -2090,7 +2141,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 showStrengthUi={false}
                 matchAgainst={newPasswordInput}
                 showMatchStatus
-                inputClassName="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 pl-10 pr-10"
+                inputClassName="w-full px-3 py-2.5 bg-app-input border border-hairline rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-rose-500 pl-10 pr-10"
               />
 
               <div className="pt-2">
@@ -2113,46 +2164,111 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           {/* Account Security Overview Matrix */}
           <div className="space-y-1.5">
             <div className="flex items-center space-x-1.5 px-1">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold select-all">
+              <span className="px-1.5 py-0.5 rounded bg-app-input border border-hairline text-app-muted font-mono text-[9px] font-bold select-all">
                 PR-7.2
               </span>
-              <span className="text-[11px] font-bold text-slate-400 font-mono uppercase">Security Standards Matrix</span>
+              <span className="text-[11px] font-bold text-app-muted font-mono uppercase">Security Standards Matrix</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl space-y-2">
+              <div className="p-4 bg-app-card border border-hairline rounded-2xl space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-300 font-mono">Gender Lock</span>
+                  <span className="text-xs font-bold text-app-muted font-mono">Gender Lock</span>
                   <Lock className="w-4 h-4 text-pink-400" />
                 </div>
-                <div className="text-sm font-bold text-white capitalize">{currentUser.gender} Profile</div>
-                <p className="text-[11px] text-slate-400 leading-relaxed">
+                <div className="text-sm font-bold text-app-heading capitalize">{currentUser.gender} Profile</div>
+                <p className="text-[11px] text-app-muted leading-relaxed">
                   Gender identity is permanently locked to protect video match integrity and creator payouts.
                 </p>
               </div>
 
-              <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl space-y-2">
+              <div className="p-4 bg-app-card border border-hairline rounded-2xl space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-300 font-mono">End-to-End Encryption</span>
+                  <span className="text-xs font-bold text-app-muted font-mono">End-to-End Encryption</span>
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
                 </div>
                 <div className="text-sm font-bold text-emerald-400">WebRTC DTLS / SRTP</div>
-                <p className="text-[11px] text-slate-400 leading-relaxed">
+                <p className="text-[11px] text-app-muted leading-relaxed">
                   All 1-on-1 video streams, live audio, and direct chat messages are securely peer-encrypted.
                 </p>
               </div>
 
-              <div className="p-4 bg-[#13161F] border border-slate-800 rounded-2xl space-y-2">
+              <div className="p-4 bg-app-card border border-hairline rounded-2xl space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-300 font-mono">Account ID & Token</span>
+                  <span className="text-xs font-bold text-app-muted font-mono">Account ID & Token</span>
                   <User className="w-4 h-4 text-indigo-400" />
                 </div>
-                <div className="text-xs font-mono font-bold text-slate-200 truncate">{currentUser.id}</div>
-                <p className="text-[11px] text-slate-400 leading-relaxed">
+                <div className="text-xs font-mono font-bold text-app-heading truncate">{currentUser.id}</div>
+                <p className="text-[11px] text-app-muted leading-relaxed">
                   Unique persistent account identifier synced with Cloud / Supabase database.
                 </p>
               </div>
             </div>
           </div>
+
+          {!isAdmin && (
+            <div className="p-5 sm:p-7 bg-app-card border border-rose-900/60 rounded-2xl space-y-4">
+              <div className="flex items-start space-x-3 border-b border-rose-900/40 pb-4">
+                <div className="w-10 h-10 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-rose-200 font-mono uppercase tracking-wider">
+                    Delete Account
+                  </h2>
+                  <p className="text-xs text-app-muted mt-1 leading-relaxed">
+                    Permanently removes your profile, login, and associated data. This cannot be undone.
+                    You will not be able to sign in with this email afterward.
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleSelfDeleteAccount} className="space-y-3 max-w-xl">
+                <div>
+                  <label className="block text-[11px] font-bold text-app-muted font-mono mb-1">
+                    Type DELETE or your email to confirm
+                  </label>
+                  <input
+                    type="text"
+                    value={deleteConfirmPhrase}
+                    onChange={(e) => setDeleteConfirmPhrase(e.target.value)}
+                    placeholder="DELETE"
+                    autoComplete="off"
+                    className="w-full px-3 py-2.5 bg-app-input border border-rose-900/50 rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-app-muted font-mono mb-1">
+                    Current password
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showDeletePassword ? 'text' : 'password'}
+                      value={deletePasswordInput}
+                      onChange={(e) => setDeletePasswordInput(e.target.value)}
+                      placeholder="Enter your password"
+                      autoComplete="current-password"
+                      className="w-full px-3 py-2.5 bg-app-input border border-rose-900/50 rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-rose-500 pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowDeletePassword(!showDeletePassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-app-muted hover:text-app-heading"
+                    >
+                      {showDeletePassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  disabled={deleteSubmitting || !deleteConfirmPhrase.trim() || !deletePasswordInput.trim()}
+                  className="px-6 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-mono font-bold text-xs transition-all flex items-center space-x-2 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{deleteSubmitting ? 'Deleting Account...' : 'Permanently Delete My Account'}</span>
+                </button>
+              </form>
+            </div>
+          )}
         </div>
       )}
 
@@ -2160,20 +2276,20 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       {isAvatarModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
           <div
-            className="bg-[#12151D] border border-slate-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 relative max-h-[90vh] overflow-y-auto"
+            className="bg-app-card border border-hairline rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 relative max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
-            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div className="flex items-center justify-between border-b border-hairline pb-4">
               <div className="flex items-center space-x-2.5">
                 <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
                   <Camera className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-white font-mono flex items-center space-x-2">
+                  <h3 className="text-base font-bold text-app-heading font-mono flex items-center space-x-2">
                     <span>Update Profile Picture</span>
                   </h3>
-                  <div className="flex items-center space-x-1.5 text-[11px] text-slate-400">
+                  <div className="flex items-center space-x-1.5 text-[11px] text-app-muted">
                     <Cloud className="w-3.5 h-3.5 text-indigo-400" />
                     <span>Cloudflare R2 Bucket Storage Sync</span>
                   </div>
@@ -2182,25 +2298,25 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               <button
                 type="button"
                 onClick={() => setIsAvatarModalOpen(false)}
-                className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                className="p-2 rounded-xl bg-app-input hover:bg-brand-soft text-app-muted hover:text-app-heading transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Current Avatar Preview */}
-            <div className="flex items-center space-x-4 p-3.5 bg-slate-950/70 border border-slate-800 rounded-2xl">
+            <div className="flex items-center space-x-4 p-3.5 bg-app-input border border-hairline rounded-2xl">
               <img
                 src={normalizeMediaUrl(currentUser.avatarUrl)}
                 alt={currentUser.name}
                 onError={(e) => {
                   (e.target as HTMLImageElement).src = getFallbackAvatar(currentUser.name, currentUser.gender, currentUser.role);
                 }}
-                className="w-14 h-14 rounded-2xl object-cover ring-2 ring-indigo-500/50 shadow-md shrink-0 bg-slate-900"
+                className="w-14 h-14 rounded-2xl object-cover ring-2 ring-indigo-500/50 shadow-md shrink-0 bg-app-input"
               />
               <div className="min-w-0 flex-1">
-                <div className="text-xs font-bold text-white truncate">{currentUser.name}</div>
-                <div className="text-[11px] text-slate-400 font-mono truncate">{currentUser.email || `${currentUser.id.slice(0, 8)}@livecall.app`}</div>
+                <div className="text-xs font-bold text-app-heading truncate">{currentUser.name}</div>
+                <div className="text-[11px] text-app-muted font-mono truncate">{currentUser.email || `${currentUser.id.slice(0, 8)}@livecall.app`}</div>
                 <div className="text-[10px] text-emerald-400 font-mono flex items-center space-x-1 mt-0.5">
                   <CheckCircle2 className="w-3 h-3" />
                   <span>Current Active Photo</span>
@@ -2237,11 +2353,11 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             />
 
             {/* Footer Close */}
-            <div className="pt-3 border-t border-slate-800 flex justify-end">
+            <div className="pt-3 border-t border-hairline flex justify-end">
               <button
                 type="button"
                 onClick={() => setIsAvatarModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono font-bold cursor-pointer transition-colors"
+                className="px-4 py-2 rounded-xl bg-app-input hover:bg-brand-soft text-app-muted text-xs font-mono font-bold cursor-pointer transition-colors"
               >
                 Close Window
               </button>
@@ -2254,23 +2370,23 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       {isAddGalleryModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
           <div
-            className="bg-[#12151D] border border-slate-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 relative max-h-[90vh] overflow-y-auto"
+            className="bg-app-card border border-hairline rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 relative max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div className="flex items-center justify-between border-b border-hairline pb-4">
               <div className="flex items-center space-x-2.5">
                 <div className="w-10 h-10 rounded-2xl bg-pink-500/20 border border-pink-500/40 flex items-center justify-center text-pink-400">
                   <ImageIcon className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-white font-mono">Add Photo to Gallery</h3>
-                  <p className="text-[11px] text-slate-400">Cloudflare R2 Bucket High-Speed CDN</p>
+                  <h3 className="text-base font-bold text-app-heading font-mono">Add Photo to Gallery</h3>
+                  <p className="text-[11px] text-app-muted">Cloudflare R2 Bucket High-Speed CDN</p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setIsAddGalleryModalOpen(false)}
-                className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                className="p-2 rounded-xl bg-app-input hover:bg-brand-soft text-app-muted hover:text-app-heading transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2290,11 +2406,11 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               showUrlInput={true}
             />
 
-            <div className="pt-3 border-t border-slate-800 flex justify-end">
+            <div className="pt-3 border-t border-hairline flex justify-end">
               <button
                 type="button"
                 onClick={() => setIsAddGalleryModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono font-bold cursor-pointer transition-colors"
+                className="px-4 py-2 rounded-xl bg-app-input hover:bg-brand-soft text-app-muted text-xs font-mono font-bold cursor-pointer transition-colors"
               >
                 Cancel
               </button>

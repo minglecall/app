@@ -54,6 +54,18 @@ import { getFallbackAvatar } from '../../utils/avatars';
 import { SvgFlag } from '../common/SvgFlag';
 import { getUserEffectiveLocation } from '../../utils/location';
 import { HostMathAnalyticsModal } from './HostMathAnalyticsModal';
+import { getCoinUsdPeg } from '../../../shared/finance/fx';
+import { getHostPeriodTargetProgress } from '../../../shared/finance/hostPeriodTargetProgress';
+import { HostPeriodTargetProgressPanel } from '../common/HostPeriodTargetProgressPanel';
+
+/** Period target coins for bronze gate — same sources as closePeriod (never lifetime earningsCoins). */
+function periodTargetCoinsFromMetrics(metrics: CreatorMetrics | null | undefined): number {
+  if (!metrics) return 0;
+  return (
+    Number(metrics.totalTargetCoins) ||
+    (Number(metrics.coinsEarnedFromCalls) || 0) + (Number(metrics.coinsEarnedFromGifts) || 0)
+  );
+}
 
 export const AdminCreatorPerformanceAnalytics: React.FC = () => {
   const {
@@ -81,18 +93,22 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
-  const femalePayoutRatio = systemSettings.femalePayoutRatioUSD ?? 0.008;
+  const femalePayoutRatio = getCoinUsdPeg(systemSettings);
 
-  // Filter only callable female creators
   const femaleHosts = useMemo(() => {
-    return users.filter(
-      (u) =>
-        u.role !== 'team_leader' &&
-        u.role !== 'agency_manager' &&
-        u.role !== 'admin' &&
-        (u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host')
-    );
-  }, [users]);
+    return users.filter((u) => {
+      if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
+      if (u.role === 'female_creator' || u.role === 'female_host') return true;
+      if (u.gender === 'female' && Boolean(u.teamLeaderId)) return true;
+      if (
+        systemSettings.enableRegularFemaleCoinEarning &&
+        (u.role === 'female_user' || u.gender === 'female')
+      ) {
+        return true;
+      }
+      return false;
+    });
+  }, [users, systemSettings.enableRegularFemaleCoinEarning]);
 
   // Distinct Team Leaders / Agencies
   const agencyList = useMemo(() => {
@@ -111,6 +127,7 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
       peakHoursStart: systemSettings.peakHoursStart,
       peakHoursEnd: systemSettings.peakHoursEnd,
       peakHoursEnabled: systemSettings.peakHoursEnabled,
+      targetThresholds: systemSettings,
     });
   }, [femaleHosts, creatorMetricsMap, systemSettings, heartbeatTick]);
 
@@ -132,7 +149,7 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
     let totalBonusesUSD = 0;
 
     rankedCreators.forEach((r) => {
-      const coins = r.user.earningsCoins || r.metrics.totalTargetCoins || 0;
+      const coins = periodTargetCoinsFromMetrics(r.metrics);
       totalCoinsEarned += coins;
       const extraOnlineSecs = r.user.onlineStatus === 'online' ? (heartbeatTick % 60) : 0;
       const hours = Number((((r.metrics.activeOnlineSeconds || 0) + extraOnlineSecs) / 3600).toFixed(2));
@@ -191,8 +208,8 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
 
     list.sort((a, b) => {
       if (sortBy === 'revenue') {
-        const coinsA = a.user.earningsCoins || a.metrics.totalTargetCoins || 0;
-        const coinsB = b.user.earningsCoins || b.metrics.totalTargetCoins || 0;
+        const coinsA = periodTargetCoinsFromMetrics(a.metrics);
+        const coinsB = periodTargetCoinsFromMetrics(b.metrics);
         return coinsB - coinsA;
       }
       if (sortBy === 'hours') {
@@ -224,7 +241,7 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
 
     // 1. Target Promotion Candidates (Close to tier goal)
     const promotionCandidates = rankedCreators.filter((r) => {
-      const coins = r.user.earningsCoins || r.metrics.totalTargetCoins || 0;
+      const coins = periodTargetCoinsFromMetrics(r.metrics);
       const hours = r.metrics.activeOnlineHours || 0;
       if (r.tier === 'silver' && coins >= goldTargetCoins * 0.75 && hours >= goldTargetHours * 0.75) {
         return true;
@@ -237,7 +254,7 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
 
     // 2. High-Performance Stars (Top Revenue + 95%+ Health)
     const starPerformers = rankedCreators.filter((r) => {
-      const coins = r.user.earningsCoins || r.metrics.totalTargetCoins || 0;
+      const coins = periodTargetCoinsFromMetrics(r.metrics);
       return coins >= 10000 && r.healthScore >= 95;
     });
 
@@ -265,7 +282,7 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
     let bronzeRevenue = 0;
 
     rankedCreators.forEach((r) => {
-      const coins = r.user.earningsCoins || r.metrics.totalTargetCoins || 0;
+      const coins = periodTargetCoinsFromMetrics(r.metrics);
       if (r.tier === 'gold') goldRevenue += coins;
       else if (r.tier === 'silver') silverRevenue += coins;
       else bronzeRevenue += coins;
@@ -282,7 +299,7 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
   const topEarnersChartData = useMemo(() => {
     return rankedCreators.slice(0, 5).map((r) => ({
       name: r.user.name.split(' ')[0],
-      coins: r.user.earningsCoins || r.metrics.totalTargetCoins || 0,
+      coins: periodTargetCoinsFromMetrics(r.metrics),
       hours: r.metrics.activeOnlineHours || 0,
     }));
   }, [rankedCreators]);
@@ -739,8 +756,9 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
                 <th className="py-2.5 px-3">Rank & Creator</th>
                 <th className="py-2.5 px-3">Tier</th>
                 <th className="py-2.5 px-3">Gross Coins</th>
-                <th className="py-2.5 px-3">USD Balance</th>
+                <th className="py-2.5 px-3">USD @ Peg (Economy)</th>
                 <th className="py-2.5 px-3">Active Hours</th>
+                <th className="py-2.5 px-3">True-up target</th>
                 <th className="py-2.5 px-3">Dynamic Point Meter</th>
                 <th className="py-2.5 px-3">Health</th>
                 <th className="py-2.5 px-3">Streak</th>
@@ -751,13 +769,13 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
             <tbody className="divide-y divide-slate-800/60 font-sans">
               {filteredAndSortedCreators.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-slate-500 text-xs">
+                  <td colSpan={11} className="py-8 text-center text-slate-500 text-xs">
                     No creators match the active filter criteria.
                   </td>
                 </tr>
               ) : (
                 filteredAndSortedCreators.map((item, idx) => {
-                  const coins = item.user.earningsCoins || item.metrics.totalTargetCoins || 0;
+                  const coins = periodTargetCoinsFromMetrics(item.metrics);
                   const usd = Number((coins * femalePayoutRatio).toFixed(2));
                   const extraSecs = item.user.onlineStatus === 'online' ? (heartbeatTick % 60) : 0;
                   const hours = Number((((item.metrics.activeOnlineSeconds || 0) + extraSecs) / 3600).toFixed(2));
@@ -849,7 +867,7 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
                         🪙 {coins.toLocaleString()}
                       </td>
 
-                      {/* Withdrawable USD */}
+                      {/* Payout USD @ Coin USD Peg */}
                       <td className="py-3 px-3 font-mono font-black text-emerald-400">
                         ${usd.toFixed(2)}
                       </td>
@@ -862,6 +880,20 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" title="Live counting" />
                           )}
                         </div>
+                      </td>
+
+                      {/* Bronze true-up gate vs Creator Ops thresholds */}
+                      <td className="py-3 px-3">
+                        <HostPeriodTargetProgressPanel
+                          progress={getHostPeriodTargetProgress({
+                            creatorId: item.user.id,
+                            periodHours: hours,
+                            periodCoins: periodTargetCoinsFromMetrics(item.metrics),
+                            systemSettings: systemSettings as unknown as Record<string, unknown>,
+                            coinEarnOverrideRate: item.user.coinEarnOverrideRate,
+                          })}
+                          variant="compact"
+                        />
                       </td>
 
                       {/* Dynamic Point Meter & Score Segment Bar */}

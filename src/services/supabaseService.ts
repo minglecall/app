@@ -38,10 +38,32 @@ export function isValidUuid(id: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
 
+/** True for UUIDs that may reference auth.users (rejects synthetic user_/admin_ prefixes). */
+export function isWritableAuthUuid(id: string | null | undefined): id is string {
+  if (!id || !isValidUuid(id)) return false;
+  const s = String(id);
+  return !s.startsWith('user_') && !s.startsWith('admin_');
+}
+
+/**
+ * Resolve auth_id for DB writes.
+ * Prefer explicit authId; else allow profile.id when it is a real UUID.
+ * Returns undefined to OMIT the column (never write null — preserves existing auth_id on upsert).
+ */
+export function resolveAuthIdForDbWrite(profile: {
+  id?: string;
+  authId?: string | null;
+}): string | undefined {
+  if (isWritableAuthUuid(profile.authId)) return profile.authId;
+  if (isWritableAuthUuid(profile.id)) return profile.id;
+  return undefined;
+}
+
 // Mapper from DbProfile to App UserProfile
 export function mapDbProfileToUserProfile(db: DbProfile): UserProfile {
   return {
     id: db.id,
+    // Prefer real auth_id; fall back to id only for UI identity matching (writes use resolveAuthIdForDbWrite)
     authId: db.auth_id || db.id,
     name: db.name,
     email: db.email || '',
@@ -75,7 +97,6 @@ export function mapDbProfileToUserProfile(db: DbProfile): UserProfile {
     role: db.role,
     createdAt: db.created_at,
     coinBalance: Number(db.coin_balance || 0),
-    vipTier: db.vip_tier,
     hourlyCoinRate: db.hourly_coin_rate,
     earningsCoins: Number(db.earnings_coins || 0),
     totalLifetimeEarnedUSD: Number(db.total_lifetime_earned_usd || 0),
@@ -112,18 +133,13 @@ export function mapDbProfileToUserProfile(db: DbProfile): UserProfile {
 
 // Mapper from App UserProfile to DbProfile Insert/Update
 export function mapUserProfileToDbInsert(profile: UserProfile): Database['public']['Tables']['profiles']['Insert'] {
-  // Only use authId if it is a distinct, valid UUID that is not equal to the profile.id
-  // Avoid passing synthetic IDs or non-existent auth_ids to prevent foreign key constraint violations against auth.users(id)
-  const isDistinctAuthId =
-    profile.authId &&
-    isValidUuid(profile.authId) &&
-    profile.authId !== profile.id &&
-    !String(profile.authId).startsWith('user_') &&
-    !String(profile.authId).startsWith('admin_');
+  // Persist auth_id when it references a UUID (including when authId === profile.id for public signups).
+  // NEVER write auth_id: null — omitting the field preserves an existing DB value on upsert.
+  // If the UUID is not in auth.users, callers must omit/retry on FK error (see upsertProfileToSupabase).
+  const authIdForDb = resolveAuthIdForDbWrite(profile);
 
-  return {
+  const row: Database['public']['Tables']['profiles']['Insert'] = {
     id: profile.id || generateValidUuid(),
-    auth_id: isDistinctAuthId ? profile.authId : null,
     name: profile.name,
     email: profile.email || null,
     phone: profile.phone || null,
@@ -155,7 +171,6 @@ export function mapUserProfileToDbInsert(profile: UserProfile): Database['public
     online_status: profile.onlineStatus,
     role: (profile.role === 'female_host' ? 'female_creator' : profile.role) as any,
     coin_balance: profile.coinBalance,
-    vip_tier: profile.vipTier || 'none',
     hourly_coin_rate: profile.hourlyCoinRate || 10,
     earnings_coins: profile.earningsCoins || 0,
     total_lifetime_earned_usd: profile.totalLifetimeEarnedUSD || 0,
@@ -184,6 +199,10 @@ export function mapUserProfileToDbInsert(profile: UserProfile): Database['public
     team_leader_note: profile.teamLeaderNote || null,
     has_password_set: Boolean(profile.hasPasswordSet),
   };
+  if (authIdForDb) {
+    row.auth_id = authIdForDb;
+  }
+  return row;
 }
 
 // Mapper from DbMessage to ChatMessage
@@ -200,6 +219,9 @@ export function mapDbMessageToChatMessage(db: DbMessage): ChatMessage {
     type: db.type,
     giftInfo: db.gift_info ? (db.gift_info as any) : undefined,
     friendRequestInfo: db.friend_request_info ? (db.friend_request_info as any) : undefined,
+    ratingInfo: (db as any).rating_info ? ((db as any).rating_info as any) : undefined,
+    isRead: Boolean(db.is_read),
+    createdAt: db.created_at,
     timestamp: db.created_at,
   };
 }
@@ -258,7 +280,12 @@ export async function upsertProfileToSupabase(profile: UserProfile): Promise<boo
   const normalizedProfile: UserProfile = {
     ...profile,
     id: validId,
-    authId: profile.authId && isValidUuid(profile.authId) && profile.authId !== validId ? profile.authId : undefined,
+    // Keep authId even when it equals profile.id (normal signup: id === auth.users.id)
+    authId: isWritableAuthUuid(profile.authId)
+      ? profile.authId
+      : isWritableAuthUuid(validId)
+        ? validId
+        : undefined,
   };
 
   let clientSuccess = false;
@@ -402,7 +429,6 @@ export async function updateUserProfileInSupabase(
     if (updates.earningsCoins !== undefined) payload.earnings_coins = Number(updates.earningsCoins);
     if (updates.totalLifetimeEarnedUSD !== undefined) payload.total_lifetime_earned_usd = Number(updates.totalLifetimeEarnedUSD);
     if (updates.onlineStatus !== undefined) payload.online_status = updates.onlineStatus;
-    if (updates.vipTier !== undefined) payload.vip_tier = updates.vipTier;
     if (updates.teamLeaderId !== undefined) payload.team_leader_id = updates.teamLeaderId;
     if (updates.createdById !== undefined) payload.created_by_id = updates.createdById;
     if (updates.coinEarnOverrideRate !== undefined) payload.coin_earn_override_rate = updates.coinEarnOverrideRate;
@@ -733,7 +759,7 @@ export async function purgeCreatorGoalsFromSupabase(): Promise<{ success: boolea
 }
 
 // Reset financial balances on Supabase profiles
-export async function resetFinancialBalancesInSupabase(type: 'caller_coins' | 'creator_earnings' | 'vip'): Promise<{ success: boolean; error?: string }> {
+export async function resetFinancialBalancesInSupabase(type: 'caller_coins' | 'creator_earnings'): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured()) return { success: false, error: 'Supabase is not configured' };
   try {
     const updates: any = {};
@@ -744,7 +770,6 @@ export async function resetFinancialBalancesInSupabase(type: 'caller_coins' | 'c
       updates.total_calls_hosted = 0;
       updates.total_call_minutes = 0;
     }
-    if (type === 'vip') updates.vip_tier = 'none';
 
     const { error } = await (supabase.from('profiles') as any).update(updates).not('id', 'is', null);
     if (error) {
@@ -990,9 +1015,11 @@ export async function fetchMatchesForUser(userId: string) {
 export async function upsertMatchToSupabase(
   userAId: string,
   userBId: string,
-  status: 'pending' | 'matched' | 'rejected' | 'unmatched' = 'matched',
+  status: 'pending' | 'matched' | 'rejected' | 'unmatched' = 'pending',
   initiatedBy?: string
 ): Promise<boolean> {
+  // Prefer Express /api/v1/matches/* for mutations. This client helper remains for
+  // legacy/admin paths only — default is pending (never auto-matched).
   if (!isSupabaseConfigured()) return false;
 
   try {
@@ -1093,7 +1120,7 @@ export async function fetchConversationMessages(
 /** Recent messages for a user across all conversations (authoritative hydrate; not localStorage). */
 export async function fetchRecentMessagesForUser(
   userId: string,
-  limit: number = 200
+  limit: number = 500
 ): Promise<ChatMessage[] | null> {
   if (!isSupabaseConfigured() || !userId) return null;
 
@@ -1110,43 +1137,52 @@ export async function fetchRecentMessagesForUser(
       return null;
     }
 
-    return (data || []).map(mapDbMessageToChatMessage);
+    const mapped = (data || []).map(mapDbMessageToChatMessage);
+
+    // Soft-hide: apply per-conversation clear watermarks for this user
+    const { data: clears, error: clearErr } = await supabase
+      .from('message_conversation_clears')
+      .select('other_user_id, cleared_at')
+      .eq('user_id', userId);
+
+    if (clearErr) {
+      // Table may not exist yet on older DBs — return unfiltered rather than failing hydrate
+      console.warn('Supabase message_conversation_clears fetch note:', clearErr.message);
+      return mapped;
+    }
+
+    if (!clears || clears.length === 0) return mapped;
+
+    const clearMap = new Map<string, number>();
+    for (const row of clears) {
+      const otherId = String((row as any).other_user_id || '');
+      const ts = new Date(String((row as any).cleared_at || '')).getTime();
+      if (otherId && !Number.isNaN(ts)) clearMap.set(otherId, ts);
+    }
+
+    return mapped.filter((m) => {
+      const otherId = m.senderId === userId ? m.receiverId : m.senderId;
+      const clearedAt = clearMap.get(otherId);
+      if (clearedAt == null) return true;
+      const createdMs = new Date(m.createdAt || m.timestamp).getTime();
+      if (Number.isNaN(createdMs)) return true;
+      return createdMs > clearedAt;
+    });
   } catch (err) {
     console.warn('Supabase fetchRecentMessagesForUser exception:', err);
     return null;
   }
 }
 
-export async function saveMessageToSupabase(message: ChatMessage): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
-
-  try {
-    const insertPayload: any = {
-      id: message.id,
-      sender_id: message.senderId,
-      receiver_id: message.receiverId,
-      text: message.text,
-      original_language: message.originalLanguage,
-      translated_text: message.translatedText || null,
-      target_language: message.targetLanguage || null,
-      media_url: message.mediaUrl || null,
-      type: message.type,
-      gift_info: message.giftInfo || null,
-      friend_request_info: message.friendRequestInfo || null,
-      is_read: false,
-      created_at: message.timestamp,
-    };
-
-    const { error } = await supabase.from('messages').insert(insertPayload as any);
-    if (error) {
-      console.warn('Supabase saveMessage error:', error.message);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.warn('Supabase saveMessage exception:', err);
-    return false;
-  }
+/**
+ * @deprecated Client-side message inserts are not production-safe (UUID/timestamptz).
+ * Use POST /api/messages via AppContext.sendMessage instead.
+ */
+export async function saveMessageToSupabase(_message: ChatMessage): Promise<boolean> {
+  console.warn(
+    'saveMessageToSupabase is deprecated — messages must be inserted via POST /api/messages'
+  );
+  return false;
 }
 
 // ============================================================================
@@ -1155,7 +1191,8 @@ export async function saveMessageToSupabase(message: ChatMessage): Promise<boole
 
 export function subscribeToRealtimeChat(
   userId: string,
-  onNewMessage: (msg: ChatMessage) => void
+  onNewMessage: (msg: ChatMessage) => void,
+  onMessageUpdate?: (msg: ChatMessage) => void
 ) {
   if (!isSupabaseConfigured()) return () => { };
 
@@ -1173,6 +1210,52 @@ export function subscribeToRealtimeChat(
         const raw = payload.new as DbMessage;
         if (raw) {
           onNewMessage(mapDbMessageToChatMessage(raw));
+        }
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `sender_id=eq.${userId}`,
+      },
+      (payload) => {
+        // Multi-device: sender's other sessions also receive the durable insert
+        const raw = payload.new as DbMessage;
+        if (raw) {
+          onNewMessage(mapDbMessageToChatMessage(raw));
+        }
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages',
+        filter: `receiver_id=eq.${userId}`,
+      },
+      (payload) => {
+        const raw = payload.new as DbMessage;
+        if (raw && onMessageUpdate) {
+          onMessageUpdate(mapDbMessageToChatMessage(raw));
+        }
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages',
+        filter: `sender_id=eq.${userId}`,
+      },
+      (payload) => {
+        const raw = payload.new as DbMessage;
+        if (raw && onMessageUpdate) {
+          onMessageUpdate(mapDbMessageToChatMessage(raw));
         }
       }
     )
@@ -1229,6 +1312,12 @@ export async function updateSystemConfigsInSupabase(
     if (updates.coin_burn_rate_friend_per_min !== undefined) payload.coin_burn_rate_friend_per_min = updates.coin_burn_rate_friend_per_min;
     if (updates.femaleHostSharePercent !== undefined) payload.female_host_share_percent = updates.femaleHostSharePercent;
     if (updates.female_host_share_percent !== undefined) payload.female_host_share_percent = updates.female_host_share_percent;
+    if (updates.femaleHostTargetSharePercent !== undefined) {
+      payload.female_host_target_share_percent = updates.femaleHostTargetSharePercent;
+    }
+    if (updates.female_host_target_share_percent !== undefined) {
+      payload.female_host_target_share_percent = updates.female_host_target_share_percent;
+    }
     if (updates.teamLeaderSharePercent !== undefined) payload.team_leader_share_percent = updates.teamLeaderSharePercent;
     if (updates.team_leader_share_percent !== undefined) payload.team_leader_share_percent = updates.team_leader_share_percent;
     if (updates.giftFemaleHostSharePercent !== undefined) payload.gift_female_host_share_percent = updates.giftFemaleHostSharePercent;
@@ -1240,8 +1329,21 @@ export async function updateSystemConfigsInSupabase(
     if (updates.virtual_gifts_json !== undefined) payload.virtual_gifts_json = updates.virtual_gifts_json;
     if (updates.femaleEarningRatePerMin !== undefined) payload.female_earning_rate_per_min = updates.femaleEarningRatePerMin;
     if (updates.female_earning_rate_per_min !== undefined) payload.female_earning_rate_per_min = updates.female_earning_rate_per_min;
-    if (updates.coinToUSDRatio !== undefined) payload.coin_to_usd_ratio = updates.coinToUSDRatio;
-    if (updates.femalePayoutRatioUSD !== undefined) payload.female_payout_ratio_usd = updates.femalePayoutRatioUSD;
+    // Fixed Peg (Phase 1): write coin_usd_peg and sync legacy dual-FX columns.
+    if (updates.coinUsdPeg !== undefined || updates.coin_usd_peg !== undefined) {
+      const peg = Number(updates.coinUsdPeg ?? updates.coin_usd_peg);
+      if (Number.isFinite(peg) && peg > 0) {
+        payload.coin_usd_peg = peg;
+        payload.female_payout_ratio_usd = peg;
+        payload.coin_to_usd_ratio = peg;
+      }
+    }
+    if (updates.coinToUSDRatio !== undefined && updates.coinUsdPeg === undefined && updates.coin_usd_peg === undefined) {
+      payload.coin_to_usd_ratio = updates.coinToUSDRatio;
+    }
+    if (updates.femalePayoutRatioUSD !== undefined && updates.coinUsdPeg === undefined && updates.coin_usd_peg === undefined) {
+      payload.female_payout_ratio_usd = updates.femalePayoutRatioUSD;
+    }
     if (updates.minPayoutThresholdUSD !== undefined) payload.min_payout_threshold_usd = updates.minPayoutThresholdUSD;
     if (updates.platformFeePercent !== undefined) payload.platform_fee_percent = updates.platformFeePercent;
     if (updates.freeMinutesTrial !== undefined) payload.free_minutes_trial = updates.freeMinutesTrial;
@@ -1263,6 +1365,10 @@ export async function updateSystemConfigsInSupabase(
     if (updates.daily_missions_config_json !== undefined) payload.daily_missions_config_json = updates.daily_missions_config_json;
     if (updates.creatorTargetCycle !== undefined) payload.creator_target_cycle = updates.creatorTargetCycle;
     if (updates.creator_target_cycle !== undefined) payload.creator_target_cycle = updates.creator_target_cycle;
+    if (updates.periodCloseUtcTime !== undefined) payload.period_close_utc_time = updates.periodCloseUtcTime;
+    if (updates.period_close_utc_time !== undefined) payload.period_close_utc_time = updates.period_close_utc_time;
+    if (updates.settlementEnabled !== undefined) payload.settlement_enabled = updates.settlementEnabled;
+    if (updates.settlement_enabled !== undefined) payload.settlement_enabled = updates.settlement_enabled;
     if (updates.creatorTargetBronzeHours !== undefined) payload.creator_target_bronze_hours = updates.creatorTargetBronzeHours;
     if (updates.creator_target_bronze_hours !== undefined) payload.creator_target_bronze_hours = updates.creator_target_bronze_hours;
     if (updates.creatorTargetBronzeCoins !== undefined) payload.creator_target_bronze_coins = updates.creatorTargetBronzeCoins;
@@ -1326,6 +1432,13 @@ export async function updateSystemConfigsInSupabase(
       'coin_burn_rate_per_min',
       'coin_burn_rate_friend_per_min',
       'female_earning_rate_per_min',
+      'female_host_share_percent',
+      'female_host_target_share_percent',
+      'team_leader_share_percent',
+      'gift_female_host_share_percent',
+      'gift_team_leader_share_percent',
+      'enable_virtual_gifts',
+      'coin_usd_peg',
       'coin_to_usd_ratio',
       'female_payout_ratio_usd',
       'min_payout_threshold_usd',
@@ -1491,18 +1604,74 @@ export async function updateInterestConfigsInSupabase(configs: any[]): Promise<b
   }
 }
 
+export async function fetchCurrencyConfigsFromSupabase(): Promise<
+  import('../utils/taxonomies').CurrencyItem[] | null
+> {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const { data, error } = await (supabase as any)
+      .from('currency_configs')
+      .select('*')
+      .order('order_num', { ascending: true });
+    if (error) {
+      console.warn('Supabase fetchCurrencyConfigs note:', error.message);
+      return null;
+    }
+    if (!data || data.length === 0) return null;
+    return data.map((row: any) => ({
+      code: String(row.code || '').toUpperCase(),
+      name: String(row.name || row.code || ''),
+      symbol: String(row.symbol || row.code || ''),
+      rateFromUsd: Number(row.rate_from_usd) > 0 ? Number(row.rate_from_usd) : 1,
+      enabled: row.enabled !== false,
+      orderNum: row.order_num != null ? Number(row.order_num) : 0,
+    }));
+  } catch (err) {
+    console.warn('Supabase fetchCurrencyConfigs exception:', err);
+    return null;
+  }
+}
+
+export async function upsertCurrencyConfigsToSupabase(
+  configs: import('../utils/taxonomies').CurrencyItem[]
+): Promise<boolean> {
+  if (!isSupabaseConfigured() || !configs || configs.length === 0) return false;
+  try {
+    const payload = configs.map((c, idx) => ({
+      code: String(c.code || '').toUpperCase(),
+      name: c.name,
+      symbol: c.symbol,
+      rate_from_usd: Number(c.rateFromUsd) > 0 ? Number(c.rateFromUsd) : 1,
+      enabled: c.enabled !== false,
+      order_num: c.orderNum != null ? Number(c.orderNum) : idx,
+    }));
+    const { error } = await (supabase as any)
+      .from('currency_configs')
+      .upsert(payload, { onConflict: 'code' });
+    if (error) {
+      console.warn('Supabase upsertCurrencyConfigs error:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('Supabase upsertCurrencyConfigs exception:', err);
+    return false;
+  }
+}
+
 export interface PushTaxonomiesResult {
   success: boolean;
   countriesCount: number;
   languagesCount: number;
   zodiacsCount: number;
   interestsCount: number;
+  currenciesCount: number;
   systemConfigsSaved: boolean;
   errors: string[];
 }
 
 /**
- * Pushes and synchronizes all master taxonomies (Countries, Languages, Zodiac Signs, Interests)
+ * Pushes and synchronizes all master taxonomies (Countries, Languages, Zodiac Signs, Interests, Currencies)
  * and active system settings directly into their respective Supabase PostgreSQL database tables.
  */
 export async function pushAllTaxonomiesAndSettingsToSupabase(
@@ -1514,6 +1683,7 @@ export async function pushAllTaxonomiesAndSettingsToSupabase(
     languagesCount: 0,
     zodiacsCount: 0,
     interestsCount: 0,
+    currenciesCount: 0,
     systemConfigsSaved: false,
     errors: [],
   };
@@ -1624,6 +1794,30 @@ export async function pushAllTaxonomiesAndSettingsToSupabase(
     result.errors.push(`Interests: ${err.message}`);
   }
 
+  // 4b. Currencies — only when explicitly provided (avoid clobbering admin rates on taxonomy allow-list sync)
+  try {
+    if (Array.isArray(customSettings?.currencyConfigs) && customSettings.currencyConfigs.length > 0) {
+      const currencyPayload = customSettings.currencyConfigs.map((c: any, idx: number) => ({
+        code: String(c.code || '').toUpperCase(),
+        name: c.name,
+        symbol: c.symbol,
+        rate_from_usd: Number(c.rateFromUsd) > 0 ? Number(c.rateFromUsd) : 1,
+        enabled: c.enabled !== false,
+        order_num: c.orderNum != null ? Number(c.orderNum) : idx,
+      }));
+      const { error: curErr } = await (supabase as any)
+        .from('currency_configs')
+        .upsert(currencyPayload, { onConflict: 'code' });
+      if (curErr) {
+        result.errors.push(`Currencies: ${curErr.message}`);
+      } else {
+        result.currenciesCount = currencyPayload.length;
+      }
+    }
+  } catch (err: any) {
+    result.errors.push(`Currencies: ${err.message}`);
+  }
+
   // 5. System Configs sync (including dynamic SVG flag sizes)
   try {
     const configSettings = {
@@ -1648,36 +1842,21 @@ export async function pushAllTaxonomiesAndSettingsToSupabase(
 
 // ============================================================================
 // CONTENT MODERATION REPORTS API
+// Deprecated: use POST /api/v1/reports via AppContext.reportUser (Express + service role).
+// Client-side inserts are not used — reporter_id must come from the JWT on the server.
 // ============================================================================
 
-export async function submitModerationReport(report: {
+export async function submitModerationReport(_report: {
   reporterId: string;
   reportedUserId: string;
   reason: string;
   details?: string;
   evidenceSnapshotUrl?: string;
 }): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
-
-  try {
-    const { error } = await supabase.from('moderation_reports').insert({
-      reporter_id: report.reporterId,
-      reported_user_id: report.reportedUserId,
-      reason: report.reason,
-      details: report.details || null,
-      evidence_snapshot_url: report.evidenceSnapshotUrl || null,
-      status: 'pending',
-    } as any);
-
-    if (error) {
-      console.warn('Supabase submitReport error:', error.message);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.warn('Supabase submitReport exception:', err);
-    return false;
-  }
+  console.warn(
+    'submitModerationReport is deprecated. Use authFetch POST /api/v1/reports instead.'
+  );
+  return false;
 }
 
 // ============================================================================
@@ -1693,9 +1872,12 @@ export async function fetchCmsPoliciesFromSupabase(): Promise<any[] | null> {
       .select('*')
       .order('order_num', { ascending: true });
 
-    if (error || !data) return null;
+    if (error) {
+      console.warn('Supabase fetchCmsPolicies error:', error.message);
+      return null;
+    }
 
-    return data.map((row: any) => ({
+    return (data || []).map((row: any) => ({
       id: row.id || row.slug,
       slug: row.slug,
       title: row.title,
@@ -1755,49 +1937,38 @@ export async function upsertCmsPolicy(policy: {
   content: string;
   summary?: string;
   effectiveDate?: string;
+  lastUpdated?: string;
   order?: number;
   isFeaturedOnHome?: boolean;
   externalUrl?: string;
 }): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
-
   try {
-    const policyId = policy.id || policy.slug;
-    const { error } = await supabase.from('cms_policies').upsert({
-      id: policyId,
-      slug: policy.slug,
-      title: policy.title,
-      category: policy.category || 'legal',
-      icon: policy.icon || 'ShieldCheck',
-      content: policy.content,
-      summary: policy.summary || null,
-      effective_date: policy.effectiveDate || new Date().toISOString().split('T')[0],
-      order_num: policy.order ?? 1,
-      is_featured: policy.isFeaturedOnHome ?? true,
-      external_url: policy.externalUrl || null,
-      updated_at: new Date().toISOString(),
-    } as any, { onConflict: 'id' });
-
-    if (error) {
-      console.warn('Supabase upsertCmsPolicy error:', error.message);
-      return false;
-    }
-    return true;
+    const res = await authFetch('/api/admin/cms/policies', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...policy,
+        id: policy.id || policy.slug,
+        lastUpdated: policy.lastUpdated || policy.effectiveDate,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && Boolean(data.success);
   } catch (err) {
-    console.warn('Supabase upsertCmsPolicy exception:', err);
+    console.warn('Admin upsertCmsPolicy exception:', err);
     return false;
   }
 }
 
 export async function deleteCmsPolicyFromSupabase(policyIdOrSlug: string): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
   try {
-    const { error } = await supabase
-      .from('cms_policies')
-      .delete()
-      .or(`id.eq.${policyIdOrSlug},slug.eq.${policyIdOrSlug}`);
-    return !error;
-  } catch {
+    const res = await authFetch(`/api/admin/cms/policies/${encodeURIComponent(policyIdOrSlug)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && Boolean(data.success);
+  } catch (err) {
+    console.warn('Admin deleteCmsPolicy error:', err);
     return false;
   }
 }
@@ -1814,54 +1985,57 @@ export async function fetchHomeBannersFromSupabase(): Promise<any[] | null> {
       .select('*')
       .order('order_num', { ascending: true });
 
-    if (error || !data) return null;
+    // Empty array is a valid DB state — do not treat as "fetch failed"
+    if (error) {
+      console.warn('Supabase fetchHomeBanners error:', error.message);
+      return null;
+    }
 
-    return data.map((row: any) => ({
+    return (data || []).map((row: any) => ({
       id: row.id,
       title: row.title,
       subtitle: row.subtitle || '',
       tagText: row.badge || 'FEATURED',
-      tagColor: 'bg-indigo-600 text-white',
-      imageUrl: row.image_url,
-      ctaText: 'Explore Now',
+      tagColor: row.tag_color || 'bg-indigo-600 text-white',
+      imageUrl: row.image_url || '',
+      ctaText: row.cta_text || 'Explore Now',
       actionType: row.action_type || 'tab',
       actionTarget: row.action_target || 'coins',
       active: row.active ?? true,
       order: row.order_num || 1,
       bgGradient: row.bg_gradient || 'from-indigo-950/90 via-purple-950/70 to-slate-900/90',
     }));
-  } catch {
+  } catch (err) {
+    console.warn('Supabase fetchHomeBanners exception:', err);
     return null;
   }
 }
 
+/** Admin CMS writes must go through Express requireAdmin — not client upsert. */
 export async function upsertHomeBannerToSupabase(banner: any): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
   try {
-    const { error } = await supabase.from('home_banners').upsert({
-      id: banner.id,
-      title: banner.title,
-      subtitle: banner.subtitle || '',
-      badge: banner.tagText || banner.badge || 'FEATURED',
-      image_url: banner.imageUrl || banner.image_url,
-      action_type: banner.actionType || banner.action_type || 'tab',
-      action_target: banner.actionTarget || banner.action_target || 'coins',
-      bg_gradient: banner.bgGradient || banner.bg_gradient || 'from-indigo-950/90 via-purple-950/70 to-slate-900/90',
-      order_num: banner.order || banner.order_num || 0,
-      active: banner.active ?? true,
-    } as any, { onConflict: 'id' });
-    return !error;
-  } catch {
+    const res = await authFetch('/api/admin/cms/banners', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(banner),
+    });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && Boolean(data.success);
+  } catch (err) {
+    console.warn('Admin upsertHomeBanner error:', err);
     return false;
   }
 }
 
 export async function deleteHomeBannerFromSupabase(bannerId: string): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
   try {
-    const { error } = await supabase.from('home_banners').delete().eq('id', bannerId);
-    return !error;
-  } catch {
+    const res = await authFetch(`/api/admin/cms/banners/${encodeURIComponent(bannerId)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && Boolean(data.success);
+  } catch (err) {
+    console.warn('Admin deleteHomeBanner error:', err);
     return false;
   }
 }
@@ -1874,9 +2048,12 @@ export async function fetchHomeQuickLinksFromSupabase(): Promise<any[] | null> {
       .select('*')
       .order('order_num', { ascending: true });
 
-    if (error || !data) return null;
+    if (error) {
+      console.warn('Supabase fetchHomeQuickLinks error:', error.message);
+      return null;
+    }
 
-    return data.map((row: any) => ({
+    return (data || []).map((row: any) => ({
       id: row.id,
       title: row.title,
       subtitle: row.subtitle || '',
@@ -1888,38 +2065,36 @@ export async function fetchHomeQuickLinksFromSupabase(): Promise<any[] | null> {
       order: row.order_num || 1,
       active: row.active ?? true,
     }));
-  } catch {
+  } catch (err) {
+    console.warn('Supabase fetchHomeQuickLinks exception:', err);
     return null;
   }
 }
 
 export async function upsertHomeQuickLinkToSupabase(link: any): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
   try {
-    const { error } = await supabase.from('home_quick_links').upsert({
-      id: link.id,
-      title: link.title,
-      subtitle: link.subtitle || '',
-      icon: link.icon || 'Zap',
-      badge: link.badge || null,
-      action_type: link.actionType || link.action_type || 'tab',
-      action_target: link.actionTarget || link.action_target || 'discovery',
-      color_gradient: link.colorGradient || link.color_gradient || 'from-indigo-500 to-purple-600',
-      order_num: link.order || link.order_num || 0,
-      active: link.active ?? true,
-    } as any, { onConflict: 'id' });
-    return !error;
-  } catch {
+    const res = await authFetch('/api/admin/cms/quick-links', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(link),
+    });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && Boolean(data.success);
+  } catch (err) {
+    console.warn('Admin upsertHomeQuickLink error:', err);
     return false;
   }
 }
 
 export async function deleteHomeQuickLinkFromSupabase(linkId: string): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
   try {
-    const { error } = await supabase.from('home_quick_links').delete().eq('id', linkId);
-    return !error;
-  } catch {
+    const res = await authFetch(`/api/admin/cms/quick-links/${encodeURIComponent(linkId)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && Boolean(data.success);
+  } catch (err) {
+    console.warn('Admin deleteHomeQuickLink error:', err);
     return false;
   }
 }
@@ -1964,40 +2139,15 @@ export async function fetchPayoutRequestsFromSupabase(): Promise<any[] | null> {
   }
 }
 
-export async function upsertPayoutRequestToSupabase(payout: any): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
-  try {
-    const payload = {
-      id: payout.id,
-      user_id: payout.userId,
-      user_name: payout.userName,
-      user_email: payout.userEmail || null,
-      amount_coins: payout.amountCoins,
-      amount_usd: payout.amountUSD,
-      payout_method: payout.payoutMethod,
-      account_details: payout.accountDetails,
-      status: payout.status || 'pending',
-      admin_note: payout.adminNote || null,
-      kyc_verified: Boolean(payout.kycVerified),
-      team_leader_id: payout.teamLeaderId || null,
-      team_leader_name: payout.teamLeaderName || null,
-      request_date: payout.requestDate || new Date().toISOString(),
-      processed_date: payout.processedDate || null,
-    };
-
-    const { error } = await supabase
-      .from('payout_requests')
-      .upsert(payload as any, { onConflict: 'id' });
-
-    if (error) {
-      console.warn('Supabase upsertPayoutRequest error:', error.message);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.warn('Supabase upsertPayoutRequest exception:', err);
-    return false;
-  }
+/**
+ * Phase 7: client writes to payout_requests are blocked.
+ * Cash-out is settlement_batches only; use POST /api/v1/finance/manual-payouts (always rejects).
+ */
+export async function upsertPayoutRequestToSupabase(_payout: any): Promise<boolean> {
+  console.warn(
+    'upsertPayoutRequestToSupabase blocked (PAYOUT_PERIOD_END_ONLY): use settlement batches'
+  );
+  return false;
 }
 
 // ============================================================================
@@ -2097,9 +2247,11 @@ export async function insertCallLogToSupabase(log: any): Promise<boolean> {
 
 // ============================================================================
 // FRIEND REQUESTS API
+// Mutations MUST go through Express (/api/v1/friends/*).
 // ============================================================================
 
 export async function fetchFriendRequestsFromSupabase(): Promise<any[] | null> {
+  // Prefer GET /api/v1/friends/requests (JWT-derived user).
   if (!isSupabaseConfigured()) return null;
   try {
     const { data, error } = await supabase
@@ -2130,6 +2282,7 @@ export async function fetchFriendRequestsFromSupabase(): Promise<any[] | null> {
   }
 }
 
+/** @deprecated Use POST /api/v1/friends/* */
 export async function upsertFriendRequestToSupabase(req: any): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
   try {
@@ -2138,7 +2291,6 @@ export async function upsertFriendRequestToSupabase(req: any): Promise<boolean> 
       sender_id: req.senderId,
       receiver_id: req.receiverId,
       status: req.status || 'pending',
-      call_log_id: req.callLogId || null,
     };
 
     const { error } = await supabase.from('friend_requests').upsert(payload as any, { onConflict: 'id' });
@@ -2153,6 +2305,7 @@ export async function upsertFriendRequestToSupabase(req: any): Promise<boolean> 
   }
 }
 
+/** @deprecated Use POST /api/v1/friends/remove */
 export async function removeFriendInSupabase(userA: string, userB: string): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
   try {
@@ -2249,27 +2402,11 @@ export async function fetchFeedPostsFromSupabase(): Promise<any[] | null> {
   }
 }
 
-export async function upsertFeedPostToSupabase(post: any): Promise<boolean> {
-  if (!isSupabaseConfigured()) return false;
-  try {
-    const payload = {
-      id: post.id,
-      creator_id: post.creatorId,
-      creator_name: post.creatorName,
-      creator_avatar: post.creatorAvatar || null,
-      media_url: post.mediaUrl,
-      media_type: post.mediaType || 'image',
-      caption: post.caption || '',
-      likes: post.likes || 0,
-      comments_count: post.commentsCount || 0,
-      created_at: post.createdAt ? new Date().toISOString() : new Date().toISOString(),
-    };
-
-    const { error } = await supabase.from('feed_posts').upsert(payload as any, { onConflict: 'id' });
-    return !error;
-  } catch {
-    return false;
-  }
+export async function upsertFeedPostToSupabase(_post: any): Promise<boolean> {
+  console.warn(
+    'upsertFeedPostToSupabase is deprecated — use POST /api/v1/feed via AppContext.addFeedPost'
+  );
+  return false;
 }
 
 export async function deleteFeedPostFromSupabase(postId: string): Promise<boolean> {
@@ -2302,8 +2439,18 @@ export async function fetchCoinPackagesFromSupabase(): Promise<any[] | null> {
       coins: Number(row.coins || 0),
       bonusCoins: Number(row.bonus_coins || 0),
       priceUSD: Number(row.price_usd || 0),
+      discountPriceUSD:
+        row.discount_price_usd == null || row.discount_price_usd === ''
+          ? null
+          : Number(row.discount_price_usd),
+      approxCallMinutes:
+        row.approx_call_minutes == null || row.approx_call_minutes === ''
+          ? null
+          : Number(row.approx_call_minutes),
+      savingLabel: row.saving_label || null,
       badgeTag: row.badge_tag || undefined,
       popular: Boolean(row.popular),
+      orderNum: row.order_num != null ? Number(row.order_num) : undefined,
     }));
   } catch {
     return null;
@@ -2313,14 +2460,26 @@ export async function fetchCoinPackagesFromSupabase(): Promise<any[] | null> {
 export async function upsertCoinPackageToSupabase(pkg: any): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
   try {
+    const discountRaw = pkg.discountPriceUSD;
+    const approxRaw = pkg.approxCallMinutes;
     const payload = {
       id: pkg.id,
       title: pkg.title,
       coins: pkg.coins,
       bonus_coins: pkg.bonusCoins || 0,
       price_usd: pkg.priceUSD,
+      discount_price_usd:
+        discountRaw == null || discountRaw === '' || !Number.isFinite(Number(discountRaw))
+          ? null
+          : Number(discountRaw),
+      approx_call_minutes:
+        approxRaw == null || approxRaw === '' || !Number.isFinite(Number(approxRaw))
+          ? null
+          : Math.floor(Number(approxRaw)),
+      saving_label: pkg.savingLabel ? String(pkg.savingLabel).trim() || null : null,
       badge_tag: pkg.badgeTag || null,
       popular: Boolean(pkg.popular),
+      ...(pkg.orderNum != null ? { order_num: Number(pkg.orderNum) } : {}),
     };
     const { error } = await supabase.from('coin_packages').upsert(payload as any, { onConflict: 'id' });
     return !error;
@@ -2341,9 +2500,11 @@ export async function deleteCoinPackageFromSupabase(pkgId: string): Promise<bool
 
 // ============================================================================
 // FAVORITES & BLOCKED USERS API
+// Mutations MUST go through Express (/api/v1/favorites/*, /api/v1/blocks/*).
 // ============================================================================
 
 export async function fetchFavoritesFromSupabase(userId: string): Promise<string[] | null> {
+  // Prefer GET /api/v1/favorites/me (JWT-derived user). Kept for legacy reads.
   if (!isSupabaseConfigured()) return null;
   try {
     const { data, error } = await supabase
@@ -2358,6 +2519,7 @@ export async function fetchFavoritesFromSupabase(userId: string): Promise<string
   }
 }
 
+/** @deprecated Use POST /api/v1/favorites/toggle */
 export async function addFavoriteToSupabase(userId: string, favoriteUserId: string): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
   try {
@@ -2399,6 +2561,7 @@ export async function fetchBlockedUsersFromSupabase(userId: string): Promise<str
   }
 }
 
+/** @deprecated Use POST /api/v1/blocks */
 export async function addBlockedUserToSupabase(userId: string, blockedUserId: string, reason?: string): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
   try {
@@ -2413,6 +2576,7 @@ export async function addBlockedUserToSupabase(userId: string, blockedUserId: st
   }
 }
 
+/** @deprecated Use DELETE /api/v1/blocks/:targetUserId */
 export async function removeBlockedUserFromSupabase(userId: string, blockedUserId: string): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
   try {
@@ -2476,42 +2640,24 @@ export async function fetchUserDailyRewardsFromSupabase(userId: string): Promise
 }
 
 export async function upsertUserDailyRewardsInSupabase(record: DailyRewardRecord): Promise<boolean> {
-  if (!isSupabaseConfigured() || !record?.userId) return false;
+  if (!record?.userId) return false;
+  // Claims & coin totals must go through /api/rewards/claim-*.
+  // This helper only forwards progress-shaped payloads to the hardened update endpoint.
   try {
-    const payload = {
-      user_id: record.userId,
-      last_login_date: record.lastLoginDate,
-      streak_count: record.streakCount,
-      streak_claimed_date: record.streakClaimedDate,
-      tasks_date: record.tasksDate,
-      task_chat_friends: record.taskChatFriends || [],
-      task_chat_claimed: record.taskChatClaimed,
-      task_quick_matches: record.taskQuickMatches,
-      task_quick_match_claimed: record.taskQuickMatchClaimed,
-      task_video_call_seconds: record.taskVideoCallSeconds,
-      task_video_call_claimed: record.taskVideoCallClaimed,
-      task_moment_interactions: record.taskMomentInteractions,
-      task_moment_claimed: record.taskMomentClaimed,
-      task_gift_count: record.taskGiftCount,
-      task_gift_claimed: record.taskGiftClaimed,
-      master_chest_claimed: record.masterChestClaimed,
-      total_coins_earned: record.totalCoinsEarned,
-      updated_at: new Date().toISOString(),
-    };
-
-    const { error } = await (supabase.from('user_daily_rewards') as any)
-      .upsert(payload, { onConflict: 'user_id' });
-
-    if (error) {
-      console.warn('[Supabase] upsertUserDailyRewards error:', error.message);
-      authFetch('/api/rewards/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(record),
-      }).catch(() => {});
-      return false;
-    }
-    return true;
+    const res = await authFetch('/api/rewards/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rewardDay: record.tasksDate,
+        taskChatFriends: record.taskChatFriends,
+        taskQuickMatches: record.taskQuickMatches,
+        taskVideoCallSeconds: record.taskVideoCallSeconds,
+        taskMomentInteractions: record.taskMomentInteractions,
+        taskGiftCount: record.taskGiftCount,
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    return Boolean(json?.success);
   } catch (err) {
     console.warn('[Supabase] upsertUserDailyRewards exception:', err);
     return false;

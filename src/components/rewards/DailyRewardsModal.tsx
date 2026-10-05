@@ -12,7 +12,6 @@ import {
   Video,
   Heart,
   Trophy,
-  Crown,
   ArrowRight,
   ShieldCheck,
 } from 'lucide-react';
@@ -31,7 +30,6 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
   onNavigateTab,
 }) => {
   const {
-    currentUser,
     systemSettings,
     dailyRewardRecord,
     claimDailyStreak,
@@ -89,24 +87,14 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
     masterChest: { target: 4, reward: 50, enabled: true },
   };
 
-  // Check VIP multiplier
-  const vipTier = currentUser?.vipTier || 'none';
-  const vipMultiplier =
-    vipTier === 'diamond'
-      ? 2.0
-      : vipTier === 'gold'
-      ? 1.5
-      : vipTier === 'silver'
-      ? 1.25
-      : vipTier === 'bronze'
-      ? 1.1
-      : 1.0;
-
   const currentStreakDay = dailyRewardRecord?.streakCount || 1;
+  const localRewardDay = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  })();
   const isStreakClaimedToday = Boolean(
     dailyRewardRecord?.streakClaimedDate &&
-      dailyRewardRecord.streakClaimedDate ===
-        new Date().toISOString().split('T')[0]
+      dailyRewardRecord.streakClaimedDate === localRewardDay
   );
 
   // Compute Daily Missions
@@ -120,7 +108,7 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
         dailyRewardRecord?.taskChatFriends?.length || 0,
         missionsConfig.chatFriends?.target || 3
       ),
-      rewardCoins: Math.round((missionsConfig.chatFriends?.reward || 25) * vipMultiplier),
+      rewardCoins: missionsConfig.chatFriends?.reward || 25,
       claimed: Boolean(dailyRewardRecord?.taskChatClaimed),
       icon: 'MessageCircle',
       actionTab: 'messages',
@@ -136,7 +124,7 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
         dailyRewardRecord?.taskQuickMatches || 0,
         missionsConfig.quickMatches?.target || 10
       ),
-      rewardCoins: Math.round((missionsConfig.quickMatches?.reward || 30) * vipMultiplier),
+      rewardCoins: missionsConfig.quickMatches?.reward || 30,
       claimed: Boolean(dailyRewardRecord?.taskQuickMatchClaimed),
       icon: 'Zap',
       actionTab: 'match',
@@ -146,15 +134,16 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
     {
       key: 'video_call',
       title: 'Live Connection',
-      description: `Talk in a 1-on-1 video call for at least ${Math.round(
-        (missionsConfig.videoCall?.target || 60) / 60
-      )} min`,
+      description: `Talk in a 1-on-1 video call for at least ${Math.max(
+        1,
+        Math.round((missionsConfig.videoCall?.target || 60) / 60)
+      )} min (${missionsConfig.videoCall?.target || 60}s)`,
       target: missionsConfig.videoCall?.target || 60,
       current: Math.min(
         dailyRewardRecord?.taskVideoCallSeconds || 0,
         missionsConfig.videoCall?.target || 60
       ),
-      rewardCoins: Math.round((missionsConfig.videoCall?.reward || 35) * vipMultiplier),
+      rewardCoins: missionsConfig.videoCall?.reward || 35,
       claimed: Boolean(dailyRewardRecord?.taskVideoCallClaimed),
       icon: 'Video',
       actionTab: 'discovery',
@@ -170,7 +159,7 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
         dailyRewardRecord?.taskMomentInteractions || 0,
         missionsConfig.momentInteract?.target || 3
       ),
-      rewardCoins: Math.round((missionsConfig.momentInteract?.reward || 15) * vipMultiplier),
+      rewardCoins: missionsConfig.momentInteract?.reward || 15,
       claimed: Boolean(dailyRewardRecord?.taskMomentClaimed),
       icon: 'Heart',
       actionTab: 'moments',
@@ -186,7 +175,7 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
         dailyRewardRecord?.taskGiftCount || 0,
         missionsConfig.sendGift?.target || 1
       ),
-      rewardCoins: Math.round((missionsConfig.sendGift?.reward || 20) * vipMultiplier),
+      rewardCoins: missionsConfig.sendGift?.reward || 20,
       claimed: Boolean(dailyRewardRecord?.taskGiftClaimed),
       icon: 'Gift',
       actionTab: 'discovery',
@@ -201,15 +190,13 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
   const isMasterReady =
     completedMissionsCount >= masterTarget && !dailyRewardRecord?.masterChestClaimed;
   const isMasterClaimed = Boolean(dailyRewardRecord?.masterChestClaimed);
-  const masterRewardCoins = Math.round((missionsConfig.masterChest?.reward || 50) * vipMultiplier);
+  const masterRewardCoins = missionsConfig.masterChest?.reward || 50;
 
   // Handle claim streak
   const handleClaimStreak = async () => {
     if (isStreakClaimedToday || claimingKey) return;
     setClaimingKey('streak');
-    const dayReward = Math.round(
-      (streakRewards[Math.min(currentStreakDay - 1, 6)] || 20) * vipMultiplier
-    );
+    const dayReward = streakRewards[Math.min(currentStreakDay - 1, 6)] || 20;
     const success = await claimDailyStreak();
     if (success) {
       playCoinChime();
@@ -289,14 +276,6 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
             </div>
           </div>
 
-          {/* VIP Multiplier Pill if active */}
-          {vipTier !== 'none' && (
-            <div className="mt-3 inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-gradient-to-r from-amber-500/20 to-yellow-500/10 border border-amber-500/40 text-amber-300 text-xs font-semibold">
-              <Crown className="w-3.5 h-3.5 text-amber-400" />
-              <span>{vipTier.toUpperCase()} VIP Boost: <strong>{vipMultiplier}x Multiplier</strong> active on all daily coins!</span>
-            </div>
-          )}
-
           {/* Navigation Tabs */}
           <div className="flex items-center space-x-2 mt-4">
             <button
@@ -353,9 +332,7 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
               {/* 7 Day Strip */}
               <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
                 {[1, 2, 3, 4, 5, 6, 7].map((day) => {
-                  const dayCoins = Math.round(
-                    (streakRewards[day - 1] || 20) * vipMultiplier
-                  );
+                  const dayCoins = streakRewards[day - 1] || 20;
                   const isPastClaimed = day < currentStreakDay || (day === currentStreakDay && isStreakClaimedToday);
                   const isTodayActive = day === currentStreakDay && !isStreakClaimedToday;
                   const isFuture = day > currentStreakDay;
@@ -423,9 +400,9 @@ export const DailyRewardsModal: React.FC<DailyRewardsModalProps> = ({
                   <span>
                     {isStreakClaimedToday
                       ? `Day ${currentStreakDay} Claimed! Come Back Tomorrow`
-                      : `Claim Day ${currentStreakDay} (+${Math.round(
-                          (streakRewards[currentStreakDay - 1] || 20) * vipMultiplier
-                        )} Coins)`}
+                      : `Claim Day ${currentStreakDay} (+${
+                          streakRewards[currentStreakDay - 1] || 20
+                        } Coins)`}
                   </span>
                 </button>
               </div>

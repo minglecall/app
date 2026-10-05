@@ -9,14 +9,79 @@ import {
   updateR2RuntimeConfig,
   saveLocalMediaBuffer,
   isR2Configured,
+  isMockStorageAllowed,
+  validateUploadRequest,
+  sanitizeMediaObjectKey,
+  parseMediaKeyParts,
+  assertUploadKeyOwnedByUser,
+  normalizeContentType,
+  getCategoryAllowedMimes,
+  getCategoryMaxBytes,
+  StorageValidationError,
+  StorageNotConfiguredError,
+  PUBLIC_MEDIA_CATEGORIES,
+  PRIVATE_MEDIA_CATEGORIES,
+  isAllowedUploadCategory,
 } from '../r2Storage';
-import { requireAuth, requireAdmin } from '../middleware/auth';
+import {
+  requireAuth,
+  requireAdmin,
+  extractBearerToken,
+  verifyAccessToken,
+  sendUnauthorized,
+  sendForbidden,
+} from '../middleware/auth';
 
 function resolveUploadOwnerUserId(req: express.Request): string | null {
   const profileId = String((req as any).profileId || (req as any).profile?.id || '').trim();
   if (profileId) return profileId;
   const authId = String((req as any).user?.id || '').trim();
   return authId || null;
+}
+
+function isAdminRequest(req: express.Request): boolean {
+  const profile = (req as any).profile;
+  const appRole = (req as any).user?.app_metadata?.role;
+  return profile?.role === 'admin' || appRole === 'admin';
+}
+
+function sendStorageError(res: express.Response, err: unknown) {
+  if (err instanceof StorageNotConfiguredError) {
+    return res.status(503).json({
+      success: false,
+      configured: false,
+      error: err.message,
+      code: err.code,
+    });
+  }
+  if (err instanceof StorageValidationError) {
+    return res.status(err.status).json({
+      success: false,
+      error: err.message,
+      code: err.code,
+      ...(err.details || {}),
+    });
+  }
+  const message = err instanceof Error ? err.message : 'Storage error';
+  console.error('[Storage API] Unexpected error:', err);
+  return res.status(500).json({ success: false, error: message });
+}
+
+/** Soft-auth: attach user/profile when Bearer present; never 401 by itself. */
+async function tryAttachAuth(req: express.Request): Promise<void> {
+  if ((req as any).user?.id) return;
+  const token = extractBearerToken(req);
+  if (!token) return;
+  try {
+    const verified = await verifyAccessToken(token);
+    if (!verified) return;
+    (req as any).user = verified.user;
+    (req as any).accessToken = token;
+    (req as any).profile = verified.profile;
+    (req as any).profileId = verified.profile?.id || verified.user.id;
+  } catch (err) {
+    console.warn('[Storage Media] Optional auth attach failed:', err);
+  }
 }
 
 export function createStorageRouter(_ctx: ServerRuntime): Router {
@@ -26,24 +91,23 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   router.post('/presigned-url', requireAuth, async (req, res) => {
     try {
       const { filename, contentType, fileSize, category } = req.body || {};
-      if (!filename) return res.status(400).json({ error: 'Filename is required' });
+      if (!filename) return res.status(400).json({ success: false, error: 'Filename is required' });
 
       const ownerUserId = resolveUploadOwnerUserId(req);
       if (!ownerUserId) {
-        return res.status(400).json({ error: 'A valid userId is required for storage uploads' });
+        return res.status(401).json({ success: false, error: 'Authenticated user is required for storage uploads' });
       }
 
       const data = await generateR2PresignedUploadUrl({
         filename,
-        contentType: contentType || 'application/octet-stream',
+        contentType: contentType || '',
         fileSize: Number(fileSize) || 0,
         userId: ownerUserId,
         category: category || 'chat_media',
       });
       return res.json(data);
     } catch (err: any) {
-      console.error('[Storage API] Presigned URL error:', err);
-      return res.status(500).json({ error: err.message });
+      return sendStorageError(res, err);
     }
   });
 
@@ -51,53 +115,97 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
   router.post('/upload', requireAuth, async (req, res) => {
     try {
       const { filename, contentType, base64Data, category } = req.body || {};
-      if (!base64Data) return res.status(400).json({ error: 'base64Data is required' });
+      if (!base64Data) return res.status(400).json({ success: false, error: 'base64Data is required' });
 
-      const matches = base64Data.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      const ownerUserId = resolveUploadOwnerUserId(req);
+      if (!ownerUserId) {
+        return res.status(401).json({ success: false, error: 'Authenticated user is required for storage uploads' });
+      }
+
+      const categoryHint = isAllowedUploadCategory(category) ? category : 'chat_media';
+      const maxBytes = getCategoryMaxBytes(categoryHint);
+      // Reject oversized base64 before allocating a large buffer (~4/3 inflation + data-URL prefix)
+      if (String(base64Data).length > maxBytes * 2 + 512) {
+        throw new StorageValidationError('Base64 payload exceeds allowed size', 400, 'BASE64_TOO_LARGE', {
+          maxBytes,
+        });
+      }
+
+      const matches = String(base64Data).match(/^data:([A-Za-z0-9.+\/-]+);base64,(.+)$/);
       let buffer: Buffer;
-      let mime = contentType || 'image/jpeg';
+      let mimeFromDataUrl = '';
       if (matches) {
-        mime = matches[1];
+        mimeFromDataUrl = matches[1];
         buffer = Buffer.from(matches[2], 'base64');
       } else {
-        buffer = Buffer.from(base64Data, 'base64');
+        buffer = Buffer.from(String(base64Data), 'base64');
       }
 
       if (!buffer.length) {
-        return res.status(400).json({ error: 'Uploaded file payload is empty' });
+        return res.status(400).json({ success: false, error: 'Uploaded file payload is empty' });
       }
 
-      const cleanName = (filename || 'upload.jpg').replace(/[^a-zA-Z0-9.-]/g, '_');
-      const uniquePrefix = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      const ownerUserId = resolveUploadOwnerUserId(req);
-      if (!ownerUserId) {
-        return res.status(401).json({ error: 'Authenticated user is required for storage uploads' });
-      }
-      const storageKey = `uploads/${category || 'media'}/${ownerUserId}/${uniquePrefix}_${cleanName}`;
-
-      const publicUrl = await uploadBufferToR2ServerSide(storageKey, buffer, mime, {
-        'uploader-user-id': ownerUserId,
-        'media-category': category || 'media',
+      const mimeHint = contentType || mimeFromDataUrl || 'image/jpeg';
+      const validated = validateUploadRequest({
+        filename: filename || 'upload.jpg',
+        contentType: mimeHint,
+        fileSize: buffer.length,
+        category: category || 'chat_media',
+        ownerUserId,
       });
+
+      if (!isR2Configured() && !isMockStorageAllowed()) {
+        throw new StorageNotConfiguredError();
+      }
+
+      const publicUrl = await uploadBufferToR2ServerSide(
+        validated.storageKey,
+        buffer,
+        validated.contentType,
+        {
+          'uploader-user-id': validated.ownerUserId,
+          'media-category': validated.category,
+        }
+      );
 
       return res.json({
         success: true,
         publicUrl,
-        storageKey,
+        storageKey: validated.storageKey,
         fileSize: buffer.length,
-        contentType: mime,
+        contentType: validated.contentType,
+        isMock: !isR2Configured(),
       });
     } catch (err: any) {
-      console.error('[Storage API] Server upload error:', err);
-      return res.status(500).json({ error: err.message });
+      return sendStorageError(res, err);
     }
   });
 
-  // Proxy media streaming route for instant, CORS-free image loading
+  // Proxy media streaming — allowlisted uploads/ keys only
   router.get('/media', async (req, res) => {
     try {
-      const key = req.query.key as string;
-      if (!key) return res.status(400).send('Missing media key');
+      let key: string;
+      try {
+        key = sanitizeMediaObjectKey(req.query.key);
+      } catch (err) {
+        return sendStorageError(res, err);
+      }
+
+      const { category, ownerUserId } = parseMediaKeyParts(key);
+
+      if (PRIVATE_MEDIA_CATEGORIES.has(category)) {
+        await tryAttachAuth(req);
+        const requesterId = resolveUploadOwnerUserId(req);
+        if (!requesterId) {
+          return sendUnauthorized(res, 'Authentication required for private media.');
+        }
+        const admin = isAdminRequest(req);
+        if (!admin && requesterId !== ownerUserId) {
+          return sendForbidden(res, 'Not authorized to access this media object.');
+        }
+      } else if (!PUBLIC_MEDIA_CATEGORIES.has(category)) {
+        return res.status(400).send('Media category not allowed');
+      }
 
       const streamData = await getR2ObjectStream(key);
       if (!streamData) {
@@ -108,7 +216,12 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
       if (streamData.contentLength) {
         res.setHeader('Content-Length', streamData.contentLength.toString());
       }
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      // Private media: shorter cache; public: long immutable CDN-style cache
+      if (PRIVATE_MEDIA_CATEGORIES.has(category)) {
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
 
       if (Buffer.isBuffer(streamData.body)) {
         return res.send(streamData.body);
@@ -123,25 +236,79 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
     }
   });
 
-  // Mock / Simulated binary PUT handler for dev mode
-  router.put('/mock-upload', express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {
-    try {
-      const key = req.query.key as string;
-      if (!key) return res.status(400).json({ error: 'Missing key parameter' });
-      const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
-      const contentType = (req.headers['content-type'] as string) || 'image/jpeg';
-      saveLocalMediaBuffer(key, buffer, contentType);
-      return res.status(200).json({ success: true, key });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message });
+  // Mock / Simulated binary PUT — auth + owner-gated; disabled when R2 configured / prod fail-closed
+  router.put(
+    '/mock-upload',
+    (req, res, next) => {
+      if (!isMockStorageAllowed()) {
+        return res.status(404).json({
+          success: false,
+          error: 'Mock storage is disabled. Configure Cloudflare R2 or set ALLOW_MOCK_STORAGE=true in non-R2 environments.',
+          code: 'MOCK_STORAGE_DISABLED',
+        });
+      }
+      return next();
+    },
+    express.raw({ type: '*/*', limit: '50mb' }),
+    requireAuth,
+    (req, res) => {
+      try {
+        const ownerUserId = resolveUploadOwnerUserId(req);
+        if (!ownerUserId) {
+          return res.status(401).json({ success: false, error: 'Authenticated user is required' });
+        }
+
+        const key = sanitizeMediaObjectKey(req.query.key);
+        assertUploadKeyOwnedByUser(key, ownerUserId);
+
+        const { category } = parseMediaKeyParts(key);
+        if (!isAllowedUploadCategory(category)) {
+          throw new StorageValidationError('Invalid upload category in key', 400, 'INVALID_CATEGORY');
+        }
+
+        const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+        if (!buffer.length) {
+          throw new StorageValidationError('Empty upload body', 400, 'EMPTY_BODY');
+        }
+
+        const maxBytes = getCategoryMaxBytes(category);
+        if (buffer.length > maxBytes) {
+          throw new StorageValidationError(
+            `File exceeds max size for "${category}" (${maxBytes} bytes)`,
+            400,
+            'FILE_TOO_LARGE',
+            { maxBytes }
+          );
+        }
+
+        const contentType = normalizeContentType(req.headers['content-type'] || 'image/jpeg');
+        const allowedMimes = getCategoryAllowedMimes(category);
+        if (!allowedMimes.includes(contentType)) {
+          throw new StorageValidationError(
+            `Content-Type "${contentType}" is not allowed for category "${category}"`,
+            400,
+            'INVALID_MIME',
+            { allowedMimes }
+          );
+        }
+
+        saveLocalMediaBuffer(key, buffer, contentType);
+        return res.status(200).json({ success: true, key, isMock: true });
+      } catch (err: any) {
+        return sendStorageError(res, err);
+      }
     }
-  });
+  );
 
   // Fetch R2 credentials & status (masked for security)
   router.get('/config', requireAdmin, (req, res) => {
     const cfg = getR2RuntimeConfig();
+    const configured = isR2Configured();
+    const mockStorageActive = isMockStorageAllowed();
     return res.json({
-      configured: isR2Configured(),
+      configured,
+      mockStorageActive,
+      allowMockStorageEnv: String(process.env.ALLOW_MOCK_STORAGE || '').trim() === 'true',
       accountId: cfg.accountId ? `${cfg.accountId.slice(0, 4)}...${cfg.accountId.slice(-4)}` : '',
       accessKeyId: cfg.accessKeyId ? `${cfg.accessKeyId.slice(0, 4)}...${cfg.accessKeyId.slice(-4)}` : '',
       bucketName: cfg.bucketName,

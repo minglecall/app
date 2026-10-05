@@ -16,6 +16,8 @@ export interface CallState {
   ringingAt?: number;
   coinsSpent?: number;
   coinsEarned?: number;
+  teamLeaderId?: string | null;
+  teamLeaderEarnedCoins?: number;
   durationSeconds?: number;
   billedMinutes?: number;
 }
@@ -51,10 +53,47 @@ export interface ServerRuntime {
   getFormattedActiveCalls: () => any[];
   getFormattedCreatorMetrics: () => any;
 
+  /** Apply client presence intent (online|offline only). Busy is server-derived from activeCalls. */
+  applyPresenceHeartbeat: (
+    userId: string,
+    requestedStatus?: string | null,
+    opts?: { persistStatus?: boolean; fromUnload?: boolean }
+  ) => { status: 'online' | 'busy' | 'offline'; changed: boolean };
+
+  /** Server-owned creator online-seconds accrual. Ignores client increments. */
+  accrueCreatorOnlineTime: (
+    creatorId: string,
+    opts?: { forcePersist?: boolean; stop?: boolean }
+  ) => any | null;
+
+  /** Bump call/gift coin counters on creator_metrics (feeds targetBonus at close). */
+  recordCreatorEarnCoins: (
+    creatorId: string,
+    opts: { callCoins?: number; giftCoins?: number }
+  ) => any | null;
+
+  toggleReadyNowForCreator: (creatorId: string, isReadyNow: boolean) => any;
+  getFirstCallBonusAmounts: () => Promise<{ coins: number; usd: number }>;
+
   broadcastAll: (payload: any) => void;
   broadcastPresence: () => void;
   broadcastUsers: () => void;
   broadcastActiveCalls: () => void;
   broadcastCreatorMetrics: () => void;
-  sendToUser?: (userId: string, payload: any) => void;
+  sendToUser?: (userId: string, payload: any) => number | void;
+
+  /** Purge a user from all in-memory maps/sets after hard-delete. */
+  purgeUserRuntimeState: (userId: string) => void;
+  /** True if this userId was hard-deleted during this server process lifetime. */
+  isUserHardDeleted: (userId: string) => boolean;
+  /**
+   * Clear volatile in-memory state for factory/granular reset.
+   * When clearUsers is true, keep only the provided admin profile (if any).
+   */
+  resetVolatileRuntimeState: (opts?: {
+    clearUsers?: boolean;
+    adminUser?: UserProfile | null;
+    clearActiveCalls?: boolean;
+    clearPresence?: boolean;
+  }) => void;
 }

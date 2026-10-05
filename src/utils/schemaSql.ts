@@ -1,4 +1,4 @@
-import { ALL_WORLDWIDE_COUNTRIES, ALL_LANGUAGES, ALL_ZODIAC_SIGNS, ALL_INTERESTS } from './taxonomies';
+import { ALL_WORLDWIDE_COUNTRIES, ALL_LANGUAGES, ALL_ZODIAC_SIGNS, ALL_INTERESTS, DEFAULT_CURRENCIES } from './taxonomies';
 
 /**
  * Escapes SQL string literals safely
@@ -44,6 +44,14 @@ export function generateTaxonomySeedSql(): string {
       `('${sqlEscape(i.id)}', '${sqlEscape(i.name)}', '${sqlEscape(i.category)}', '${sqlEscape(
         i.iconName || 'Sparkles'
       )}', '${sqlEscape(i.color || '#6366f1')}', ${i.popular ? 'true' : 'false'}, true)`
+  ).join(',\n');
+
+  // Currencies
+  const currencyValues = DEFAULT_CURRENCIES.map(
+    (c, idx) =>
+      `('${sqlEscape(c.code)}', '${sqlEscape(c.name)}', '${sqlEscape(c.symbol)}', ${Number(c.rateFromUsd)}, ${
+        c.enabled !== false ? 'true' : 'false'
+      }, ${c.orderNum != null ? Number(c.orderNum) : idx})`
   ).join(',\n');
 
   // Allowed country codes array
@@ -93,6 +101,14 @@ ON CONFLICT (id) DO UPDATE SET
     icon_name = EXCLUDED.icon_name,
     color = EXCLUDED.color,
     popular = EXCLUDED.popular;
+
+-- 4b. Seed store display currencies
+INSERT INTO public.currency_configs (code, name, symbol, rate_from_usd, enabled, order_num) VALUES
+${currencyValues}
+ON CONFLICT (code) DO UPDATE SET
+    name = EXCLUDED.name,
+    symbol = EXCLUDED.symbol,
+    order_num = EXCLUDED.order_num;
 
 -- 5. Ensure default system_configs row exists with taxonomy allow-lists
 INSERT INTO public.system_configs (

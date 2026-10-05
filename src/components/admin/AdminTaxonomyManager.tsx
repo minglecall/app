@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Globe,
   Languages,
@@ -25,6 +25,7 @@ import {
   Maximize2,
   Eye,
   RotateCcw,
+  Banknote,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import {
@@ -34,6 +35,8 @@ import {
   ALL_INTERESTS,
   INTEREST_CATEGORIES,
   CountryItem,
+  DEFAULT_CURRENCIES,
+  CurrencyItem,
 } from '../../utils/taxonomies';
 import { SvgFlag } from '../common/SvgFlag';
 import { ZodiacIcon } from '../common/ZodiacIcon';
@@ -42,9 +45,11 @@ import { DEFAULT_FLAG_SIZES } from '../../constants/appDefaults';
 import { FlagSizesConfig, FlagSizeVariant } from '../../types';
 
 export const AdminTaxonomyManager: React.FC = () => {
-  const { systemSettings, updateSystemSettings, showToast } = useApp();
+  const { systemSettings, updateSystemSettings, showToast, currencyConfigs, saveCurrencyConfigs } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'countries' | 'flag_sizes' | 'languages' | 'zodiac' | 'interests'>('countries');
+  const [activeTab, setActiveTab] = useState<
+    'countries' | 'flag_sizes' | 'languages' | 'zodiac' | 'interests' | 'currencies'
+  >('countries');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   // 0. Dynamic Flag Sizes State
@@ -117,6 +122,18 @@ export const AdminTaxonomyManager: React.FC = () => {
   const [selectedInterests, setSelectedInterests] = useState<Set<string>>(initialInterestIds);
   const [interestSearch, setInterestSearch] = useState('');
   const [selectedInterestCategory, setSelectedInterestCategory] = useState<string>('all');
+
+  // 5. Currencies State (rates + enable)
+  const [currencyRows, setCurrencyRows] = useState<CurrencyItem[]>(() =>
+    (currencyConfigs?.length ? currencyConfigs : DEFAULT_CURRENCIES).map((c) => ({ ...c }))
+  );
+
+  useEffect(() => {
+    if (hasUnsavedChanges) return;
+    if (currencyConfigs && currencyConfigs.length > 0) {
+      setCurrencyRows(currencyConfigs.map((c) => ({ ...c })));
+    }
+  }, [currencyConfigs, hasUnsavedChanges]);
 
   // ==========================================
   // FILTERS & COMPUTATIONS
@@ -309,11 +326,12 @@ export const AdminTaxonomyManager: React.FC = () => {
       allowedInterests: interestList,
       flagSizes: flagSizes,
     });
+    saveCurrencyConfigs(currencyRows);
 
     setHasUnsavedChanges(false);
     showToast(
       'Taxonomies & Flag Sizes Saved ⚙️',
-      `Updated ${countryList.length} countries, dynamic flag sizing, ${languageList.length} languages, ${zodiacList.length} zodiacs, and ${interestList.length} interests live across platform and database.`,
+      `Updated countries, languages, zodiacs, interests, ${currencyRows.filter((c) => c.enabled).length} currencies, and flag sizing.`,
       'success'
     );
   };
@@ -358,7 +376,7 @@ export const AdminTaxonomyManager: React.FC = () => {
         </div>
 
         {/* Global Summary Stats */}
-        <div className="mt-6 pt-5 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="mt-6 pt-5 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-5 gap-3">
           <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
             <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Active Countries</div>
             <div className="text-lg font-black text-indigo-400 font-mono mt-0.5">
@@ -381,6 +399,12 @@ export const AdminTaxonomyManager: React.FC = () => {
             <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Active Interests</div>
             <div className="text-lg font-black text-pink-400 font-mono mt-0.5">
               {selectedInterests.size} / {ALL_INTERESTS.length}
+            </div>
+          </div>
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
+            <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Enabled Currencies</div>
+            <div className="text-lg font-black text-emerald-400 font-mono mt-0.5">
+              {currencyRows.filter((c) => c.enabled).length} / {currencyRows.length}
             </div>
           </div>
         </div>
@@ -466,6 +490,22 @@ export const AdminTaxonomyManager: React.FC = () => {
           </span>
           <Heart className="w-3.5 h-3.5" />
           <span>Categorized Interests ({selectedInterests.size})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('currencies')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
+            activeTab === 'currencies'
+              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+          }`}
+        >
+          <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
+            AD-7.4
+          </span>
+          <Banknote className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Currencies ({currencyRows.filter((c) => c.enabled).length})</span>
         </button>
       </div>
 
@@ -1054,6 +1094,141 @@ export const AdminTaxonomyManager: React.FC = () => {
                 );
               })}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 5. CURRENCIES TAB */}
+      {/* ========================================================================= */}
+      {activeTab === 'currencies' && (
+        <div className="space-y-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
+                <Banknote className="w-4 h-4 text-emerald-400" />
+                Store Display Currencies
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-1 max-w-xl">
+                Customers pick a currency in the coin store. Package SKUs stay priced in USD; display converts with
+                <span className="font-mono text-slate-300"> rate_from_usd</span> (local units per $1). Checkout ledger
+                remains USD.
+              </p>
+              <p className="text-[11px] text-amber-200/90 mt-2 max-w-xl leading-relaxed">
+                Display conversion only — this does <span className="font-bold">not</span> redefine Coin USD Peg /
+                host payout FX. Edit Fixed Peg in{' '}
+                <span className="font-semibold">Admin → Coin Burn &amp; Economy → D</span>.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setCurrencyRows(DEFAULT_CURRENCIES.map((c) => ({ ...c })));
+                setHasUnsavedChanges(true);
+                showToast('Currencies Reset', 'Restored default placeholder FX rates.', 'info');
+              }}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-bold flex items-center space-x-1.5"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Reset Defaults</span>
+            </button>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 shadow-xl overflow-x-auto">
+            <table className="w-full text-left text-xs min-w-[640px]">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-800">
+                  <th className="py-2 pr-2 font-bold">Code</th>
+                  <th className="py-2 pr-2 font-bold">Name</th>
+                  <th className="py-2 pr-2 font-bold">Symbol</th>
+                  <th className="py-2 pr-2 font-bold">Rate / 1 USD</th>
+                  <th className="py-2 pr-2 font-bold">Order</th>
+                  <th className="py-2 font-bold">Enabled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currencyRows.map((row, idx) => (
+                  <tr key={row.code} className="border-b border-slate-800/60">
+                    <td className="py-2 pr-2 font-mono font-bold text-emerald-300">{row.code}</td>
+                    <td className="py-2 pr-2">
+                      <input
+                        type="text"
+                        value={row.name}
+                        onChange={(e) => {
+                          const next = [...currencyRows];
+                          next[idx] = { ...row, name: e.target.value };
+                          setCurrencyRows(next);
+                          setHasUnsavedChanges(true);
+                        }}
+                        className="w-full max-w-[160px] px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                      />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input
+                        type="text"
+                        value={row.symbol}
+                        onChange={(e) => {
+                          const next = [...currencyRows];
+                          next[idx] = { ...row, symbol: e.target.value };
+                          setCurrencyRows(next);
+                          setHasUnsavedChanges(true);
+                        }}
+                        className="w-16 px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                      />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input
+                        type="number"
+                        step="any"
+                        min={0.0001}
+                        value={row.rateFromUsd}
+                        disabled={row.code === 'USD'}
+                        onChange={(e) => {
+                          const next = [...currencyRows];
+                          next[idx] = { ...row, rateFromUsd: Number(e.target.value) || 1 };
+                          setCurrencyRows(next);
+                          setHasUnsavedChanges(true);
+                        }}
+                        className="w-28 px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-amber-200 font-mono disabled:opacity-60"
+                      />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input
+                        type="number"
+                        value={row.orderNum ?? idx}
+                        onChange={(e) => {
+                          const next = [...currencyRows];
+                          next[idx] = { ...row, orderNum: Number(e.target.value) || 0 };
+                          setCurrencyRows(next);
+                          setHasUnsavedChanges(true);
+                        }}
+                        className="w-16 px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 font-mono"
+                      />
+                    </td>
+                    <td className="py-2">
+                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={row.enabled !== false}
+                          disabled={row.code === 'USD'}
+                          onChange={(e) => {
+                            const next = [...currencyRows];
+                            next[idx] = { ...row, enabled: e.target.checked };
+                            setCurrencyRows(next);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="rounded border-slate-600"
+                        />
+                        <span className="text-slate-400">{row.enabled !== false ? 'On' : 'Off'}</span>
+                      </label>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[10px] text-slate-500 mt-3">
+              Example: AED rate 3.6725 → $4.99 displays as د.إ18.33. USD cannot be disabled.
+            </p>
           </div>
         </div>
       )}

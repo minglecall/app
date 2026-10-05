@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useApp } from '../../context/AppContext';
 import { UserProfile, PayoutRequest, CallLogItem } from '../../types';
 import { getCountryFlag } from '../../utils/flags';
@@ -11,8 +11,11 @@ import { LanguageSelector } from '../common/LanguageSelector';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { AgencyHostLeaderboard } from './AgencyHostLeaderboard';
 import { AgencyMilestoneAlerts } from './AgencyMilestoneAlerts';
+import { TeamLeaderSettlementsPanel } from './TeamLeaderSettlementsPanel';
 import { PasswordStrengthField } from '../auth/PasswordStrengthField';
 import { getPasswordPolicyError, isPasswordPolicyValid } from '../../../shared/passwordPolicy';
+import { authFetch } from '../../utils/apiClient';
+import { getCoinUsdPeg, coinsToUsd } from '../../../shared/finance/fx';
 import {
   Users,
   UserPlus,
@@ -75,6 +78,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     banCreatorByTeamLeader,
     unbanCreatorByTeamLeader,
     deleteCreatorByTeamLeader,
+    refreshTeamLeaderCreators,
     adminUpdateUser,
     syncUsersFromSupabase,
     showToast,
@@ -84,11 +88,53 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'busy' | 'offline'>('all');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [hydratedCreatorIds, setHydratedCreatorIds] = useState<Set<string>>(new Set());
+  const [agencyStats, setAgencyStats] = useState<{
+    managedCreatorCount: number;
+    totalCalls: number;
+    totalMinutes: number;
+    hostEarningsCoins: number;
+    hostEarningsUSD: number;
+    teamLeaderEarnedCoins: number;
+    teamLeaderEarnedUSD: number;
+    teamLeaderSharePercent: number;
+    femalePayoutRatioUSD: number;
+    statsSource?: string;
+  } | null>(null);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
+
+  const loadAgencyStats = useCallback(async () => {
+    setIsLoadingStats(true);
+    try {
+      const res = await authFetch('/api/teamleader/stats');
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success && data?.data) {
+        setAgencyStats(data.data);
+      }
+    } catch (e) {
+      console.warn('Failed to load team leader stats:', e);
+    } finally {
+      setIsLoadingStats(false);
+    }
+  }, []);
+
+  const hydrateManagedCreators = useCallback(async () => {
+    const creators = await refreshTeamLeaderCreators();
+    setHydratedCreatorIds(new Set(creators.map((c) => c.id)));
+    await loadAgencyStats();
+  }, [refreshTeamLeaderCreators, loadAgencyStats]);
+
+  useEffect(() => {
+    if (currentUser.role === 'team_leader' || currentUser.role === 'admin' || currentUser.role === 'agency_manager') {
+      void hydrateManagedCreators();
+    }
+  }, [currentUser.id, currentUser.role, hydrateManagedCreators]);
 
   const handleSyncDatabase = async () => {
     setIsSyncing(true);
     try {
       await syncUsersFromSupabase(true);
+      await hydrateManagedCreators();
     } finally {
       setIsSyncing(false);
     }
@@ -115,7 +161,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
 
   const systemFemaleEarnRate =
     systemSettings.femaleEarningRatePerMin ||
-    Math.round((systemSettings.coinBurnRatePerMin ?? 120) * ((systemSettings.femaleHostSharePercent ?? 40) / 100)) ||
+    Math.round((systemSettings.coinBurnRatePerMin ?? 120) * ((systemSettings.femaleHostSharePercent ?? 30) / 100)) ||
     48;
 
   const handleUploadCreatorAvatar = async (file: File) => {
@@ -186,25 +232,19 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?auto=format&fit=crop&q=80&w=400',
   ];
 
-  // Managed Creators: all female creators that have teamLeaderId === currentUser.id or createdById === currentUser.id
-  // STRICT RULE: The Team Leader (currentUser) themselves and other TLs/Admins must NEVER be listed under female creators!
+  // Managed Creators: ownership by teamLeaderId / createdById (or API-hydrated IDs).
+  // Do NOT include hosts solely because agencyName string matches — that leaks other agencies into money metrics.
   const managedCreators = useMemo(() => {
     return users.filter((u) => {
-      // 1. Strictly EXCLUDE current user (the Team Leader themselves)
       if (u.id === currentUser.id || (currentUser.authId && u.authId === currentUser.authId)) {
         return false;
       }
-
-      // 2. Strictly EXCLUDE Team Leaders, Agency Managers, and Admins
       if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') {
         return false;
       }
-
-      // 3. Must be female creator / female host
       const isFemale = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
       if (!isFemale) return false;
 
-      // 4. Direct match on ID or authId
       if (
         u.teamLeaderId === currentUser.id ||
         u.createdById === currentUser.id ||
@@ -213,28 +253,14 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
         return true;
       }
 
-      // 5. If user has agencyName matching Team Leader's agency
-      if (
-        currentUser.agencyName &&
-        u.agencyName &&
-        u.agencyName.trim().toLowerCase() === currentUser.agencyName.trim().toLowerCase()
-      ) {
-        return true;
-      }
-
-      // 6. Default demo association for default team leader
-      if (
-        currentUser.email === 'teamleader@livecall.app' &&
-        (!u.teamLeaderId || u.teamLeaderId === 'teamleader_elena' || u.teamLeaderId === currentUser.id)
-      ) {
-        return true;
-      }
+      // Server-hydrated roster (authoritative ownership from GET /api/teamleader/creators)
+      if (hydratedCreatorIds.has(u.id)) return true;
 
       return false;
     });
-  }, [users, currentUser]);
+  }, [users, currentUser, hydratedCreatorIds]);
 
-  // Managed Payout Requests (View Only)
+  // Managed Payout Requests (View Only) — ownership-safe
   const managedCreatorIds = useMemo(() => new Set(managedCreators.map((c) => c.id)), [managedCreators]);
   const teamPayoutRequests = useMemo(() => {
     return payoutRequests.filter(
@@ -242,36 +268,39 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     );
   }, [payoutRequests, currentUser, managedCreatorIds]);
 
-  // Team Call Logs
+  // Team Call Logs — owned hosts only
   const teamCallLogs = useMemo(() => {
-    return callLogs.filter((log) => managedCreatorIds.has(log.receiverId));
-  }, [callLogs, managedCreatorIds]);
+    return callLogs.filter(
+      (log) =>
+        managedCreatorIds.has(log.receiverId) ||
+        (log.teamLeaderId && log.teamLeaderId === currentUser.id)
+    );
+  }, [callLogs, managedCreatorIds, currentUser.id]);
 
-  // Key Aggregated Metrics
-  const totalCallsHosted = useMemo(() => {
-    const totalFromLogs = teamCallLogs.length;
-    const totalFromProfiles = managedCreators.reduce((acc, c) => acc + (c.totalCallsHosted || 0), 0);
-    return Math.max(totalFromLogs, totalFromProfiles);
-  }, [managedCreators, teamCallLogs]);
-
-  const totalMinutesInCalls = useMemo(() => {
-    const minsFromLogs = Math.round(teamCallLogs.reduce((acc, l) => acc + (l.durationSeconds || 0), 0) / 60);
-    const minsFromProfiles = managedCreators.reduce((acc, c) => acc + (c.totalCallMinutes || 0), 0);
-    return Math.max(minsFromLogs, minsFromProfiles);
-  }, [managedCreators, teamCallLogs]);
-
-  const totalCoinsEarnedByTeam = useMemo(() => {
-    return managedCreators.reduce((acc, c) => acc + (c.earningsCoins || 0), 0);
-  }, [managedCreators]);
-
-  const totalUSDEarned = useMemo(() => {
-    return totalCoinsEarnedByTeam * systemSettings.femalePayoutRatioUSD;
-  }, [totalCoinsEarnedByTeam, systemSettings.femalePayoutRatioUSD]);
-
-  const commissionPercent = currentUser.commissionPercent || systemSettings.teamLeaderSharePercent || 10;
-  const estimatedAgencyCommissionUSD = useMemo(() => {
-    return (totalUSDEarned * commissionPercent) / 100;
-  }, [totalUSDEarned, commissionPercent]);
+  // Authoritative agency metrics from GET /api/teamleader/stats (call_logs / wallet TL_EARN).
+  // Fallback to owned-host logs only — never invent commission as % of host balances.
+  const totalCallsHosted = agencyStats?.totalCalls ?? teamCallLogs.length;
+  const totalMinutesInCalls =
+    agencyStats?.totalMinutes ??
+    Math.round(teamCallLogs.reduce((acc, l) => acc + (l.durationSeconds || 0), 0) / 60);
+  const totalCoinsEarnedByTeam =
+    agencyStats?.hostEarningsCoins ??
+    managedCreators.reduce((acc, c) => acc + (c.earningsCoins || 0), 0);
+  const totalUSDEarned =
+    agencyStats?.hostEarningsUSD ??
+    coinsToUsd(totalCoinsEarnedByTeam, getCoinUsdPeg(systemSettings));
+  const teamLeaderEarnedCoins =
+    agencyStats?.teamLeaderEarnedCoins ??
+    teamCallLogs.reduce((acc, l) => acc + (Number(l.teamLeaderEarnedCoins) || 0), 0);
+  const teamLeaderEarnedUSD =
+    agencyStats?.teamLeaderEarnedUSD ??
+    coinsToUsd(teamLeaderEarnedCoins, getCoinUsdPeg(systemSettings));
+  /** Informational burn-split config — not multiplied again onto teamLeaderEarnedCoins */
+  const commissionPercent =
+    agencyStats?.teamLeaderSharePercent ??
+    currentUser.commissionPercent ??
+    systemSettings.teamLeaderSharePercent ??
+    10;
 
   // Filtered Creators List
   const filteredCreators = useMemo(() => {
@@ -295,10 +324,14 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   }, [managedCreators, searchQuery, statusFilter]);
 
   // Handle Add Creator Submit
-  const handleCreateCreatorSubmit = (e: React.FormEvent) => {
+  const handleCreateCreatorSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCreatorForm.name.trim()) {
       showToast('Validation Error', 'Please enter creator name', 'error');
+      return;
+    }
+    if (!newCreatorForm.email.trim()) {
+      showToast('Validation Error', 'A valid email address is required', 'error');
       return;
     }
 
@@ -317,9 +350,9 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       .map((s) => s.trim())
       .filter(Boolean);
 
-    createCreatorByTeamLeader({
-      name: newCreatorForm.name,
-      email: newCreatorForm.email || `creator_${Date.now().toString().slice(-4)}@livecall.app`,
+    const created = await createCreatorByTeamLeader({
+      name: newCreatorForm.name.trim(),
+      email: newCreatorForm.email.trim(),
       password: newCreatorForm.password,
       age: Number(newCreatorForm.age) || 22,
       nationality: newCreatorForm.nationality,
@@ -331,6 +364,11 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       avatarUrl: newCreatorForm.avatarUrl,
       gallery: [newCreatorForm.avatarUrl],
     });
+
+    if (!created) return;
+
+    setHydratedCreatorIds((prev) => new Set([...prev, created.id]));
+    await loadAgencyStats();
 
     setIsAddCreatorOpen(false);
     setNewCreatorForm({
@@ -397,10 +435,10 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               </div>
               <p className="text-xs sm:text-sm text-slate-400 mt-0.5 flex items-center gap-2">
                 <Building className="w-3.5 h-3.5 text-amber-400" />
-                <span>{currentUser.agencyName || 'Aurora Talent Management & Creator Guild'}</span>
+                <span>{currentUser.agencyName || 'Your Agency'}</span>
                 <span className="text-slate-600">•</span>
                 <span className="text-amber-300/90 font-mono text-xs">
-                  {commissionPercent}% Agency Commission Tier
+                  {commissionPercent}% call-split (config)
                 </span>
               </p>
             </div>
@@ -493,14 +531,14 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
             </div>
           </div>
 
-          {/* Card 4: Team Coins Earned */}
+          {/* Card 4: Host Coins Earned (managed hosts) */}
           <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
                 <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
                   TL-1.4
                 </span>
-                <span>Team Coins</span>
+                <span>Host Coins</span>
               </span>
               <Coins className="w-4 h-4 text-amber-400" />
             </div>
@@ -512,14 +550,14 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
             </div>
           </div>
 
-          {/* Card 5: Team USD Generated */}
+          {/* Card 5: Host USD (Coin USD Peg from Economy) */}
           <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
                 <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
                   TL-1.5
                 </span>
-                <span>Team Revenue</span>
+                <span>Host Revenue</span>
               </span>
               <DollarSign className="w-4 h-4 text-emerald-400" />
             </div>
@@ -529,25 +567,31 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               </span>
               <span className="text-[10px] text-slate-400 ml-1 font-mono">USD</span>
             </div>
+            <div className="text-[9px] text-slate-500 mt-1 font-mono">
+              Payout USD @ Coin USD Peg (Economy)
+            </div>
           </div>
 
-          {/* Card 6: Agency Commission */}
+          {/* Card 6: Real TL earnings from call splits (NOT % of host payout) */}
           <div className="bg-gradient-to-br from-amber-950/40 via-[#161922] to-slate-900 border border-amber-500/40 rounded-xl p-3.5 flex flex-col justify-between shadow-lg shadow-amber-950/30">
             <div className="flex items-center justify-between text-amber-300 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
                 <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
                   TL-1.6
                 </span>
-                <span>Est. Commission</span>
+                <span>TL Earnings</span>
               </span>
               <Percent className="w-4 h-4 text-amber-400" />
             </div>
             <div className="mt-2">
               <span className="text-xl sm:text-2xl font-bold font-mono text-amber-300">
-                ${estimatedAgencyCommissionUSD.toFixed(2)}
+                {isLoadingStats && !agencyStats ? '…' : `$${teamLeaderEarnedUSD.toFixed(2)}`}
               </span>
-              <span className="text-[10px] text-amber-400/80 ml-1 font-mono font-bold">({commissionPercent}%)</span>
+              <span className="text-[10px] text-amber-400/80 ml-1 font-mono font-bold">
+                ({teamLeaderEarnedCoins.toLocaleString()} 🪙)
+              </span>
             </div>
+            <p className="text-[9px] text-amber-400/60 mt-1 font-mono">from call splits</p>
           </div>
         </div>
       </div>
@@ -625,9 +669,9 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               TL-5
             </span>
             <DollarSign className="w-4 h-4" />
-            <span>Payout Requests (View Only)</span>
+            <span>Settlements</span>
             <span className="px-1.5 py-0.2 rounded-full bg-amber-950 border border-amber-500/40 text-amber-300 text-[10px] font-mono">
-              {teamPayoutRequests.length}
+              TL-5
             </span>
           </button>
 
@@ -885,7 +929,10 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                         {/* Ban / Unban Button */}
                         {creator.isBanned ? (
                           <button
-                            onClick={() => unbanCreatorByTeamLeader(creator.id)}
+                            onClick={async () => {
+                              const ok = await unbanCreatorByTeamLeader(creator.id);
+                              if (ok) await loadAgencyStats();
+                            }}
                             className="px-2 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1 shrink-0"
                             title="Lift Suspension"
                           >
@@ -950,9 +997,9 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               </div>
 
               <div className="px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-xs font-bold flex items-center gap-2">
-                <span>Agency Split: {commissionPercent}%</span>
+                <span>Call split: {commissionPercent}% (config)</span>
                 <span>•</span>
-                <span>~${estimatedAgencyCommissionUSD.toFixed(2)} USD Commission</span>
+                <span>${teamLeaderEarnedUSD.toFixed(2)} TL earnings (from splits)</span>
               </div>
             </div>
 
@@ -1145,107 +1192,50 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           </div>
         )}
 
-        {/* ======================= TAB 3: PAYOUT REQUESTS (VIEW-ONLY) ======================= */}
+        {/* ======================= TAB 3: SETTLEMENTS (FINANCE API) ======================= */}
         {activeTab === 'payouts' && (
-          <div className="space-y-4">
-            {/* View Only Explanatory Alert */}
-            <div className="bg-gradient-to-r from-amber-950/40 to-slate-900 border border-amber-500/40 rounded-2xl p-4 flex items-start space-x-3">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                TL-5.1
-              </span>
-              <Lock className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <h4 className="text-xs sm:text-sm font-bold text-amber-200">
-                  🔒 View-Only Financial Ledger (Admin Processed)
-                </h4>
-                <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                  As Team Leader, you have real-time visibility into all withdrawal and payout requests submitted by your female creators.
-                  Financial approvals, bank disbursements, and transaction clearing are handled exclusively by <strong>System Administrators</strong>.
-                </p>
-              </div>
-            </div>
+          <div className="space-y-6">
+            <TeamLeaderSettlementsPanel />
 
-            {/* Payouts Table */}
-            {teamPayoutRequests.length === 0 ? (
-              <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-12 text-center">
-                <DollarSign className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                <h3 className="text-base font-bold text-slate-300">No Payout Requests Pending</h3>
-                <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                  When your female creators reach the $50 minimum threshold and request a cash withdrawal, the request details and admin processing status will display here.
+            {/* Legacy mid-period payout requests (read-only; period-end settlements are primary) */}
+            {teamPayoutRequests.length > 0 && (
+              <div className="space-y-3">
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider px-1">
+                  Legacy payout requests (historical · read-only · not cash-out)
+                </h4>
+                <p className="text-[11px] text-slate-500 px-1">
+                  Mid-period withdrawals are disabled. Pay hosts via Settlements above after period close.
                 </p>
-              </div>
-            ) : (
-              <div className="bg-[#12151F] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-900/90 text-slate-400 font-mono uppercase text-[10px] border-b border-slate-800">
-                      <tr>
-                        <th className="py-3 px-4">Request ID</th>
-                        <th className="py-3 px-4">Creator</th>
-                        <th className="py-3 px-4">Coins / Amount USD</th>
-                        <th className="py-3 px-4">Payout Method</th>
-                        <th className="py-3 px-4">Date</th>
-                        <th className="py-3 px-4">Status</th>
-                        <th className="py-3 px-4">Admin Note / Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/60 font-sans">
-                      {teamPayoutRequests.map((req) => (
-                        <tr key={req.id} className="hover:bg-slate-900/40 transition-colors">
-                          <td className="py-3 px-4 font-mono font-bold text-amber-300">
-                            #{req.id}
-                          </td>
-                          <td className="py-3 px-4">
-                            <div>
-                              <span className="font-semibold text-slate-200 block">{req.userName}</span>
-                              <span className="text-[11px] text-slate-500">{req.userEmail}</span>
-                            </div>
-                          </td>
-                          <td className="py-3 px-4">
-                            <span className="font-mono font-bold text-emerald-400 text-sm block">
-                              ${req.amountUSD.toFixed(2)} USD
-                            </span>
-                            <span className="text-[10px] text-slate-400 font-mono">
-                              ({req.amountCoins.toLocaleString()} coins)
-                            </span>
-                          </td>
-                          <td className="py-3 px-4">
-                            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[11px] font-medium">
-                              {req.payoutMethod}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
-                            {req.requestDate}
-                          </td>
-                          <td className="py-3 px-4">
-                            <span
-                              className={`px-2.5 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider inline-flex items-center gap-1 ${
-                                req.status === 'completed'
-                                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
-                                  : req.status === 'rejected'
-                                  ? 'bg-rose-950 text-rose-300 border border-rose-500/40'
-                                  : 'bg-amber-950 text-amber-300 border border-amber-500/40 animate-pulse'
-                              }`}
-                            >
-                              {req.status === 'completed' && <Check className="w-3 h-3" />}
-                              {req.status === 'rejected' && <X className="w-3 h-3" />}
-                              {req.status === 'pending' && <Clock className="w-3 h-3" />}
-                              {req.status}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4">
-                            <button
-                              onClick={() => setViewingPayout(req)}
-                              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-all cursor-pointer inline-flex items-center gap-1"
-                            >
-                              <Eye className="w-3.5 h-3.5 text-amber-400" />
-                              <span>View Details</span>
-                            </button>
-                          </td>
+                <div className="bg-[#12151F] border border-slate-800 rounded-2xl overflow-hidden opacity-80">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-900/90 text-slate-400 font-mono uppercase text-[10px] border-b border-slate-800">
+                        <tr>
+                          <th className="py-3 px-4">Creator</th>
+                          <th className="py-3 px-4">Amount USD</th>
+                          <th className="py-3 px-4">Status</th>
+                          <th className="py-3 px-4">Action</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {teamPayoutRequests.map((req) => (
+                          <tr key={req.id} className="hover:bg-slate-900/40">
+                            <td className="py-3 px-4 text-slate-200">{req.userName}</td>
+                            <td className="py-3 px-4 font-mono text-emerald-400">${req.amountUSD.toFixed(2)}</td>
+                            <td className="py-3 px-4 font-mono text-[10px] uppercase">{req.status}</td>
+                            <td className="py-3 px-4">
+                              <button
+                                onClick={() => setViewingPayout(req)}
+                                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs cursor-pointer"
+                              >
+                                View
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             )}
@@ -1267,7 +1257,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               <div className="space-y-3 text-xs">
                 <div className="flex justify-between py-2 border-b border-slate-800">
                   <span className="text-slate-400">Agency Name:</span>
-                  <span className="font-semibold text-slate-100">{currentUser.agencyName || 'Aurora Talent Management'}</span>
+                  <span className="font-semibold text-slate-100">{currentUser.agencyName || 'Your Agency'}</span>
                 </div>
                 <div className="flex justify-between py-2 border-b border-slate-800">
                   <span className="text-slate-400">Director / Team Leader:</span>
@@ -1278,8 +1268,14 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                   <span className="font-mono text-slate-200">{currentUser.email}</span>
                 </div>
                 <div className="flex justify-between py-2 border-b border-slate-800">
-                  <span className="text-slate-400">Commission Rate Tier:</span>
+                  <span className="text-slate-400">Call-split share (config):</span>
                   <span className="font-mono font-bold text-amber-300">{commissionPercent}%</span>
+                </div>
+                <div className="flex justify-between py-2 border-b border-slate-800">
+                  <span className="text-slate-400">TL earnings (from splits):</span>
+                  <span className="font-mono font-bold text-amber-300">
+                    {teamLeaderEarnedCoins.toLocaleString()} 🪙 · ${teamLeaderEarnedUSD.toFixed(2)}
+                  </span>
                 </div>
                 <div className="flex justify-between py-2 border-b border-slate-800">
                   <span className="text-slate-400">Spoken Languages:</span>
@@ -1385,11 +1381,12 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 </div>
                 <div>
                   <label className="block text-slate-300 font-semibold mb-1">
-                    Login Email
+                    Login Email <span className="text-rose-400">*</span>
                   </label>
                   <input
                     type="email"
-                    placeholder="valentina@livecall.app"
+                    required
+                    placeholder="host@example.com"
                     value={newCreatorForm.email}
                     onChange={(e) => setNewCreatorForm({ ...newCreatorForm, email: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500"
@@ -1401,7 +1398,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <PasswordStrengthField
                   id="tl-creator-password"
-                  label="Default Password"
+                  label="Login Password"
                   value={newCreatorForm.password}
                   onChange={(password) => setNewCreatorForm({ ...newCreatorForm, password })}
                   placeholder="Create a strong password"
@@ -1503,9 +1500,12 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-700/60 flex items-start gap-2.5">
                 <Zap className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <div className="text-[11px] text-slate-300 leading-relaxed">
-                  <strong className="text-white">Coin earning:</strong> This host will use the platform system rate of{' '}
+                  <strong className="text-white">Coin earning:</strong> This host uses Economy call share % (
                   <span className="font-mono font-bold text-amber-300">{systemFemaleEarnRate} 🪙/min</span>
-                  {' '}({systemSettings.femaleHostSharePercent ?? 40}% of burn). Individual overrides can only be set by an administrator.
+                  {' '}≈ {systemSettings.femaleHostSharePercent ?? 30}% of burn). Global burn/shares are edited only in
+                  Admin → Coin Burn &amp; Economy. Per-host absolute override (
+                  <code className="text-slate-400">coin_earn_override_rate</code>) is admin-only — Team Leaders cannot
+                  change global economy.
                 </div>
               </div>
 
@@ -2000,8 +2000,11 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                     if (!banningCreator) return;
                     setIsProcessingBan(true);
                     try {
-                      await banCreatorByTeamLeader(banningCreator.id, banDaysInput, banReasonInput);
-                      setBanningCreator(null);
+                      const ok = await banCreatorByTeamLeader(banningCreator.id, banDaysInput, banReasonInput);
+                      if (ok) {
+                        setBanningCreator(null);
+                        await loadAgencyStats();
+                      }
                     } finally {
                       setIsProcessingBan(false);
                     }
@@ -2041,7 +2044,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 <div>
                   <h4 className="font-bold text-white text-sm">{deletingCreator.name}</h4>
                   <p className="text-slate-400 text-xs">{deletingCreator.email}</p>
-                  <p className="text-slate-500 text-[11px]">{deletingCreator.agencyName || 'Agency Guild'}</p>
+                  <p className="text-slate-500 text-[11px]">{deletingCreator.agencyName || currentUser.agencyName || 'Your Agency'}</p>
                 </div>
               </div>
 
@@ -2061,8 +2064,16 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                   type="button"
                   onClick={async () => {
                     if (!deletingCreator) return;
-                    await deleteCreatorByTeamLeader(deletingCreator.id);
-                    setDeletingCreator(null);
+                    const ok = await deleteCreatorByTeamLeader(deletingCreator.id);
+                    if (ok) {
+                      setHydratedCreatorIds((prev) => {
+                        const next = new Set(prev);
+                        next.delete(deletingCreator.id);
+                        return next;
+                      });
+                      setDeletingCreator(null);
+                      await loadAgencyStats();
+                    }
                   }}
                   className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold shadow-lg shadow-rose-950/60 transition-all cursor-pointer flex items-center gap-1.5"
                 >

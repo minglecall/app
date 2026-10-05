@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
+import { getCoinUsdPeg } from '../../../shared/finance/fx';
 import {
   Crown,
   Award,
@@ -28,8 +29,7 @@ export const AgencyHostLeaderboard: React.FC<AgencyHostLeaderboardProps> = ({ cr
   const [searchQuery, setSearchQuery] = React.useState('');
   const [tierFilter, setTierFilter] = React.useState<string>('all');
 
-  const agencyCommissionPercent = systemSettings.teamLeaderSharePercent ?? 10;
-  const femalePayoutRatio = systemSettings.femalePayoutRatioUSD ?? 0.01;
+  const femalePayoutRatio = getCoinUsdPeg(systemSettings);
 
   // Augment creators with real Supabase metrics & calculate leaderboard rank
   const augmentedCreators = useMemo(() => {
@@ -37,8 +37,8 @@ export const AgencyHostLeaderboard: React.FC<AgencyHostLeaderboardProps> = ({ cr
       const metrics = creatorMetricsMap[creator.id] || {
         creatorId: creator.id,
         agencyLeaderId: creator.teamLeaderId,
-        activeOnlineSeconds: (creator.totalCallMinutes || 0) * 60,
-        activeOnlineHours: Number(((creator.totalCallMinutes || 0) / 60).toFixed(2)),
+        activeOnlineSeconds: 0,
+        activeOnlineHours: 0,
         coinsEarnedFromCalls: creator.earningsCoins || 0,
         coinsEarnedFromGifts: 0,
         totalTargetCoins: creator.earningsCoins || 0,
@@ -57,23 +57,21 @@ export const AgencyHostLeaderboard: React.FC<AgencyHostLeaderboardProps> = ({ cr
 
       const totalCoins = metrics.totalTargetCoins || (metrics.coinsEarnedFromCalls + metrics.coinsEarnedFromGifts) || 0;
       const hours = metrics.activeOnlineHours || 0;
-      const commissionCoins = Math.round(totalCoins * (agencyCommissionPercent / 100));
-      const commissionUSD = Number((commissionCoins * femalePayoutRatio).toFixed(2));
+      const hostUSD = Number((totalCoins * femalePayoutRatio).toFixed(2));
 
       return {
         creator,
         metrics,
         totalCoins,
         hours,
-        commissionCoins,
-        commissionUSD,
+        hostUSD,
         tier: metrics.performanceTier || 'bronze',
         healthScore: metrics.responseHealthScore ?? 100,
         streakDays: metrics.currentStreakDays || 0,
         isReadyNow: Boolean(metrics.isReadyNowActive),
       };
     });
-  }, [creators, creatorMetricsMap, agencyCommissionPercent, femalePayoutRatio]);
+  }, [creators, creatorMetricsMap, femalePayoutRatio]);
 
   // Sort descending by total target coins and active hours
   const sortedCreators = useMemo(() => {
@@ -109,7 +107,7 @@ export const AgencyHostLeaderboard: React.FC<AgencyHostLeaderboardProps> = ({ cr
           <div>
             <h3 className="text-base sm:text-lg font-black text-white">Agency Host Target Leaderboard</h3>
             <p className="text-xs text-slate-400">
-              Live ranking, dual-metric completion, and agency commissions from managed hosts
+              Live ranking by host target coins and active hours (TL earnings come from call splits, not a % of host balances)
             </p>
           </div>
         </div>
@@ -151,7 +149,7 @@ export const AgencyHostLeaderboard: React.FC<AgencyHostLeaderboardProps> = ({ cr
               <th className="py-2.5 px-3">Revenue Coins</th>
               <th className="py-2.5 px-3">Response Health</th>
               <th className="py-2.5 px-3">Streak</th>
-              <th className="py-2.5 px-3 text-right">Agency Cut ({agencyCommissionPercent}%)</th>
+              <th className="py-2.5 px-3 text-right">Host USD</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60 font-sans">
@@ -255,10 +253,9 @@ export const AgencyHostLeaderboard: React.FC<AgencyHostLeaderboardProps> = ({ cr
                       </span>
                     </td>
 
-                    {/* Agency Cut */}
+                    {/* Host USD @ Coin USD Peg (Economy) — not TL commission */}
                     <td className="py-3 px-3 text-right font-mono font-extrabold text-emerald-400">
-                      <div>+{item.commissionCoins.toLocaleString()} 🪙</div>
-                      <span className="text-[10px] text-slate-400 font-normal">(${item.commissionUSD.toFixed(2)})</span>
+                      <span>${item.hostUSD.toFixed(2)}</span>
                     </td>
                   </tr>
                 );

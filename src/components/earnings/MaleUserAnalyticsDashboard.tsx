@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Coins,
@@ -51,19 +51,19 @@ import {
   computeCallerSpendingData,
   computeCallerMetrics,
   computeFavoriteHosts,
-  computeTransactionReceipts,
+  computeCallSpendingStatements,
   computeWalletLedger,
   SpendingDataPoint,
 } from '../../utils/analyticsHelper';
+import { getCoinUsdPeg } from '../../../shared/finance/fx';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { InvoiceDetailModal } from './InvoiceDetailModal';
-import { TransactionReceipt, WalletLedgerEntry, UserProfile } from '../../types';
-import { supabase } from '../../lib/supabase';
+import { TransactionReceipt, UserProfile } from '../../types';
+import { authFetch } from '../../utils/apiClient';
 
 interface MaleUserAnalyticsDashboardProps {
   user?: UserProfile;
   onOpenStore?: () => void;
-  onOpenVip?: () => void;
   onStartCall?: (creatorId: string) => void;
   onOpenChat?: (creatorId: string) => void;
 }
@@ -71,7 +71,6 @@ interface MaleUserAnalyticsDashboardProps {
 export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProps> = ({
   user,
   onOpenStore,
-  onOpenVip,
   onStartCall,
   onOpenChat,
 }) => {
@@ -99,48 +98,60 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
   // Selected Receipt for Invoice Modal
   const [selectedReceipt, setSelectedReceipt] = useState<TransactionReceipt | null>(null);
 
-  // Auto-Recharge is not live billing — UI only (Coming soon)
-  const [autoRechargeEnabled] = useState(false);
-  const [autoRechargeThreshold] = useState(50);
-  const [autoRechargePackage] = useState(500);
+  // Auto-Recharge is not live billing — Coming soon only (no toggles that pretend it works)
+  const autoRechargeEnabled = false;
 
-  // Real Caller Metrics computed dynamically from live database call logs
+  // Real Caller Metrics — always scoped to activeUser (admin inspecting another user sees that user's metrics only)
   const callerMetrics = useMemo(() => {
     return computeCallerMetrics(activeUser, callLogs, systemSettings);
   }, [activeUser, callLogs, systemSettings]);
 
-  // Filtered Call Logs for this Male Caller
+  // Call history for the inspected caller only (never leak platform-wide logs into personal view)
   const myCallLogs = useMemo(() => {
-    return callLogs.filter(
-      (log) => log.callerId === activeUser.id || currentUser.role === 'admin'
-    );
-  }, [callLogs, activeUser.id, currentUser.role]);
+    return callLogs.filter((log) => log.callerId === activeUser.id);
+  }, [callLogs, activeUser.id]);
 
-  // Live Wallet Ledger (prefer authoritative wallet_ledger API)
+  // Live Wallet Ledger (authoritative wallet_ledger API)
   const [ledgerRows, setLedgerRows] = useState<any[] | null>(null);
+  const [ledgerLoadState, setLedgerLoadState] = useState<'loading' | 'ok' | 'error'>('loading');
+  const ledgerRowsRef = useRef(ledgerRows);
+  ledgerRowsRef.current = ledgerRows;
+  const ledgerLoadedForUserRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const loadLedger = async () => {
+      const userChanged =
+        ledgerLoadedForUserRef.current != null && ledgerLoadedForUserRef.current !== activeUser.id;
+      const hasRows = Array.isArray(ledgerRowsRef.current);
+      // Full loading skeleton only on first load or when inspecting a different user
+      if (userChanged || !hasRows) {
+        if (userChanged) setLedgerRows(null);
+        setLedgerLoadState('loading');
+      }
+
       try {
-        const sessionRes = await supabase.auth.getSession();
-        const accessToken = sessionRes.data.session?.access_token;
-        if (!accessToken) {
-          if (!cancelled) setLedgerRows(null);
-          return;
-        }
-        const res = await fetch(`/api/calls/wallet-ledger?userId=${encodeURIComponent(activeUser.id)}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
+        const res = await authFetch(
+          `/api/calls/wallet-ledger?userId=${encodeURIComponent(activeUser.id)}`
+        );
         const json = await res.json().catch(() => ({}));
-        if (!cancelled && json?.success && Array.isArray(json.data)) {
+        if (cancelled) return;
+        ledgerLoadedForUserRef.current = activeUser.id;
+        if (json?.success && Array.isArray(json.data)) {
           setLedgerRows(json.data);
+          setLedgerLoadState('ok');
+        } else {
+          setLedgerRows(null);
+          setLedgerLoadState('error');
         }
       } catch {
-        if (!cancelled) setLedgerRows(null);
+        if (!cancelled) {
+          setLedgerRows(null);
+          setLedgerLoadState('error');
+        }
       }
     };
-    loadLedger();
+    void loadLedger();
     return () => {
       cancelled = true;
     };
@@ -150,15 +161,32 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
     return computeWalletLedger(activeUser, callLogs, ledgerRows);
   }, [activeUser, callLogs, ledgerRows]);
 
-  // Live Receipts
+  const ledgerIsDerived = useMemo(
+    () => walletLedger.some((e) => String(e.id).startsWith('derived_')),
+    [walletLedger]
+  );
+
+  const peg = getCoinUsdPeg(systemSettings);
+
+  // A1: Call spending statements from real call logs (not purchase invoices)
   const transactionReceipts = useMemo(() => {
-    return computeTransactionReceipts(activeUser.id, callLogs);
-  }, [activeUser.id, callLogs]);
+    return computeCallSpendingStatements(
+      activeUser.id,
+      callLogs,
+      peg
+    );
+  }, [activeUser.id, callLogs, peg]);
 
   // Live Favorite Hosts
   const favoriteHosts = useMemo(() => {
-    return computeFavoriteHosts(activeUser.id, callLogs, users, friends);
-  }, [activeUser.id, callLogs, users, friends]);
+    return computeFavoriteHosts(
+      activeUser.id,
+      callLogs,
+      users,
+      friends,
+      peg
+    );
+  }, [activeUser.id, callLogs, users, friends, peg]);
 
   // Filtered Wallet Ledger Entries
   const filteredLedger = useMemo(() => {
@@ -175,8 +203,8 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
   }, [walletLedger, ledgerCategoryFilter, ledgerSearchQuery]);
 
   const chartData: SpendingDataPoint[] = useMemo(() => {
-    return computeCallerSpendingData(activeUser.id, callLogs, systemSettings.coinToUSDRatio, timeframe);
-  }, [activeUser.id, callLogs, systemSettings.coinToUSDRatio, timeframe]);
+    return computeCallerSpendingData(activeUser.id, callLogs, peg, timeframe);
+  }, [activeUser.id, callLogs, peg, timeframe]);
 
   return (
     <div id="male-user-analytics-dashboard" className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-6 space-y-6">
@@ -195,7 +223,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
               User Spending, Habits & Interaction Ledger
             </h1>
             <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
-              Complete transparency over your coin balance, 1-on-1 video call history, virtual gifts sent, favorite host connections, and official invoices.
+              Coin balance, 1-on-1 call spend, favorite hosts, and wallet ledger from your real activity — not payment-gateway invoices.
             </p>
           </div>
 
@@ -210,7 +238,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                 <span>{(activeUser?.coinBalance ?? 0).toLocaleString()}</span>
               </div>
               <div className="text-[11px] text-slate-400 font-mono mt-0.5">
-                VIP Tier: <strong className="text-amber-300 uppercase">{(activeUser.vipTier && activeUser.vipTier !== 'none') ? activeUser.vipTier : 'Standard'} VIP</strong>
+                Friend call discounts apply when chatting with friends
               </div>
             </div>
 
@@ -223,14 +251,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                 >
                   <Coins className="w-3.5 h-3.5" />
                   <span>Top Up Coins</span>
-                </button>
-              )}
-              {onOpenVip && (
-                <button
-                  onClick={onOpenVip}
-                  className="px-4 py-1.5 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 text-[11px] font-mono font-bold transition-all text-center cursor-pointer"
-                >
-                  Manage VIP Pass
                 </button>
               )}
             </div>
@@ -281,7 +301,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
               UR-3
             </span>
             <Star className="w-3.5 h-3.5" />
-            <span>Favorite Hosts & VIP Status</span>
+            <span>Favorite Hosts</span>
           </button>
 
           <button
@@ -296,7 +316,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
               UR-4
             </span>
             <FileText className="w-3.5 h-3.5" />
-            <span>Invoices & Receipts ({transactionReceipts.length})</span>
+            <span>Call Spending Statements ({transactionReceipts.length})</span>
           </button>
         </div>
       </div>
@@ -362,7 +382,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
           </div>
         </div>
 
-        {/* Card 4: VIP / Friend Discount Savings */}
+        {/* Card 4: Friend Discount Savings */}
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
@@ -473,7 +493,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
           {/* Auto-Recharge Control & Wallet Ledger Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
-            {/* Auto-Recharge Widget — Coming soon (local UI only; no payment gateway) */}
+            {/* Auto-Recharge Widget — Coming soon (not live billing) */}
             <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl opacity-80">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
@@ -491,45 +511,17 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
               </div>
 
               <p className="text-xs text-slate-400">
-                Automatic wallet top-ups are not available yet. Coin purchases will require a real payment integration when this launches.
+                Automatic wallet top-ups are not available. Coin purchases will require a real payment integration when this launches.
               </p>
 
-              <div className="space-y-3 font-mono text-xs pointer-events-none">
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Trigger Threshold</label>
-                  <select
-                    value={autoRechargeThreshold}
-                    disabled
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-500 text-xs font-mono"
-                  >
-                    <option value={20}>When below 20 coins (~2 mins)</option>
-                    <option value={50}>When below 50 coins (~5 mins)</option>
-                    <option value={100}>When below 100 coins (~10 mins)</option>
-                  </select>
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-500 font-mono space-y-1">
+                <div className="flex justify-between">
+                  <span>Status:</span>
+                  <span className="text-amber-400 font-bold">Not live</span>
                 </div>
-
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Recharge Package</label>
-                  <select
-                    value={autoRechargePackage}
-                    disabled
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-500 text-xs font-mono"
-                  >
-                    <option value={500}>500 Coins</option>
-                    <option value={1200}>1,200 Coins</option>
-                    <option value={3000}>3,000 Coins</option>
-                  </select>
-                </div>
-
-                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-500 space-y-1">
-                  <div className="flex justify-between">
-                    <span>Status:</span>
-                    <span className="text-amber-400 font-bold">Not live · no payment method linked</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Billing:</span>
-                    <span>{autoRechargeEnabled ? 'Enabled' : 'Disabled'} (preview only)</span>
-                  </div>
+                <div className="flex justify-between">
+                  <span>Billing:</span>
+                  <span>{autoRechargeEnabled ? 'Enabled' : 'Disabled'}</span>
                 </div>
               </div>
             </div>
@@ -558,13 +550,29 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                     <option value="call_spend">Video Calls</option>
                     <option value="gift_spend">Virtual Gifts</option>
                     <option value="topup_purchase">Top-Up Purchases</option>
-                    <option value="daily_bonus">VIP Daily Bonus</option>
+                    <option value="daily_bonus">Daily Bonus</option>
                   </select>
                 </div>
               </div>
 
+              {ledgerIsDerived && (
+                <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200 font-mono">
+                  Showing call-history estimates — wallet ledger was unavailable. Balances after each entry may be incomplete.
+                </div>
+              )}
+              {ledgerLoadState === 'ok' && Array.isArray(ledgerRows) && ledgerRows.length === 0 && filteredLedger.length === 0 && (
+                <div className="px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-slate-400 font-mono">
+                  No wallet ledger rows yet. Call billing and reward credits will appear here after activity is recorded.
+                </div>
+              )}
+
               {/* Transactions List */}
               <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                {filteredLedger.length === 0 && !(ledgerLoadState === 'ok' && Array.isArray(ledgerRows) && ledgerRows.length === 0) && !ledgerIsDerived ? (
+                  <div className="p-6 text-center text-slate-500 font-mono text-xs border border-dashed border-slate-800 rounded-2xl">
+                    {ledgerLoadState === 'loading' ? 'Loading wallet ledger…' : 'No ledger entries for this filter.'}
+                  </div>
+                ) : null}
                 {filteredLedger.map((entry) => (
                   <div
                     key={entry.id}
@@ -600,7 +608,10 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                           entry.type === 'credit' ? 'text-emerald-400' : 'text-slate-200'
                         }`}
                       >
-                        {entry.type === 'credit' ? `+${entry.coins}` : `-${entry.coins}`} 🪙
+                        {entry.type === 'credit'
+                          ? `+${Math.abs(entry.coins).toLocaleString()}`
+                          : `−${Math.abs(entry.coins).toLocaleString()}`}{' '}
+                        🪙
                       </div>
                       <div className="text-[10px] text-slate-500 mt-0.5">
                         Bal: {(entry.balanceAfter ?? 0).toLocaleString()} 🪙
@@ -709,27 +720,31 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                           </div>
                         </div>
 
-                        <div className="flex items-center space-x-1.5">
+                        <div className="flex items-center gap-2 shrink-0">
+                          {onOpenChat && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenChat(otherUserId)}
+                              className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-all cursor-pointer"
+                              title="Open Direct Chat"
+                              aria-label="Open Direct Chat"
+                            >
+                              <MessageCircle className="w-4 h-4 text-indigo-400" />
+                            </button>
+                          )}
                           {onStartCall && (
                             <button
+                              type="button"
                               onClick={() => onStartCall(otherUserId)}
-                              className={`px-3 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center space-x-1 cursor-pointer shadow-md ${
+                              className={`h-10 w-10 flex items-center justify-center rounded-xl transition-all cursor-pointer shadow-md ${
                                 isMissedCall
                                   ? 'bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white'
                                   : 'bg-pink-600 hover:bg-pink-500 text-white'
                               }`}
-                              title={isMissedCall ? 'Redial Video Call' : 'Call Host'}
+                              title={isMissedCall ? 'Redial' : 'Start Video Call'}
+                              aria-label={isMissedCall ? 'Redial' : 'Start Video Call'}
                             >
-                              <Video className="w-3.5 h-3.5" />
-                              <span>{isMissedCall ? 'Redial' : 'Call'}</span>
-                            </button>
-                          )}
-                          {onOpenChat && (
-                            <button
-                              onClick={() => onOpenChat(otherUserId)}
-                              className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer"
-                            >
-                              <MessageCircle className="w-4 h-4" />
+                              <Video className="w-4 h-4" />
                             </button>
                           )}
                         </div>
@@ -743,7 +758,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
         </div>
       )}
 
-      {/* 5. SECTION 3: FAVORITE HOSTS & VIP STATUS */}
+      {/* 5. SECTION 3: FAVORITE HOSTS */}
       {activeSection === 'insights' && (
         <div className="space-y-6">
           
@@ -840,63 +855,10 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
               )}
             </div>
           </div>
-
-          {/* VIP Pass Standing Card */}
-          <div className="p-6 bg-gradient-to-r from-amber-950/40 via-[#13161F] to-slate-900 border border-amber-500/30 rounded-3xl space-y-4 shadow-xl">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div className="flex items-center space-x-3">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  UR-3.2
-                </span>
-                <div className="p-3 bg-amber-500/20 border border-amber-500/40 rounded-2xl text-amber-400 text-2xl">
-                  🥇
-                </div>
-                <div>
-                  <h3 className="text-base font-black text-white font-mono uppercase tracking-wider">
-                    Active Subscription: {activeUser.vipTier?.toUpperCase() || 'GOLD'} VIP PASS
-                  </h3>
-                  <p className="text-xs text-slate-300 font-mono">
-                    Renews in 18 days • Full VIP Privileges Enabled
-                  </p>
-                </div>
-              </div>
-
-              {onOpenVip && (
-                <button
-                  onClick={onOpenVip}
-                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-black text-xs font-mono transition-all shadow-md cursor-pointer"
-                >
-                  Upgrade / Extend VIP
-                </button>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 font-mono text-xs">
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
-                <div className="text-[10px] text-slate-400">CALL DISCOUNT</div>
-                <div className="text-emerald-400 font-black text-sm mt-0.5">20% Off All Calls</div>
-              </div>
-
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
-                <div className="text-[10px] text-slate-400">DAILY BONUS</div>
-                <div className="text-amber-400 font-black text-sm mt-0.5">+100 Free Daily Coins</div>
-              </div>
-
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
-                <div className="text-[10px] text-slate-400">STREAM QUALITY</div>
-                <div className="text-indigo-400 font-black text-sm mt-0.5">High-Def 60FPS Video</div>
-              </div>
-
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
-                <div className="text-[10px] text-slate-400">AI TRANSLATION</div>
-                <div className="text-pink-400 font-black text-sm mt-0.5">Free Auto-Translate</div>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
-      {/* 6. SECTION 4: INVOICES & TRANSACTION RECEIPTS */}
+      {/* 6. SECTION 4: CALL SPENDING STATEMENTS */}
       {activeSection === 'receipts' && (
         <div className="space-y-6">
           <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
@@ -907,10 +869,10 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                     UR-4.1
                   </span>
                   <FileText className="w-4 h-4 text-emerald-400" />
-                  <span>Coin Purchase Invoices & Payment Gateway Receipts</span>
+                  <span>Call Spending Statements</span>
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Itemized official receipts for all coin purchases, Apple Pay / Google Pay checkouts, and VIP passes.
+                  Itemized coin debits from your 1-on-1 calls. Coin purchase invoices will appear here when payments go live.
                 </p>
               </div>
 
@@ -925,16 +887,15 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
               )}
             </div>
 
-            {/* Invoices Table */}
             <div className="overflow-x-auto">
               <table className="w-full text-left font-mono text-xs">
                 <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] uppercase">
                   <tr>
-                    <th className="py-3 px-4">Invoice #</th>
-                    <th className="py-3 px-4">Package / Item</th>
-                    <th className="py-3 px-4">Coins Credited</th>
-                    <th className="py-3 px-4">Amount USD</th>
-                    <th className="py-3 px-4">Payment Method</th>
+                    <th className="py-3 px-4">Statement #</th>
+                    <th className="py-3 px-4">Description</th>
+                    <th className="py-3 px-4">Coins Debited</th>
+                    <th className="py-3 px-4">Est. USD</th>
+                    <th className="py-3 px-4">Source</th>
                     <th className="py-3 px-4">Status</th>
                     <th className="py-3 px-4">Date</th>
                     <th className="py-3 px-4 text-right">Actions</th>
@@ -944,30 +905,30 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                   {transactionReceipts.length > 0 ? (
                     transactionReceipts.map((receipt) => (
                     <tr key={receipt.id} className="hover:bg-slate-900/40 transition-colors">
-                      <td className="py-3.5 px-4 font-bold text-indigo-400">{receipt.id}</td>
+                      <td className="py-3.5 px-4 font-bold text-indigo-400">{receipt.statementNumber}</td>
                       <td className="py-3.5 px-4 font-bold text-white">{receipt.description}</td>
                       <td className="py-3.5 px-4">
                         <span className="text-amber-400 font-bold">
-                          {receipt.coinsChange} 🪙
+                          −{receipt.coinsDebited.toLocaleString()} 🪙
                         </span>
                       </td>
-                      <td className="py-3.5 px-4 font-black text-white">${receipt.amountUSD.toFixed(2)} USD</td>
+                      <td className="py-3.5 px-4 font-black text-white">${receipt.amountUSD.toFixed(2)}</td>
                       <td className="py-3.5 px-4 uppercase text-[11px] text-slate-400">
-                        LiveCall Wallet
+                        Call billing
                       </td>
                       <td className="py-3.5 px-4">
-                        <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                        <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
                           {receipt.status}
                         </span>
                       </td>
-                      <td className="py-3.5 px-4 text-slate-400 text-[11px]">{receipt.date}</td>
+                      <td className="py-3.5 px-4 text-slate-400 text-[11px]">{receipt.createdAt}</td>
                       <td className="py-3.5 px-4 text-right">
                         <button
                           onClick={() => setSelectedReceipt(receipt)}
                           className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white font-mono text-[11px] font-bold transition-all inline-flex items-center space-x-1 cursor-pointer border border-slate-700"
                         >
                           <Eye className="w-3.5 h-3.5" />
-                          <span>View Receipt</span>
+                          <span>View</span>
                         </button>
                       </td>
                     </tr>
@@ -975,7 +936,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                   ) : (
                     <tr>
                       <td colSpan={8} className="py-8 text-center text-slate-400 font-mono text-xs">
-                        No transactions recorded yet. Completed calls and coin refills will be listed here.
+                        No call spending yet. Completed calls will appear here as statements. Coin purchase invoices will show when payments go live.
                       </td>
                     </tr>
                   )}
@@ -986,7 +947,7 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
         </div>
       )}
 
-      {/* 7. INVOICE DETAIL MODAL */}
+      {/* 7. STATEMENT DETAIL MODAL */}
       <InvoiceDetailModal
         receipt={selectedReceipt}
         onClose={() => setSelectedReceipt(null)}

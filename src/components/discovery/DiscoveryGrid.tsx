@@ -42,6 +42,7 @@ import {
 import { SvgFlag } from '../common/SvgFlag';
 import { ZodiacIcon } from '../common/ZodiacIcon';
 import { SearchableFilterDropdown } from '../common/SearchableFilterDropdown';
+import { Badge, MediaCard } from '../ui';
 
 interface DiscoveryGridProps {
   onStartCall: (userId: string) => void;
@@ -62,6 +63,8 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
     isFriend,
     syncUsersFromSupabase,
     creatorMetricsMap,
+    blockedUserIds,
+    blockedByUserIds,
   } = useApp();
   const [isRouletteOpen, setIsRouletteOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -104,7 +107,9 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
       u.role !== 'team_leader' &&
       u.role !== 'agency_manager' &&
       u.role !== 'admin' &&
-      (showSelf ? true : u.id !== currentUser.id)
+      (showSelf ? true : u.id !== currentUser.id) &&
+      !blockedUserIds.includes(u.id) &&
+      !blockedByUserIds.includes(u.id)
   );
   const onlineCount = allOtherUsers.filter((u) => u.onlineStatus === 'online').length;
   const busyCount = allOtherUsers.filter((u) => u.onlineStatus === 'busy' || u.onlineStatus === 'in_call').length;
@@ -125,6 +130,9 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
 
     // Exclude current logged in user unless showSelf is checked
     if (!showSelf && u.id === currentUser.id) return false;
+
+    // Exclude blocked relationships (both directions)
+    if (blockedUserIds.includes(u.id) || blockedByUserIds.includes(u.id)) return false;
 
     // Automatically filter on basis of user's profile interestedIn
     const isFemaleTarget = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
@@ -197,6 +205,7 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
     peakHoursEnabled: systemSettings.peakHoursEnabled,
     readyNowOnly: discoveryTab === 'ready_now',
     trendingOnly: discoveryTab === 'trending',
+    targetThresholds: systemSettings,
   }).filter((item) => {
     if (discoveryTab === 'gold_silver') {
       return item.tier === 'gold' || item.tier === 'silver';
@@ -214,42 +223,43 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
   return (
     <div id="discovery-grid-module" className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 pt-1.5 sm:pt-2 pb-6 space-y-3.5">
       {/* Filter Toolbar */}
-      <div className="bg-[#161920] border border-slate-800 rounded-xl p-3 sm:p-3.5 space-y-3 shadow-xl">
+      <div className="bg-app-card border border-hairline rounded-app-lg p-3 sm:p-3.5 space-y-3 shadow-app-sm">
             <div className="flex items-center gap-2.5 w-full">
               {/* Search Box */}
               <div className="relative flex-1 min-w-0">
-                <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-500" />
+                <Search className="absolute left-3 top-2.5 w-4 h-4 text-app-muted" />
                 <input
                   id="discovery-search-input"
                   type="text"
-                  placeholder="Search hosts by name, country, interests or languages..."
+                  placeholder="Search by name, country, interests..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 bg-[#0F1115] border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors font-mono"
+                  className="w-full pl-9 pr-3 py-2 bg-app-input border border-app rounded-[var(--radius-sm)] text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-brand transition-colors"
                 />
               </div>
 
-              {/* Supabase Live Sync Button */}
+              {/* Sync buried: only when advanced filters open */}
+              {showFilters && (
               <button
                 id="discovery-supabase-sync-btn"
                 onClick={handleManualSync}
                 disabled={isSyncing}
-                title="Synchronize all host details from Supabase database"
-                className="shrink-0 px-3 py-2 rounded-lg border text-xs font-semibold flex items-center space-x-1.5 transition-all font-mono whitespace-nowrap cursor-pointer bg-emerald-950/40 text-emerald-300 border-emerald-800/60 hover:bg-emerald-900/50 hover:border-emerald-600 disabled:opacity-50"
+                title="Refresh profiles"
+                className="shrink-0 px-3 py-2 rounded-[var(--radius-sm)] border text-xs font-semibold flex items-center space-x-1.5 transition-all whitespace-nowrap cursor-pointer bg-app-card-subtle text-app-muted border-hairline hover:text-app-heading disabled:opacity-50"
               >
-                <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isSyncing ? 'animate-spin' : ''}`} />
-                <span className="hidden sm:inline">Sync Supabase</span>
-                <span className="sm:hidden">Sync</span>
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Refresh</span>
               </button>
+              )}
 
               {/* Filter Button */}
               <button
                 id="discovery-toggle-filters-btn"
                 onClick={() => setShowFilters(!showFilters)}
-                className={`shrink-0 px-3.5 py-2 rounded-lg border text-xs font-semibold flex items-center space-x-1.5 transition-all font-mono whitespace-nowrap cursor-pointer ${
+                className={`shrink-0 px-3.5 py-2 rounded-[var(--radius-sm)] border text-xs font-semibold flex items-center space-x-1.5 transition-all whitespace-nowrap cursor-pointer ${
                   showFilters
-                    ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/50'
-                    : 'bg-[#0F1115] text-slate-300 border-slate-800 hover:border-slate-700 hover:text-white'
+                    ? 'bg-brand-soft text-brand border-brand/40'
+                    : 'bg-app-input text-app-muted border-app hover:text-app-heading'
                 }`}
               >
                 <SlidersHorizontal className="w-3.5 h-3.5" />
@@ -264,13 +274,13 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                 onClick={() => setDiscoveryTab('all')}
                 className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
                   discoveryTab === 'all'
-                    ? 'bg-indigo-600 text-white shadow-md'
-                    : 'bg-[#0F1115] text-slate-400 hover:text-white border border-slate-800'
+                    ? 'bg-brand text-white shadow-brand'
+                    : 'bg-app-input text-app-muted hover:text-app-heading border border-app'
                 }`}
               >
                 <LayoutGrid className="w-3.5 h-3.5" />
                 <span>All Hosts</span>
-                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300">
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-app-input text-app-muted">
                   {allOtherUsers.length}
                 </span>
               </button>
@@ -279,8 +289,8 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                 onClick={() => setDiscoveryTab('ready_now')}
                 className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
                   discoveryTab === 'ready_now'
-                    ? 'bg-gradient-to-r from-orange-600 to-amber-600 text-white shadow-lg shadow-orange-950/50'
-                    : 'bg-[#0F1115] text-orange-400 hover:text-white border border-orange-900/50'
+                    ? 'bg-brand text-white shadow-brand'
+                    : 'bg-app-input text-brand hover:text-app-heading border border-brand/30'
                 }`}
               >
                 <Flame className="w-3.5 h-3.5 text-orange-400 animate-bounce" />
@@ -295,7 +305,7 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                 className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
                   discoveryTab === 'trending'
                     ? 'bg-gradient-to-r from-amber-600 to-yellow-600 text-white shadow-md'
-                    : 'bg-[#0F1115] text-amber-400 hover:text-white border border-amber-900/50'
+                    : 'bg-app-input text-amber-400 hover:text-white border border-amber-900/50'
                 }`}
               >
                 <TrendingUp className="w-3.5 h-3.5" />
@@ -307,21 +317,21 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                 className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
                   discoveryTab === 'gold_silver'
                     ? 'bg-gradient-to-r from-yellow-500 to-amber-500 text-slate-950 font-bold shadow-md'
-                    : 'bg-[#0F1115] text-yellow-400 hover:text-white border border-yellow-900/50'
+                    : 'bg-app-input text-yellow-400 hover:text-white border border-yellow-900/50'
                 }`}
               >
                 <Crown className="w-3.5 h-3.5 text-yellow-400" />
-                <span>VIP Gold & Silver</span>
+                <span>Gold & Silver</span>
               </button>
 
-              <div className="h-4 w-px bg-slate-800 shrink-0 mx-1" />
+              <div className="h-4 w-px bg-[var(--app-hairline)] shrink-0 mx-1" />
 
               <button
                 onClick={() => setSelectedStatus(selectedStatus === 'online' ? 'all' : 'online')}
                 className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
                   selectedStatus === 'online'
                     ? 'bg-emerald-600 text-white shadow-md'
-                    : 'bg-[#0F1115] text-emerald-400 hover:text-white border border-emerald-900/50'
+                    : 'bg-app-input text-emerald-400 hover:text-white border border-emerald-900/50'
                 }`}
               >
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -470,209 +480,95 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
               const hasStreak = Boolean(metrics?.currentStreakDays && metrics.currentStreakDays >= 3);
 
               return (
-                <div
+                <MediaCard
                   key={user.id}
+                  src={normalizeMediaUrl(user.avatarUrl)}
+                  alt={user.name}
+                  aspect="3/4"
                   onClick={() => setSelectedUserProfile(user)}
-                  className={`group relative bg-[#161920] border rounded-xl sm:rounded-2xl overflow-hidden shadow-xl hover:shadow-2xl transition-all duration-300 flex flex-col cursor-pointer ${
-                    isReadyNow
-                      ? 'border-orange-500/60 ring-1 ring-orange-500/30 shadow-orange-950/40 hover:border-orange-400'
-                      : isUserOnline
-                      ? 'border-emerald-500/30 hover:border-emerald-500/70 hover:shadow-emerald-950/40'
-                      : isUserBusy
-                      ? 'border-amber-500/30 hover:border-amber-500/70 hover:shadow-amber-950/40'
-                      : 'border-slate-800 hover:border-indigo-500/50 hover:shadow-indigo-950/30'
-                  }`}
-                >
-                  {/* Top Media / Avatar Box */}
-                  <div className="relative h-[206px] sm:h-64 bg-[#0F1115] overflow-hidden">
-                    <img
-                      src={normalizeMediaUrl(user.avatarUrl)}
-                      alt={user.name}
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).src = getFallbackAvatar(user.name, user.gender, user.role);
-                      }}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                    />
-
-                    {/* Dark Vignette Overlay */}
-                    <div className="absolute inset-0 bg-gradient-to-t from-[#161920] via-transparent to-black/30" />
-
-                    {/* Top Status & Favorite Badges */}
-                    <div className="absolute top-2 left-2 right-2 sm:top-3 sm:left-3 sm:right-3 flex items-center justify-between z-10">
-                      {/* Top-left status pill indicator */}
-                      <div className="flex items-center space-x-1.5">
-                        <div
-                          className={`px-2 py-1 rounded-full backdrop-blur-md border shadow-md flex items-center space-x-1.5 transition-all ${
-                            isUserOnline
-                              ? 'bg-emerald-950/85 border-emerald-500/70 text-emerald-300 ring-1 ring-emerald-500/30 shadow-emerald-950/50'
-                              : isUserBusy
-                              ? 'bg-amber-950/85 border-amber-500/70 text-amber-300 ring-1 ring-amber-500/30 shadow-amber-950/50'
-                              : 'bg-slate-950/85 border-slate-700/60 text-slate-400'
-                          }`}
-                          title={
-                            isUserOnline
-                              ? 'Available for Video Call'
-                              : isUserBusy
-                              ? 'Busy on Video Call'
-                              : 'Offline'
-                          }
-                        >
-                          <span
-                            className={`w-2 h-2 rounded-full shrink-0 ${
-                              isUserOnline
-                                ? 'bg-emerald-400 animate-pulse ring-2 ring-emerald-400/50'
-                                : isUserBusy
-                                ? 'bg-amber-400 animate-pulse ring-2 ring-amber-400/50'
-                                : 'bg-rose-500'
-                            }`}
-                          />
-                          <span className="text-[10px] font-bold tracking-tight uppercase font-mono">
-                            {isUserOnline
-                              ? 'Online'
-                              : isUserBusy
-                              ? 'Busy'
-                              : 'Offline'}
-                          </span>
-                        </div>
-
-                        {/* Ready Now Peak Hour Surge Badge */}
-                        {isReadyNow && (
-                          <div
-                            className="px-2 py-1 rounded-full bg-gradient-to-r from-orange-600 to-amber-500 text-white font-black text-[9px] uppercase tracking-wider flex items-center space-x-1 shadow-lg shadow-orange-950/80 animate-pulse border border-orange-400/60"
-                            title="Ready Now Active — Instant High-Priority Match"
-                          >
-                            <Flame className="w-2.5 h-2.5 fill-current text-yellow-200" />
-                            <span className="hidden sm:inline">Ready Now</span>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex items-center space-x-1 sm:space-x-1.5">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleFavorite(user.id);
-                          }}
-                          className={`p-1 sm:p-1.5 rounded-full backdrop-blur-md transition-colors ${
-                            isFav ? 'bg-amber-500 text-slate-950' : 'bg-slate-900/80 text-slate-300 hover:text-white'
-                          }`}
-                        >
-                          <Star className={`w-3 h-3 sm:w-3.5 sm:h-3.5 ${isFav ? 'fill-current' : ''}`} />
-                        </button>
-
-                        {user.isVerified && (
-                          <span className="p-0.5 sm:p-1 rounded-full bg-blue-500/20 border border-blue-500/40 text-blue-400 backdrop-blur-md" title="AI Verified Profile">
-                            <ShieldCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                          </span>
-                        )}
-                      </div>
+                  onImageError={(e) => {
+                    (e.target as HTMLImageElement).src = getFallbackAvatar(user.name, user.gender, user.role);
+                  }}
+                  statusSlot={
+                    <>
+                      {isReadyNow ? (
+                        <Badge tone="brand" className="backdrop-blur-md">
+                          <Flame className="w-2.5 h-2.5" /> Ready
+                        </Badge>
+                      ) : isUserOnline ? (
+                        <Badge tone="online" className="backdrop-blur-md">Online</Badge>
+                      ) : isUserBusy ? (
+                        <Badge tone="warning" className="backdrop-blur-md">Busy</Badge>
+                      ) : (
+                        <span />
+                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFavorite(user.id);
+                        }}
+                        className={`p-1.5 rounded-full backdrop-blur-md border border-white/20 transition-colors ${
+                          isFav ? 'bg-amber-400 text-slate-950' : 'bg-black/35 text-on-media hover:bg-black/50'
+                        }`}
+                      >
+                        <Star className={`w-3.5 h-3.5 ${isFav ? 'fill-current' : ''}`} />
+                      </button>
+                    </>
+                  }
+                  metadata={
+                    <div className="flex items-center gap-1.5 text-on-media flex-wrap">
+                      <h3 className="font-display font-bold text-base sm:text-lg drop-shadow-md truncate max-w-[70%]">{user.name}</h3>
+                      <span className="text-sm text-on-media-muted font-medium shrink-0">{user.age}</span>
+                      <SvgFlag
+                        countryCode={user.countryCode}
+                        nationality={getUserEffectiveLocation(user).country || user.nationality}
+                        size="sm"
+                        rounded={true}
+                      />
                     </div>
-
-                    {/* Performance Tier & Floating Badges */}
-                    {isFemale && (
-                      <div className="absolute top-10 left-2 sm:top-12 sm:left-3 z-10 flex items-center space-x-1 flex-wrap gap-y-1">
-                        {tier === 'gold' && (
-                          <span className="px-1.5 py-0.5 rounded bg-yellow-500/90 text-slate-950 font-black text-[9px] shadow-sm flex items-center space-x-1 border border-yellow-300">
-                            <Crown className="w-2.5 h-2.5" />
-                            <span>GOLD</span>
-                          </span>
-                        )}
-                        {tier === 'silver' && (
-                          <span className="px-1.5 py-0.5 rounded bg-slate-300/90 text-slate-950 font-bold text-[9px] shadow-sm flex items-center space-x-1 border border-white">
-                            <Award className="w-2.5 h-2.5" />
-                            <span>SILVER</span>
-                          </span>
-                        )}
-                        {hasStreak && (
-                          <span className="px-1.5 py-0.5 rounded bg-rose-950/80 backdrop-blur-md text-rose-300 border border-rose-500/40 text-[9px] font-mono font-bold" title="Active Daily Streak">
-                            🔥 {metrics?.currentStreakDays}d
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Bottom Overlay Info on Photo */}
-                    <div className="absolute bottom-2 left-2 right-2 sm:bottom-3 sm:left-3 sm:right-3 z-10">
-                      <div className="flex items-center space-x-1.5 text-white flex-wrap">
-                        <h3 className="font-black text-sm sm:text-lg drop-shadow-md truncate max-w-[120px] sm:max-w-[160px]">{user.name}</h3>
-                        <span className="text-xs sm:text-sm text-slate-200 font-semibold shrink-0">{user.age}</span>
-                        <SvgFlag
-                          countryCode={user.countryCode}
-                          nationality={getUserEffectiveLocation(user).country || user.nationality}
-                          size="sm"
-                          rounded={true}
-                        />
-                      </div>
-                      <div className="flex items-center space-x-1 text-[10px] text-slate-300 font-medium truncate mt-0.5">
-                        <MapPin className={`w-2.5 h-2.5 ${getUserEffectiveLocation(user).isMock ? 'text-pink-400' : 'text-emerald-400'} shrink-0`} />
-                        <span className="truncate">{getUserEffectiveLocation(user).displayCity}</span>
-                        {getUserEffectiveLocation(user).isMock && (
-                          <span className="px-1 rounded bg-pink-600/90 text-[8px] font-mono text-white font-bold shrink-0">
-                            MOCK
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Card Footer Actions */}
-                  <div className="p-2.5 sm:p-3 bg-[#161920] flex-1 flex flex-col justify-end">
-                    {/* Quick Action Buttons */}
-                    <div className="grid grid-cols-2 gap-2 font-sans">
+                  }
+                  footer={
+                    <div className="flex items-center gap-2">
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           onOpenChat(user.id);
                         }}
-                        className="h-8.5 py-2 w-full bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg font-medium text-xs flex items-center justify-center space-x-1.5 transition-colors border border-slate-700 cursor-pointer"
-                        title={`Chat with ${user.name}`}
+                        className="h-9 flex-1 bg-app-card-subtle hover:bg-app-input text-app-heading rounded-app text-xs font-semibold flex items-center justify-center gap-1.5 border border-hairline cursor-pointer"
                       >
-                        <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
-                        <span>Chat</span>
+                        <MessageSquare className="w-3.5 h-3.5 text-app-muted" />
+                        Chat
                       </button>
-
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           onStartCall(user.id);
                         }}
-                        className={`h-8.5 py-2 w-full rounded-lg font-medium text-xs flex items-center justify-center space-x-1.5 transition-all shadow-sm cursor-pointer ${
+                        className={`h-9 flex-[1.4] rounded-app text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                           isUserOnline
-                            ? 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white font-bold shadow-rose-600/30 active:scale-95'
+                            ? 'bg-flirt text-white shadow-brand active:scale-95'
                             : isUserBusy
-                            ? 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 font-bold'
-                            : 'bg-slate-800/80 hover:bg-slate-750 text-slate-400 hover:text-slate-200 border border-slate-700/80'
+                            ? 'bg-amber-500/15 border border-amber-500/40 text-amber-300'
+                            : 'bg-app-card-subtle text-app-muted border border-hairline'
                         }`}
-                        title={
-                          isUserOnline
-                            ? `Start 1-on-1 Video Call with ${user.name}`
-                            : isUserBusy
-                            ? `${user.name} is currently busy on a video call`
-                            : `Call ${user.name}`
-                        }
                       >
-                        {isUserBusy ? (
-                          <PhoneCall className="w-3.5 h-3.5 text-amber-400" />
-                        ) : (
-                          <Video className="w-3.5 h-3.5" />
+                        {isUserBusy ? <PhoneCall className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+                        <span>{isUserBusy ? 'Busy' : 'Call'}</span>
+                        {isUserOnline && userIsFriend && (
+                          <span className="glass-pill px-1.5 py-0.5 rounded-md text-[9px] font-ticker ml-0.5">
+                            {friendRate}/m
+                          </span>
                         )}
-                        <span>
-                          {isUserOnline
-                            ? 'Call'
-                            : isUserBusy
-                            ? 'Busy'
-                            : 'Call'}
-                        </span>
                       </button>
                     </div>
-                  </div>
-                </div>
+                  }
+                />
               );
             })}
           </div>
 
           {populatedDiscoveryUsers.length === 0 && (
-            <div className="text-center py-16 bg-[#161920] border border-slate-800 rounded-2xl p-8 space-y-4 font-mono">
+            <div className="text-center py-16 bg-app-card border border-hairline rounded-app-xl p-8 space-y-4">
               <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mx-auto text-xl">
                 <Users className="w-6 h-6" />
               </div>
@@ -698,7 +594,7 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                     setVerifiedOnly(false);
                     setNearbyOnly(false);
                   }}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                  className="px-4 py-2 bg-brand hover:brightness-110 text-white rounded-app text-xs font-semibold transition-colors cursor-pointer shadow-brand"
                 >
                   Reset All Filters (Show All)
                 </button>

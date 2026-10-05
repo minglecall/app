@@ -17,18 +17,29 @@ import {
   hashPassword,
   comparePassword,
   updateUserStatusAdmin,
+  touchLastSeenAdmin,
   fetchUserStatusesAdmin,
   isSupabaseAdminConfigured,
   ensureValidUuid,
   updateSupabaseRuntimeConfig,
   testSupabaseConnectivity,
   updateUserProfileAdmin,
-  fetchUserDailyRewardsAdmin,
-  upsertUserDailyRewardsAdmin,
   fetchCreatorMetricsAdmin,
   upsertCreatorMetricsAdmin,
+  upsertCallLogAdmin,
+  getSupabaseAdmin,
 } from './server/supabaseAdmin';
 import { getPasswordPolicyError } from './shared/passwordPolicy';
+import {
+  computePerformanceTierFromCache,
+  loadFinanceSystemConfig,
+  ensureOpenPeriod,
+  applyCreatorEarnCoins,
+  appendGiftEarnLedger,
+  loadGiftSharePercents,
+  resolveCatalogGiftById,
+} from './server/finance';
+import { computeGiftCoinSplit } from './shared/finance/economyGift';
 import {
   testR2Connectivity,
   updateR2RuntimeConfig,
@@ -47,6 +58,18 @@ import {
   createAdminRouter,
   createUsersAdminRouter,
   createCallRouter,
+  createRewardsRouter,
+  createCmsAdminRouter,
+  createMatchesRouter,
+  createFavoritesRouter,
+  createBlocksRouter,
+  createReportsRouter,
+  createAdminReportsRouter,
+  createReviewsRouter,
+  createFeedRouter,
+  createFriendsRouter,
+  createMessagesRouter,
+  createFinanceRouter,
 } from './server/routes';
 import {
   requireAuth,
@@ -56,7 +79,9 @@ import {
   stripPrivilegedProfileFields,
   sanitizePublicSignupRole,
   callerOwnsCreator,
+  ownsCreatorByLeaderId,
 } from './server/middleware/auth';
+import { globalApiLimiter, sensitiveActionLimiter } from './server/middleware/rateLimit';
 import { VIRTUAL_GIFTS } from './src/constants/appDefaults';
 
 dotenv.config();
@@ -76,6 +101,8 @@ interface CallState {
   ringingAt?: number;
   coinsSpent?: number;
   coinsEarned?: number;
+  teamLeaderId?: string | null;
+  teamLeaderEarnedCoins?: number;
   durationSeconds?: number;
   billedMinutes?: number;
 }
@@ -98,14 +125,24 @@ async function startServer() {
     next();
   });
 
+  // Global /api backstop (in-memory; skips OPTIONS + /api/health). Auth/sensitive
+  // routes add stricter limiters. Multi-instance deploys need a shared store later.
+  app.use('/api', globalApiLimiter);
+
   // Real-time server state
   const presenceMap = new Map<string, 'online' | 'busy' | 'offline'>();
   const userLastSeen = new Map<string, number>();
   const connectedSockets: ConnectedSocket[] = [];
   const activeCalls = new Map<string, CallState>();
-  
+  /** First-writer-wins: ringing outcome metrics counted once per callId. */
+  const callOutcomeMetricsFinalized = new Map<string, number>();
+  /** First-writer-wins: skip weaker duplicate call_log upserts for the same callId. */
+  const callLogFinalized = new Map<string, { status: string; duration: number; coins: number; at: number }>();
+
   // Authoritative server-side user directory (populated dynamically from Supabase)
   const serverUsers = new Map<string, UserProfile>();
+  /** Process-lifetime tombstones so sync-all / WS cannot resurrect hard-deleted users. */
+  const deletedUserTombstones = new Set<string>();
 
   // Helper to normalize db / API profiles into standardized camelCase UserProfile
   const normalizeUserProfile = (p: any): UserProfile => {
@@ -143,7 +180,6 @@ async function startServer() {
       onlineStatus: p.onlineStatus || p.online_status || 'offline',
       role: p.role || 'female_creator',
       coinBalance: Number(p.coinBalance ?? p.coin_balance ?? 0),
-      vipTier: p.vipTier || p.vip_tier || 'none',
       hourlyCoinRate: Number(p.hourlyCoinRate ?? p.hourly_coin_rate ?? 10),
       earningsCoins: Number(p.earningsCoins ?? p.earnings_coins ?? 0),
       totalLifetimeEarnedUSD: Number(p.totalLifetimeEarnedUSD ?? p.total_lifetime_earned_usd ?? 0),
@@ -209,11 +245,11 @@ async function startServer() {
 
 
 
-  // Helper to determine real-time presence
+  // Helper to determine real-time presence — busy ONLY from activeCalls
   const getAuthoritativeStatus = (userId: string): 'online' | 'busy' | 'offline' => {
     if (!userId) return 'offline';
 
-    // 1. Is user in an active call?
+    // 1. Is user in a non-ended call? (sole source of busy)
     const isBusy = Array.from(activeCalls.values()).some(
       (c) => (c.callerId === userId || c.receiverId === userId) && c.status !== 'ended'
     );
@@ -227,13 +263,12 @@ async function startServer() {
 
     // 3. Is socket currently open and active for this user?
     const isConnected = connectedSockets.some((c) => c.userId === userId && c.ws.readyState === WebSocket.OPEN);
-    if (isConnected) return explicitStatus === 'busy' ? 'busy' : 'online';
+    if (isConnected) return 'online';
 
-    // 4. Has user heartbeated recently (within last 10 seconds)?
+    // 4. Has user heartbeated recently (within last 12 seconds)?
     const lastSeen = userLastSeen.get(userId) || 0;
-    const isRecentlyActive = Date.now() - lastSeen < 10000;
+    const isRecentlyActive = Date.now() - lastSeen < 12000;
 
-    if (explicitStatus === 'busy') return 'busy';
     if (explicitStatus === 'online' && isRecentlyActive) return 'online';
     if (isRecentlyActive) return 'online';
 
@@ -304,14 +339,17 @@ async function startServer() {
     }
   };
 
-  // Broadcast payload to specific user's connected sockets
-  const sendToUser = (userId: string, payload: any) => {
+  // Broadcast payload to specific user's connected sockets. Returns how many sockets received it.
+  const sendToUser = (userId: string, payload: any): number => {
     const data = JSON.stringify(payload);
+    let delivered = 0;
     for (const conn of connectedSockets) {
       if (conn.userId === userId && conn.ws.readyState === WebSocket.OPEN) {
         conn.ws.send(data);
+        delivered++;
       }
     }
+    return delivered;
   };
 
   // Helper to format active calls for surveillance
@@ -368,6 +406,81 @@ async function startServer() {
 
   // Female Creator Metrics & Target Engine In-Memory Store
   const creatorMetricsMap = new Map<string, any>();
+  const creatorOnlineLastAccrualAt = new Map<string, number>();
+  const creatorMetricsLastPersistAt = new Map<string, number>();
+  const creatorMetricsLastBroadcastSecs = new Map<string, number>();
+  const presenceLastKnownStatus = new Map<string, 'online' | 'busy' | 'offline'>();
+  const lastSeenDbWriteAt = new Map<string, number>();
+  const MAX_CREATOR_ACCRUAL_DELTA_SEC = 90;
+  const CREATOR_METRICS_PERSIST_MS = 45000;
+  const LAST_SEEN_DB_THROTTLE_MS = 45000;
+  const CREATOR_METRICS_BROADCAST_MIN_DELTA_SEC = 30;
+
+  /** Drop a hard-deleted user from all in-memory maps so sync cannot resurrect them. */
+  const purgeUserRuntimeState = (userId: string) => {
+    const id = String(userId || '').trim();
+    if (!id) return;
+
+    deletedUserTombstones.add(id);
+    serverUsers.delete(id);
+    presenceMap.delete(id);
+    userLastSeen.delete(id);
+    creatorMetricsMap.delete(id);
+    creatorOnlineLastAccrualAt.delete(id);
+    creatorMetricsLastPersistAt.delete(id);
+    creatorMetricsLastBroadcastSecs.delete(id);
+    presenceLastKnownStatus.delete(id);
+    lastSeenDbWriteAt.delete(id);
+    quickMatchLiveHosts.delete(id);
+    quickMatchActiveCallers.delete(id);
+
+    for (const [callId, call] of Array.from(activeCalls.entries())) {
+      if (call.callerId === id || call.receiverId === id) {
+        activeCalls.delete(callId);
+      }
+    }
+  };
+
+  const resetVolatileRuntimeState = (opts?: {
+    clearUsers?: boolean;
+    adminUser?: UserProfile | null;
+    clearActiveCalls?: boolean;
+    clearPresence?: boolean;
+  }) => {
+    if (opts?.clearActiveCalls !== false) {
+      activeCalls.clear();
+    }
+    if (opts?.clearPresence !== false) {
+      presenceMap.clear();
+      userLastSeen.clear();
+      presenceLastKnownStatus.clear();
+      lastSeenDbWriteAt.clear();
+    }
+
+    creatorMetricsMap.clear();
+    creatorOnlineLastAccrualAt.clear();
+    creatorMetricsLastPersistAt.clear();
+    creatorMetricsLastBroadcastSecs.clear();
+    quickMatchLiveHosts.clear();
+    quickMatchActiveCallers.clear();
+
+    if (opts?.clearUsers) {
+      const admin =
+        opts.adminUser ||
+        Array.from(serverUsers.values()).find((u) => u.role === 'admin') ||
+        null;
+      // Tombstone every non-admin currently in memory so sync cannot resurrect them
+      for (const [id, u] of Array.from(serverUsers.entries())) {
+        if (u.role !== 'admin') deletedUserTombstones.add(id);
+      }
+      serverUsers.clear();
+      if (admin?.id) {
+        deletedUserTombstones.delete(admin.id);
+        serverUsers.set(admin.id, { ...admin, onlineStatus: 'online' });
+        presenceMap.set(admin.id, 'online');
+      }
+    }
+  };
 
   const getFormattedCreatorMetrics = () => {
     const obj: Record<string, any> = {};
@@ -384,8 +497,629 @@ async function startServer() {
     });
   };
 
+  const isFemaleCreatorHost = (u: { gender?: string; role?: string; teamLeaderId?: string | null } | undefined | null) => {
+    if (!u) return false;
+    return (
+      u.gender === 'female' ||
+      u.role === 'female_creator' ||
+      u.role === 'female_host' ||
+      Boolean(u.teamLeaderId)
+    );
+  };
+
+  type CallOutcomeStatus = 'missed' | 'declined' | 'completed' | 'failed';
+
+  const classifyCallOutcome = (opts: {
+    wasRinging: boolean;
+    wsType?: string | null;
+    endedBy?: string | null;
+    callerId: string;
+    receiverId: string;
+    outcome?: string | null;
+    reason?: string | null;
+    code?: string | null;
+  }): { status: CallOutcomeStatus; endReason: string } => {
+    const reason = String(opts.reason || '').trim();
+    const code = String(opts.code || '').trim();
+    const explicit = String(opts.outcome || '').trim().toLowerCase();
+
+    if (
+      explicit === 'failed' ||
+      code === 'INSUFFICIENT_BALANCE' ||
+      reason === 'INSUFFICIENT_BALANCE' ||
+      /insufficient/i.test(reason)
+    ) {
+      return { status: 'failed', endReason: reason || code || 'failed' };
+    }
+
+    if (!opts.wasRinging) {
+      if (explicit === 'missed' || explicit === 'declined' || explicit === 'cancelled') {
+        // Ignore stale ringing labels once the call was active.
+        return { status: 'completed', endReason: reason || 'completed' };
+      }
+      return { status: 'completed', endReason: reason || explicit || 'completed' };
+    }
+
+    // --- Ringing outcomes (server-authoritative) ---
+    if (explicit === 'declined') {
+      return { status: 'declined', endReason: reason || 'Receiver reject' };
+    }
+    if (explicit === 'missed' || explicit === 'cancelled') {
+      return {
+        status: 'missed',
+        endReason: reason || (explicit === 'cancelled' ? 'Caller hangup' : 'missed'),
+      };
+    }
+
+    if (reason === 'Ring timeout') {
+      return { status: 'missed', endReason: 'Ring timeout' };
+    }
+
+    if (opts.wsType === 'call:reject') {
+      if (!opts.endedBy || opts.endedBy === opts.receiverId) {
+        return { status: 'declined', endReason: reason || 'Receiver reject' };
+      }
+      return { status: 'missed', endReason: reason || 'Caller hangup' };
+    }
+
+    if (opts.wsType === 'call:cancel') {
+      return { status: 'missed', endReason: reason || 'Caller hangup' };
+    }
+
+    // call:end (or unknown) while still ringing
+    if (opts.endedBy === opts.receiverId) {
+      return { status: 'declined', endReason: reason || 'Receiver reject' };
+    }
+    return { status: 'missed', endReason: reason || 'Caller hangup' };
+  };
+
+  const recordRingingOutcomeMetrics = (receiverId: string, status: CallOutcomeStatus, callId: string) => {
+    if (status !== 'declined' && status !== 'missed') return;
+    if (callOutcomeMetricsFinalized.has(callId)) return;
+    callOutcomeMetricsFinalized.set(callId, Date.now());
+
+    const hostUser = serverUsers.get(receiverId);
+    if (!isFemaleCreatorHost(hostUser) && !creatorMetricsMap.has(receiverId)) return;
+
+    const hostMetrics =
+      creatorMetricsMap.get(receiverId) ||
+      defaultCreatorMetrics(receiverId, hostUser?.teamLeaderId || hostUser?.createdById);
+    if (status === 'declined') {
+      hostMetrics.totalCallsDeclined = (hostMetrics.totalCallsDeclined || 0) + 1;
+    } else {
+      hostMetrics.totalCallsMissed = (hostMetrics.totalCallsMissed || 0) + 1;
+    }
+    const offered = Math.max(
+      1,
+      hostMetrics.totalCallsOffered ||
+        (hostMetrics.totalCallsAnswered || 0) +
+          (hostMetrics.totalCallsDeclined || 0) +
+          (hostMetrics.totalCallsMissed || 0)
+    );
+    hostMetrics.responseHealthScore = Number(
+      (((hostMetrics.totalCallsAnswered || 0) / offered) * 100).toFixed(1)
+    );
+    creatorMetricsMap.set(receiverId, hostMetrics);
+    if (isSupabaseAdminConfigured()) {
+      upsertCreatorMetricsAdmin(hostMetrics).catch(() => {});
+    }
+    broadcastCreatorMetrics();
+  };
+
+  const persistFinalCallLog = async (opts: {
+    callId: string;
+    callerId: string;
+    receiverId: string;
+    status: CallOutcomeStatus;
+    endReason: string;
+    durationSeconds: number;
+    coinsSpent: number;
+    coinsEarned: number;
+    teamLeaderEarnedCoins?: number;
+    teamLeaderId?: string | null;
+    wasFriendCall?: boolean;
+    callerName?: string;
+    receiverName?: string;
+    startTime?: number | string;
+    endTime?: number | string;
+  }): Promise<boolean> => {
+    if (!isSupabaseAdminConfigured() || !opts.callerId || !opts.receiverId) return false;
+
+    const intentional =
+      opts.status === 'missed' ||
+      opts.status === 'declined' ||
+      opts.status === 'failed' ||
+      opts.status === 'completed';
+    const hasEconomics =
+      opts.coinsSpent > 0 || opts.coinsEarned > 0 || opts.durationSeconds > 0;
+    if (!intentional && !hasEconomics) return false;
+
+    const prev = callLogFinalized.get(opts.callId);
+    if (prev) {
+      const richer =
+        opts.durationSeconds > prev.duration ||
+        opts.coinsSpent + opts.coinsEarned > prev.coins;
+      // Do not let a later ringing/zero write overwrite a completed/richer row.
+      if (!richer) return true;
+    }
+
+    const callerProfile = serverUsers.get(opts.callerId);
+    const receiverProfile = serverUsers.get(opts.receiverId);
+    const tlId =
+      opts.teamLeaderId ||
+      receiverProfile?.teamLeaderId ||
+      receiverProfile?.createdById ||
+      null;
+
+    const logRes = await upsertCallLogAdmin({
+      id: opts.callId,
+      callerId: opts.callerId,
+      receiverId: opts.receiverId,
+      hostId: opts.receiverId,
+      callerName: opts.callerName || callerProfile?.name,
+      hostName: opts.receiverName || receiverProfile?.name,
+      receiverName: opts.receiverName || receiverProfile?.name,
+      startTime: opts.startTime || Date.now(),
+      endTime: opts.endTime || Date.now(),
+      durationSeconds: Math.max(0, opts.durationSeconds || 0),
+      coinsSpent: Math.max(0, opts.coinsSpent || 0),
+      coinsEarned: Math.max(0, opts.coinsEarned || 0),
+      teamLeaderId: tlId,
+      teamLeaderEarnedCoins: Math.max(0, opts.teamLeaderEarnedCoins || 0),
+      wasFriendCall: Boolean(opts.wasFriendCall),
+      status: opts.status,
+      endReason: opts.endReason,
+    });
+
+    if (logRes.success) {
+      callLogFinalized.set(opts.callId, {
+        status: opts.status,
+        duration: Math.max(0, opts.durationSeconds || 0),
+        coins: Math.max(0, (opts.coinsSpent || 0) + (opts.coinsEarned || 0)),
+        at: Date.now(),
+      });
+    } else {
+      console.warn('[call finalize] call log persist failed:', logRes.error);
+    }
+    return Boolean(logRes.success);
+  };
+
+  /**
+   * Single path for WS reject/cancel/end, ring-timeout, disconnect, and /api/calls/sync.
+   * Clears activeCalls, classifies outcome, increments missed/declined once, upserts call_logs.
+   */
+  const finalizeCallEnd = async (opts: {
+    callId: string;
+    call?: CallState | null;
+    callerId?: string | null;
+    receiverId?: string | null;
+    wasRinging?: boolean;
+    endedBy?: string | null;
+    reason?: string | null;
+    code?: string | null;
+    wsType?: string | null;
+    outcome?: string | null;
+    durationSeconds?: number;
+    coinsSpent?: number;
+    coinsEarned?: number;
+    teamLeaderEarnedCoins?: number;
+    teamLeaderId?: string | null;
+    wasFriendCall?: boolean;
+    callerName?: string;
+    receiverName?: string;
+    startTime?: number | string;
+    endTime?: number | string;
+    notifyParticipants?: boolean;
+    broadcastEnded?: boolean;
+  }): Promise<{ status: CallOutcomeStatus; endReason: string; persisted: boolean }> => {
+    const call = opts.call || activeCalls.get(opts.callId) || null;
+    const callerId = String(opts.callerId || call?.callerId || '');
+    const receiverId = String(opts.receiverId || call?.receiverId || '');
+    const explicitOutcome = String(opts.outcome || '').trim().toLowerCase();
+    const wasRinging =
+      typeof opts.wasRinging === 'boolean'
+        ? opts.wasRinging
+        : call
+          ? call.status === 'ringing'
+          : explicitOutcome === 'missed' ||
+            explicitOutcome === 'declined' ||
+            explicitOutcome === 'cancelled';
+
+    const endedAt = Date.now();
+    const billedDuration =
+      Math.max(
+        Number(opts.durationSeconds) || 0,
+        Number(call?.durationSeconds) || 0,
+        call?.billedMinutes ? Math.max(0, (call.billedMinutes - 1) * 60) : 0,
+        call?.startTime && call.status === 'active'
+          ? Math.max(0, Math.floor((endedAt - call.startTime) / 1000))
+          : 0
+      ) || 0;
+
+    // Snapshot before delete
+    const snapshot: CallState | null = call
+      ? {
+          ...call,
+          callerId: callerId || call.callerId,
+          receiverId: receiverId || call.receiverId,
+          coinsSpent: Math.max(Number(opts.coinsSpent) || 0, Number(call.coinsSpent) || 0),
+          coinsEarned: Math.max(Number(opts.coinsEarned) || 0, Number(call.coinsEarned) || 0),
+          teamLeaderEarnedCoins: Math.max(
+            Number(opts.teamLeaderEarnedCoins) || 0,
+            Number(call.teamLeaderEarnedCoins) || 0
+          ),
+          durationSeconds: billedDuration,
+        }
+      : callerId && receiverId
+        ? {
+            id: opts.callId,
+            callerId,
+            receiverId,
+            status: wasRinging ? 'ringing' : 'active',
+            ringingAt: typeof opts.startTime === 'number' ? opts.startTime : undefined,
+            startTime: typeof opts.startTime === 'number' ? opts.startTime : undefined,
+            coinsSpent: Number(opts.coinsSpent) || 0,
+            coinsEarned: Number(opts.coinsEarned) || 0,
+            teamLeaderEarnedCoins: Number(opts.teamLeaderEarnedCoins) || 0,
+            durationSeconds: billedDuration,
+            teamLeaderId: opts.teamLeaderId || null,
+          }
+        : null;
+
+    if (activeCalls.has(opts.callId)) {
+      activeCalls.delete(opts.callId);
+    }
+
+    const resolvedCallerId = snapshot?.callerId || callerId;
+    const resolvedReceiverId = snapshot?.receiverId || receiverId;
+
+    const { status, endReason } = classifyCallOutcome({
+      wasRinging,
+      wsType: opts.wsType,
+      endedBy: opts.endedBy,
+      callerId: resolvedCallerId,
+      receiverId: resolvedReceiverId,
+      outcome: opts.outcome,
+      reason: opts.reason,
+      code: opts.code,
+    });
+
+    if (wasRinging && resolvedReceiverId) {
+      recordRingingOutcomeMetrics(resolvedReceiverId, status, opts.callId);
+    }
+
+    let persisted = false;
+    if (resolvedCallerId && resolvedReceiverId) {
+      persisted = await persistFinalCallLog({
+        callId: opts.callId,
+        callerId: resolvedCallerId,
+        receiverId: resolvedReceiverId,
+        status,
+        endReason,
+        durationSeconds: wasRinging ? 0 : billedDuration,
+        coinsSpent: wasRinging ? 0 : Number(snapshot?.coinsSpent) || 0,
+        coinsEarned: wasRinging ? 0 : Number(snapshot?.coinsEarned) || 0,
+        teamLeaderEarnedCoins: wasRinging ? 0 : Number(snapshot?.teamLeaderEarnedCoins) || 0,
+        teamLeaderId: opts.teamLeaderId || snapshot?.teamLeaderId,
+        wasFriendCall: opts.wasFriendCall,
+        callerName: opts.callerName,
+        receiverName: opts.receiverName,
+        startTime:
+          opts.startTime ||
+          snapshot?.startTime ||
+          snapshot?.ringingAt ||
+          endedAt,
+        endTime: opts.endTime || endedAt,
+      });
+    }
+
+    const notify = opts.notifyParticipants !== false;
+    if (notify && resolvedCallerId && resolvedReceiverId) {
+      const callerOnline = connectedSockets.some(
+        (c) => c.userId === resolvedCallerId && c.ws.readyState === WebSocket.OPEN
+      );
+      const receiverOnline = connectedSockets.some(
+        (c) => c.userId === resolvedReceiverId && c.ws.readyState === WebSocket.OPEN
+      );
+      presenceMap.set(resolvedCallerId, callerOnline ? 'online' : 'offline');
+      presenceMap.set(resolvedReceiverId, receiverOnline ? 'online' : 'offline');
+      presenceLastKnownStatus.set(resolvedCallerId, callerOnline ? 'online' : 'offline');
+      presenceLastKnownStatus.set(resolvedReceiverId, receiverOnline ? 'online' : 'offline');
+      if (callerOnline) accrueCreatorOnlineTime(resolvedCallerId);
+      else accrueCreatorOnlineTime(resolvedCallerId, { stop: true, forcePersist: true });
+      if (receiverOnline) accrueCreatorOnlineTime(resolvedReceiverId);
+      else accrueCreatorOnlineTime(resolvedReceiverId, { stop: true, forcePersist: true });
+      broadcastPresence();
+      broadcastUsers();
+      if (isSupabaseAdminConfigured()) {
+        updateUserStatusAdmin(resolvedCallerId, callerOnline ? 'online' : 'offline').catch(() => {});
+        updateUserStatusAdmin(resolvedReceiverId, receiverOnline ? 'online' : 'offline').catch(() => {});
+      }
+
+      const payload = {
+        type: 'call:ended',
+        callId: opts.callId,
+        endedBy: opts.endedBy || null,
+        outcome: status,
+        status,
+        reason: endReason,
+        code: opts.code || undefined,
+        callerId: resolvedCallerId,
+        receiverId: resolvedReceiverId,
+      };
+      if (opts.broadcastEnded) {
+        broadcastAll(payload);
+      } else {
+        sendToUser(resolvedCallerId, payload);
+        sendToUser(resolvedReceiverId, payload);
+      }
+      broadcastActiveCalls();
+      broadcastAll({ type: 'call_logs:updated', callId: opts.callId });
+    }
+
+    return { status, endReason, persisted };
+  };
+
+  const defaultCreatorMetrics = (creatorId: string, agencyLeaderId?: string | null) => ({
+    creatorId,
+    agencyLeaderId: agencyLeaderId || null,
+    activeOnlineSeconds: 0,
+    activeOnlineHours: 0,
+    coinsEarnedFromCalls: 0,
+    coinsEarnedFromGifts: 0,
+    totalTargetCoins: 0,
+    currentStreakDays: 1,
+    totalCallsOffered: 0,
+    totalCallsAnswered: 0,
+    totalCallsDeclined: 0,
+    totalCallsMissed: 0,
+    responseHealthScore: 100,
+    performanceTier: 'bronze' as const,
+    isReadyNowActive: false,
+    bonusEarnedCoins: 0,
+    bonusEarnedUSD: 0,
+    lastActiveDate: new Date().toISOString().split('T')[0],
+  });
+
+  const computePerformanceTier = (hours: number, totalCoins: number): 'bronze' | 'silver' | 'gold' => {
+    // Thresholds from system_configs via Financial Module (cached; safe defaults if missing).
+    return computePerformanceTierFromCache(hours, totalCoins);
+  };
+
+  const persistCreatorMetricsThrottled = (creatorId: string, metrics: any, force = false) => {
+    if (!isSupabaseAdminConfigured()) return;
+    const last = creatorMetricsLastPersistAt.get(creatorId) || 0;
+    if (!force && Date.now() - last < CREATOR_METRICS_PERSIST_MS) return;
+    creatorMetricsLastPersistAt.set(creatorId, Date.now());
+    upsertCreatorMetricsAdmin(metrics).catch(() => {});
+  };
+
+  const maybeBroadcastCreatorMetricsChange = (creatorId: string, metrics: any, force = false) => {
+    const secs = Number(metrics?.activeOnlineSeconds || 0);
+    const last = creatorMetricsLastBroadcastSecs.get(creatorId) ?? -1;
+    if (!force && last >= 0 && Math.abs(secs - last) < CREATOR_METRICS_BROADCAST_MIN_DELTA_SEC) {
+      return;
+    }
+    creatorMetricsLastBroadcastSecs.set(creatorId, secs);
+    broadcastCreatorMetrics();
+  };
+
+  const accrueCreatorOnlineTime = (
+    creatorId: string,
+    opts?: { forcePersist?: boolean; stop?: boolean }
+  ): any | null => {
+    if (!creatorId) return null;
+    const user = serverUsers.get(creatorId);
+    if (!isFemaleCreatorHost(user)) return creatorMetricsMap.get(creatorId) || null;
+
+    const now = Date.now();
+    const authStatus = getAuthoritativeStatus(creatorId);
+    const shouldAccrue = !opts?.stop && (authStatus === 'online' || authStatus === 'busy');
+
+    const existing =
+      creatorMetricsMap.get(creatorId) ||
+      defaultCreatorMetrics(creatorId, user?.teamLeaderId || user?.createdById || null);
+
+    if (!shouldAccrue) {
+      // Flush any pending delta before stopping the clock
+      const lastAt = creatorOnlineLastAccrualAt.get(creatorId);
+      if (lastAt) {
+        const deltaSec = Math.min(MAX_CREATOR_ACCRUAL_DELTA_SEC, Math.max(0, Math.floor((now - lastAt) / 1000)));
+        if (deltaSec > 0) {
+          const newSecs = (existing.activeOnlineSeconds || 0) + deltaSec;
+          const newHours = Number((newSecs / 3600).toFixed(2));
+          const totalCoins =
+            (existing.coinsEarnedFromCalls || 0) + (existing.coinsEarnedFromGifts || 0);
+          const updated = {
+            ...existing,
+            creatorId,
+            agencyLeaderId: existing.agencyLeaderId || user?.teamLeaderId || user?.createdById || null,
+            activeOnlineSeconds: newSecs,
+            activeOnlineHours: newHours,
+            totalTargetCoins: totalCoins,
+            performanceTier: computePerformanceTier(newHours, totalCoins),
+            lastActiveDate: new Date().toISOString().split('T')[0],
+            updatedAt: new Date().toISOString(),
+          };
+          creatorMetricsMap.set(creatorId, updated);
+          persistCreatorMetricsThrottled(creatorId, updated, true);
+          maybeBroadcastCreatorMetricsChange(creatorId, updated, true);
+          creatorOnlineLastAccrualAt.delete(creatorId);
+          return updated;
+        }
+        creatorOnlineLastAccrualAt.delete(creatorId);
+        if (opts?.forcePersist || opts?.stop) {
+          persistCreatorMetricsThrottled(creatorId, existing, true);
+        }
+      }
+      return existing;
+    }
+
+    if (!creatorOnlineLastAccrualAt.has(creatorId)) {
+      creatorOnlineLastAccrualAt.set(creatorId, now);
+      if (!creatorMetricsMap.has(creatorId)) {
+        creatorMetricsMap.set(creatorId, existing);
+      }
+      return existing;
+    }
+
+    const lastAt = creatorOnlineLastAccrualAt.get(creatorId)!;
+    const deltaSec = Math.min(MAX_CREATOR_ACCRUAL_DELTA_SEC, Math.max(0, Math.floor((now - lastAt) / 1000)));
+    if (deltaSec <= 0) {
+      return existing;
+    }
+
+    creatorOnlineLastAccrualAt.set(creatorId, now);
+    const newSecs = (existing.activeOnlineSeconds || 0) + deltaSec;
+    const newHours = Number((newSecs / 3600).toFixed(2));
+    const totalCoins = (existing.coinsEarnedFromCalls || 0) + (existing.coinsEarnedFromGifts || 0);
+    const updated = {
+      ...existing,
+      creatorId,
+      agencyLeaderId: existing.agencyLeaderId || user?.teamLeaderId || user?.createdById || null,
+      activeOnlineSeconds: newSecs,
+      activeOnlineHours: newHours,
+      totalTargetCoins: totalCoins,
+      performanceTier: computePerformanceTier(newHours, totalCoins),
+      lastActiveDate: new Date().toISOString().split('T')[0],
+      updatedAt: new Date().toISOString(),
+    };
+    creatorMetricsMap.set(creatorId, updated);
+    persistCreatorMetricsThrottled(creatorId, updated, Boolean(opts?.forcePersist));
+    maybeBroadcastCreatorMetricsChange(creatorId, updated, Boolean(opts?.forcePersist));
+    return updated;
+  };
+
+  const recordCreatorEarnCoins = (
+    creatorId: string,
+    opts: { callCoins?: number; giftCoins?: number }
+  ): any | null => {
+    if (!creatorId) return null;
+    const callCoins = Math.max(0, Math.round(Number(opts.callCoins) || 0));
+    const giftCoins = Math.max(0, Math.round(Number(opts.giftCoins) || 0));
+    if (callCoins <= 0 && giftCoins <= 0) return creatorMetricsMap.get(creatorId) || null;
+
+    const user = serverUsers.get(creatorId);
+    const existing =
+      creatorMetricsMap.get(creatorId) ||
+      defaultCreatorMetrics(creatorId, user?.teamLeaderId || user?.createdById || null);
+    const updated = applyCreatorEarnCoins(existing, {
+      creatorId,
+      agencyLeaderId: user?.teamLeaderId || user?.createdById || null,
+      callCoins,
+      giftCoins,
+      computeTier: computePerformanceTier,
+    });
+    creatorMetricsMap.set(creatorId, updated);
+    if (isSupabaseAdminConfigured()) {
+      upsertCreatorMetricsAdmin(updated).catch(() => {});
+    }
+    broadcastCreatorMetrics();
+    return updated;
+  };
+
+  const maybeTouchLastSeenDb = (userId: string, force = false) => {
+    if (!isSupabaseAdminConfigured() || !userId) return;
+    const last = lastSeenDbWriteAt.get(userId) || 0;
+    if (!force && Date.now() - last < LAST_SEEN_DB_THROTTLE_MS) return;
+    lastSeenDbWriteAt.set(userId, Date.now());
+    touchLastSeenAdmin(userId).catch(() => {});
+  };
+
+  const applyPresenceHeartbeat = (
+    userId: string,
+    requestedStatus?: string | null,
+    opts?: { persistStatus?: boolean; fromUnload?: boolean }
+  ): { status: 'online' | 'busy' | 'offline'; changed: boolean } => {
+    const prev = presenceLastKnownStatus.get(userId) || getAuthoritativeStatus(userId);
+
+    // Client may only request online|offline. Busy is ignored/rejected upstream.
+    let intent: 'online' | 'offline' =
+      requestedStatus === 'offline' ? 'offline' : 'online';
+    if (opts?.fromUnload) intent = 'offline';
+
+    if (intent === 'offline') {
+      userLastSeen.delete(userId);
+      presenceMap.set(userId, 'offline');
+      // Stop creator accrual and flush
+      accrueCreatorOnlineTime(userId, { stop: true, forcePersist: true });
+    } else {
+      userLastSeen.set(userId, Date.now());
+      // Never store client busy — activeCalls drives busy via getAuthoritativeStatus
+      presenceMap.set(userId, 'online');
+      accrueCreatorOnlineTime(userId);
+    }
+
+    const status = getAuthoritativeStatus(userId);
+    const u = serverUsers.get(userId);
+    if (u) u.onlineStatus = status;
+
+    const changed = prev !== status;
+    presenceLastKnownStatus.set(userId, status);
+
+    if (opts?.persistStatus && isSupabaseAdminConfigured()) {
+      if (changed || intent === 'offline') {
+        updateUserStatusAdmin(userId, status).catch(() => {});
+        lastSeenDbWriteAt.set(userId, Date.now());
+      } else {
+        maybeTouchLastSeenDb(userId);
+      }
+    }
+
+    return { status, changed };
+  };
+
+  const toggleReadyNowForCreator = (creatorId: string, isReadyNow: boolean) => {
+    const user = serverUsers.get(creatorId);
+    const existing =
+      creatorMetricsMap.get(creatorId) ||
+      defaultCreatorMetrics(creatorId, user?.teamLeaderId || user?.createdById || null);
+    const updated = {
+      ...existing,
+      creatorId,
+      isReadyNowActive: Boolean(isReadyNow),
+      readyNowToggledAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    creatorMetricsMap.set(creatorId, updated);
+    if (isSupabaseAdminConfigured()) {
+      upsertCreatorMetricsAdmin(updated).catch(() => {});
+    }
+    return updated;
+  };
+
+  let cachedFirstCallBonus: { coins: number; usd: number; fetchedAt: number } | null = null;
+  const getFirstCallBonusAmounts = async (): Promise<{ coins: number; usd: number }> => {
+    const now = Date.now();
+    if (cachedFirstCallBonus && now - cachedFirstCallBonus.fetchedAt < 60000) {
+      return { coins: cachedFirstCallBonus.coins, usd: cachedFirstCallBonus.usd };
+    }
+    let coins = 100;
+    let usd = 1.0;
+    try {
+      const client = getSupabaseAdmin();
+      if (client) {
+        const { data } = await client
+          .from('system_configs')
+          .select('daily_first_call_bonus_coins, daily_first_call_bonus_usd')
+          .eq('id', 'default')
+          .maybeSingle();
+        if (data) {
+          coins = Number((data as any).daily_first_call_bonus_coins ?? 100);
+          usd = Number((data as any).daily_first_call_bonus_usd ?? 1.0);
+        }
+      }
+    } catch {
+      // defaults
+    }
+    cachedFirstCallBonus = { coins, usd, fetchedAt: now };
+    return { coins, usd };
+  };
+
   // Initial load of creator metrics from Supabase Admin
   if (isSupabaseAdminConfigured()) {
+    // Warm Financial Module config cache (tier thresholds, cycle, close clock)
+    loadFinanceSystemConfig().catch(() => {});
     fetchCreatorMetricsAdmin().then((res) => {
       if (res.success && Array.isArray(res.data)) {
         for (const row of res.data) {
@@ -424,18 +1158,27 @@ async function startServer() {
     }).catch(() => {});
   }
 
-  // Periodic heartbeat broadcast for active calls and presence so all browser tabs stay 100% in sync
+  // Periodic active-call sync only (presence/creator_metrics broadcast on change)
   setInterval(() => {
     if (activeCalls.size > 0) {
       broadcastActiveCalls();
     }
     if (connectedSockets.length > 0) {
-      broadcastPresence();
       broadcastQuickMatchLiveHosts();
       broadcastQuickMatchActiveCallers();
-      broadcastCreatorMetrics();
     }
   }, 3000);
+
+  // Server-owned creator online accrual tick (~20s)
+  setInterval(() => {
+    for (const [userId, status] of presenceMap.entries()) {
+      if (status === 'offline') continue;
+      const auth = getAuthoritativeStatus(userId);
+      if (auth === 'online' || auth === 'busy') {
+        accrueCreatorOnlineTime(userId);
+      }
+    }
+  }, 20000);
 
   // WebSocket Server Setup attached to path /ws
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -542,23 +1285,24 @@ async function startServer() {
           case 'presence:update': {
             const userId = authenticatedUserId;
             const { status } = msg;
-            if (userId && (status === 'online' || status === 'busy' || status === 'offline')) {
-              if (status === 'offline') {
-                userLastSeen.delete(userId);
-                // Keep socket.userId so ws.close can still persist offline to Supabase.
-                // Explicit presenceMap 'offline' already wins in getAuthoritativeStatus.
-              } else {
-                userLastSeen.set(userId, Date.now());
-              }
-              presenceMap.set(userId, status);
-              const u = serverUsers.get(userId);
-              if (u) u.onlineStatus = status;
-              broadcastPresence();
-              broadcastUsers();
+            if (!userId) break;
 
-              if (isSupabaseAdminConfigured()) {
-                updateUserStatusAdmin(userId, status).catch(() => {});
+            if (status === 'busy') {
+              sendJson(ws, {
+                type: 'presence:error',
+                error: 'Client cannot set busy; busy is derived from active calls.',
+                status: getAuthoritativeStatus(userId),
+              });
+              break;
+            }
+
+            if (status === 'online' || status === 'offline') {
+              const result = applyPresenceHeartbeat(userId, status, { persistStatus: true });
+              if (result.changed) {
+                broadcastPresence();
+                broadcastUsers();
               }
+              sendJson(ws, { type: 'heartbeat:ack', status: result.status });
             }
             break;
           }
@@ -566,6 +1310,7 @@ async function startServer() {
             const { userProfile } = msg;
             if (userProfile) {
               const targetId = authenticatedUserId;
+              if (!targetId || deletedUserTombstones.has(targetId)) break;
               const cleanEmail = userProfile.email ? String(userProfile.email).toLowerCase().trim() : null;
               const existing = serverUsers.get(targetId);
               const sanitizedProfile = stripPrivilegedProfileFields(userProfile || {});
@@ -609,17 +1354,13 @@ async function startServer() {
           case 'heartbeat': {
             const targetId = authenticatedUserId;
             if (targetId) {
-              userLastSeen.set(targetId, Date.now());
-              const currentStatus = getAuthoritativeStatus(targetId);
-              presenceMap.set(targetId, currentStatus);
-              const u = serverUsers.get(targetId);
-              if (u) u.onlineStatus = currentStatus;
-              broadcastPresence();
+              const result = applyPresenceHeartbeat(targetId, 'online', { persistStatus: true });
+              if (result.changed) {
+                broadcastPresence();
+                broadcastUsers();
+              }
+              sendJson(ws, { type: 'heartbeat:ack', status: result.status });
             }
-            sendJson(ws, {
-              type: 'presence:all',
-              presence: getFormattedPresence(),
-            });
             break;
           }
 
@@ -684,10 +1425,15 @@ async function startServer() {
             // Update presence for both + persist to Supabase profiles
             presenceMap.set(callerId, 'busy');
             presenceMap.set(receiverId, 'busy');
+            presenceLastKnownStatus.set(callerId, 'busy');
+            presenceLastKnownStatus.set(receiverId, 'busy');
             const callerUser = serverUsers.get(callerId);
             const receiverUser = serverUsers.get(receiverId);
             if (callerUser) callerUser.onlineStatus = 'busy';
             if (receiverUser) receiverUser.onlineStatus = 'busy';
+            // Keep creator accrual running through busy
+            accrueCreatorOnlineTime(callerId);
+            accrueCreatorOnlineTime(receiverId);
             broadcastPresence();
             broadcastUsers();
             if (isSupabaseAdminConfigured()) {
@@ -754,6 +1500,8 @@ async function startServer() {
 
             presenceMap.set(call.callerId, 'busy');
             presenceMap.set(call.receiverId, 'busy');
+            presenceLastKnownStatus.set(call.callerId, 'busy');
+            presenceLastKnownStatus.set(call.receiverId, 'busy');
             broadcastPresence();
             broadcastUsers();
 
@@ -778,68 +1526,58 @@ async function startServer() {
             break;
           }
 
+          case 'chat:incall_preview': {
+            // Pre-DB peer notify for in-call bubbles (LiveKit data is primary; this is backup).
+            const clientTempId =
+              typeof msg.clientTempId === 'string' ? msg.clientTempId.trim().slice(0, 80) : '';
+            const receiverId = typeof msg.receiverId === 'string' ? msg.receiverId.trim() : '';
+            const text = typeof msg.text === 'string' ? msg.text.trim().slice(0, 4000) : '';
+            const messageType = msg.messageType === 'gift' ? 'gift' : 'text';
+            const senderId = authenticatedUserId;
+            if (!clientTempId || !receiverId || !senderId || !text || receiverId === senderId) {
+              break;
+            }
+            const delivered = sendToUser(receiverId, {
+              type: 'chat:incall_preview',
+              payload: {
+                clientTempId,
+                text,
+                senderId,
+                receiverId,
+                messageType,
+              },
+            });
+            if (delivered === 0) {
+              console.warn('[WS chat:incall_preview] zero open sockets for', receiverId);
+            }
+            break;
+          }
+
           case 'call:reject':
           case 'call:cancel':
           case 'call:end': {
-            const { callId, userId } = msg;
+            const { callId, userId, outcome, reason } = msg;
             const call = activeCalls.get(callId);
 
             if (call) {
-              // If call was rejected while ringing, record decline and recalculate health score
-              if (call.status === 'ringing') {
-                const hostMetrics = creatorMetricsMap.get(call.receiverId);
-                if (hostMetrics) {
-                  hostMetrics.totalCallsDeclined = (hostMetrics.totalCallsDeclined || 0) + 1;
-                  const offered = hostMetrics.totalCallsOffered || 1;
-                  hostMetrics.responseHealthScore = Number((( (hostMetrics.totalCallsAnswered || 0) / Math.max(1, offered)) * 100).toFixed(1));
-                  creatorMetricsMap.set(call.receiverId, hostMetrics);
-                  if (isSupabaseAdminConfigured()) {
-                    upsertCreatorMetricsAdmin(hostMetrics).catch(() => {});
-                  }
-                  broadcastCreatorMetrics();
-                }
-              }
-
-              call.status = 'ended';
-              activeCalls.delete(callId);
-
-              const callerOnline = connectedSockets.some((c) => c.userId === call.callerId && c.ws.readyState === WebSocket.OPEN);
-              const receiverOnline = connectedSockets.some((c) => c.userId === call.receiverId && c.ws.readyState === WebSocket.OPEN);
-
-              presenceMap.set(call.callerId, callerOnline ? 'online' : 'offline');
-              presenceMap.set(call.receiverId, receiverOnline ? 'online' : 'offline');
-              broadcastPresence();
-              broadcastUsers();
-
-              if (isSupabaseAdminConfigured()) {
-                updateUserStatusAdmin(call.callerId, callerOnline ? 'online' : 'offline').catch(() => {});
-                updateUserStatusAdmin(call.receiverId, receiverOnline ? 'online' : 'offline').catch(() => {});
-              }
-
-              const payload = {
-                type: 'call:ended',
+              const endedBy = userId || authenticatedUserId;
+              void finalizeCallEnd({
                 callId,
-                endedBy: userId || authenticatedUserId,
-              };
-
-              sendToUser(call.callerId, payload);
-              sendToUser(call.receiverId, payload);
-
-              // Broadcast real-time active calls and call logs update
-              broadcastActiveCalls();
-              broadcastAll({ type: 'call_logs:updated' });
+                call,
+                wasRinging: call.status === 'ringing',
+                endedBy,
+                reason: reason || null,
+                wsType: msg.type,
+                outcome: outcome || null,
+                notifyParticipants: true,
+              }).catch((err) => console.warn('[WS call end] finalize failed:', err));
             }
             break;
           }
 
           case 'chat:send': {
-            const { message } = msg;
-            if (message) {
-              broadcastAll({
-                type: 'chat:message',
-                message,
-              });
-            }
+            // Intentionally ignored: durable chat must go React → POST /api/messages → Supabase.
+            // Do not rebroadcast client-authored message objects as truth.
             break;
           }
 
@@ -970,89 +1708,29 @@ async function startServer() {
           }
 
           case 'creator:heartbeat': {
-            const { creatorId, agencyLeaderId, secondsIncrement } = msg;
+            // Server-owned accrual; ignore msg.creatorId / secondsIncrement
+            const creatorId = authenticatedUserId;
             if (creatorId) {
-              const inc = Number(secondsIncrement || 60);
-              const existing = creatorMetricsMap.get(creatorId) || {
+              const metrics = accrueCreatorOnlineTime(creatorId);
+              sendJson(ws, {
+                type: 'creator_metrics:update',
                 creatorId,
-                agencyLeaderId,
-                activeOnlineSeconds: 0,
-                activeOnlineHours: 0,
-                coinsEarnedFromCalls: 0,
-                coinsEarnedFromGifts: 0,
-                totalTargetCoins: 0,
-                currentStreakDays: 1,
-                totalCallsOffered: 0,
-                totalCallsAnswered: 0,
-                totalCallsDeclined: 0,
-                totalCallsMissed: 0,
-                responseHealthScore: 100,
-                performanceTier: 'bronze',
-                isReadyNowActive: false,
-                bonusEarnedCoins: 0,
-                bonusEarnedUSD: 0,
-                lastActiveDate: new Date().toISOString().split('T')[0],
-              };
-
-              const newSecs = (existing.activeOnlineSeconds || 0) + inc;
-              const newHours = Number((newSecs / 3600).toFixed(2));
-              const totalCoins = (existing.coinsEarnedFromCalls || 0) + (existing.coinsEarnedFromGifts || 0);
-
-              // Dual-Metric Tier Calculation: Bronze (20h + 5k), Silver (40h + 20k), Gold (60h + 60k)
-              let tier: 'bronze' | 'silver' | 'gold' = 'bronze';
-              if (newHours >= 60 && totalCoins >= 60000) {
-                tier = 'gold';
-              } else if (newHours >= 40 && totalCoins >= 20000) {
-                tier = 'silver';
-              }
-
-              const updatedMetrics = {
-                ...existing,
-                creatorId,
-                agencyLeaderId: agencyLeaderId || existing.agencyLeaderId,
-                activeOnlineSeconds: newSecs,
-                activeOnlineHours: newHours,
-                totalTargetCoins: totalCoins,
-                performanceTier: tier,
-                lastActiveDate: new Date().toISOString().split('T')[0],
-                updatedAt: new Date().toISOString(),
-              };
-
-              creatorMetricsMap.set(creatorId, updatedMetrics);
-
-              if (isSupabaseAdminConfigured()) {
-                upsertCreatorMetricsAdmin(updatedMetrics).catch(() => {});
-              }
-
-              broadcastCreatorMetrics();
+                metrics: metrics || creatorMetricsMap.get(creatorId) || null,
+              });
             }
             break;
           }
 
           case 'creator:ready_now_toggle': {
-            const { creatorId, isReadyNow } = msg;
+            const creatorId = authenticatedUserId;
             if (creatorId) {
-              const existing = creatorMetricsMap.get(creatorId) || {
-                creatorId,
-                activeOnlineSeconds: 0,
-                coinsEarnedFromCalls: 0,
-                coinsEarnedFromGifts: 0,
-                totalCallsOffered: 0,
-                totalCallsAnswered: 0,
-                responseHealthScore: 100,
-                performanceTier: 'bronze',
-              };
-              const updated = {
-                ...existing,
-                isReadyNowActive: Boolean(isReadyNow),
-                readyNowToggledAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              };
-              creatorMetricsMap.set(creatorId, updated);
-              if (isSupabaseAdminConfigured()) {
-                upsertCreatorMetricsAdmin(updated).catch(() => {});
-              }
+              const updated = toggleReadyNowForCreator(creatorId, Boolean(msg.isReadyNow));
               broadcastCreatorMetrics();
+              sendJson(ws, {
+                type: 'creator_metrics:update',
+                creatorId,
+                metrics: updated,
+              });
             }
             break;
           }
@@ -1088,24 +1766,25 @@ async function startServer() {
           );
 
           if (activeCall) {
-            activeCall.status = 'ended';
-            activeCalls.delete(activeCall.id);
-
-            const otherId = activeCall.callerId === disconnectedUserId ? activeCall.receiverId : activeCall.callerId;
-            const otherConnected = connectedSockets.some((c) => c.userId === otherId && c.ws.readyState === WebSocket.OPEN);
-            presenceMap.set(otherId, otherConnected ? 'online' : 'offline');
-            if (isSupabaseAdminConfigured()) {
-              updateUserStatusAdmin(otherId, otherConnected ? 'online' : 'offline').catch(() => {});
-            }
-            sendToUser(otherId, { type: 'call:ended', callId: activeCall.id, reason: 'Disconnected' });
-
-            broadcastActiveCalls();
+            const wasRinging = activeCall.status === 'ringing';
+            void finalizeCallEnd({
+              callId: activeCall.id,
+              call: activeCall,
+              wasRinging,
+              endedBy: disconnectedUserId,
+              reason: 'Disconnected',
+              wsType: wasRinging ? 'call:cancel' : 'call:end',
+              outcome: wasRinging ? 'missed' : 'completed',
+              notifyParticipants: true,
+            }).catch((err) => console.warn('[WS disconnect] call finalize failed:', err));
           }
 
           presenceMap.set(disconnectedUserId, 'offline');
           userLastSeen.delete(disconnectedUserId);
           const u = serverUsers.get(disconnectedUserId);
           if (u) u.onlineStatus = 'offline';
+          presenceLastKnownStatus.set(disconnectedUserId, 'offline');
+          accrueCreatorOnlineTime(disconnectedUserId, { stop: true, forcePersist: true });
 
           quickMatchLiveHosts.delete(disconnectedUserId);
           quickMatchActiveCallers.delete(disconnectedUserId);
@@ -1146,7 +1825,14 @@ async function startServer() {
         }
       }
 
-      // Expire abandoned ringing / stuck calls
+      // Expire abandoned ringing / stuck calls + prune finalize idempotency maps
+      for (const [cid, at] of callOutcomeMetricsFinalized.entries()) {
+        if (now - at > 10 * 60 * 1000) callOutcomeMetricsFinalized.delete(cid);
+      }
+      for (const [cid, meta] of callLogFinalized.entries()) {
+        if (now - meta.at > 10 * 60 * 1000) callLogFinalized.delete(cid);
+      }
+
       for (const [callId, call] of activeCalls.entries()) {
         if (call.status === 'ended') {
           activeCalls.delete(callId);
@@ -1155,23 +1841,17 @@ async function startServer() {
         if (call.status === 'ringing') {
           const started = call.ringingAt || call.startTime || 0;
           if (started && now - started > RINGING_TIMEOUT_MS) {
-            activeCalls.delete(callId);
-            const callerOnline = connectedSockets.some((c) => c.userId === call.callerId && c.ws.readyState === WebSocket.OPEN);
-            const receiverOnline = connectedSockets.some((c) => c.userId === call.receiverId && c.ws.readyState === WebSocket.OPEN);
-            presenceMap.set(call.callerId, callerOnline ? 'online' : 'offline');
-            presenceMap.set(call.receiverId, receiverOnline ? 'online' : 'offline');
-            if (isSupabaseAdminConfigured()) {
-              updateUserStatusAdmin(call.callerId, callerOnline ? 'online' : 'offline').catch(() => {});
-              updateUserStatusAdmin(call.receiverId, receiverOnline ? 'online' : 'offline').catch(() => {});
-            }
-            broadcastAll({
-              type: 'call:ended',
+            void finalizeCallEnd({
               callId,
+              call,
+              wasRinging: true,
+              endedBy: null,
               reason: 'Ring timeout',
-            });
-            broadcastActiveCalls();
-            broadcastPresence();
-            broadcastUsers();
+              outcome: 'missed',
+              wsType: null,
+              notifyParticipants: true,
+              broadcastEnded: true,
+            }).catch((err) => console.warn('[ring timeout] finalize failed:', err));
           }
         }
       }
@@ -1195,6 +1875,8 @@ async function startServer() {
           userLastSeen.delete(uid);
           const u = serverUsers.get(uid);
           if (u) u.onlineStatus = 'offline';
+          presenceLastKnownStatus.set(uid, 'offline');
+          accrueCreatorOnlineTime(uid, { stop: true, forcePersist: true });
 
           if (isSupabaseAdminConfigured()) {
             updateUserStatusAdmin(uid, 'offline').catch(() => {});
@@ -1259,12 +1941,20 @@ async function startServer() {
     getFormattedUsers,
     getFormattedActiveCalls,
     getFormattedCreatorMetrics,
+    applyPresenceHeartbeat,
+    accrueCreatorOnlineTime,
+    recordCreatorEarnCoins,
+    toggleReadyNowForCreator,
+    getFirstCallBonusAmounts,
     broadcastAll,
     broadcastPresence,
     broadcastUsers,
     broadcastActiveCalls,
     broadcastCreatorMetrics,
     sendToUser,
+    purgeUserRuntimeState,
+    isUserHardDeleted: (userId: string) => deletedUserTombstones.has(String(userId || '').trim()),
+    resetVolatileRuntimeState,
   };
 
   // =========================================================================
@@ -1277,8 +1967,36 @@ async function startServer() {
   app.use('/api/livekit', createLivekitRouter(runtime));
   app.use('/api/admin', createAdminRouter(runtime));
   app.use('/api/admin', createLivekitAdminRouter(runtime));
+  app.use('/api/admin', createCmsAdminRouter(runtime));
   app.use('/api/users', createUsersAdminRouter(runtime));
   app.use('/api/calls', createCallRouter(runtime));
+  app.use('/api/rewards', createRewardsRouter(runtime));
+  app.use('/api/v1/matches', createMatchesRouter(runtime));
+  app.use('/api/v1/favorites', createFavoritesRouter(runtime));
+  app.use('/api/v1/blocks', createBlocksRouter(runtime));
+  app.use('/api/v1/friends', createFriendsRouter(runtime));
+  app.use('/api/v1/reports', createReportsRouter(runtime));
+  app.use('/api/v1/admin/reports', createAdminReportsRouter(runtime));
+  app.use('/api/v1/reviews', createReviewsRouter(runtime));
+  app.use('/api/v1/feed', createFeedRouter(runtime));
+  app.use('/api/messages', createMessagesRouter(runtime));
+  app.use('/api/v1/finance', createFinanceRouter(runtime));
+
+  // Financial Module: ensure an open settlement period exists for the current cycle
+  if (isSupabaseAdminConfigured()) {
+    ensureOpenPeriod({ at: new Date() })
+      .then((r) => {
+        if (r.success && r.period) {
+          console.log(
+            `[Finance] Open settlement period ready (${r.period.cycleType}) ${r.period.periodStart} → ${r.period.periodEnd}` +
+              (r.created ? ' [created]' : ' [existing]')
+          );
+        } else if (!r.success) {
+          console.warn('[Finance] ensureOpenPeriod on boot failed:', r.error);
+        }
+      })
+      .catch((err) => console.warn('[Finance] ensureOpenPeriod on boot exception:', err?.message || err));
+  }
 
   // =========================================================================
   // USER & PRESENCE SYNCHRONIZATION API ENDPOINTS
@@ -1328,6 +2046,16 @@ async function startServer() {
         }
       }
 
+      if (deletedUserTombstones.has(canonicalId) || deletedUserTombstones.has(String(rawUser.id))) {
+        return res.status(410).json({
+          success: false,
+          error: {
+            message: 'This user was permanently deleted and cannot be recreated via sync.',
+            code: 'USER_HARD_DELETED',
+          },
+        });
+      }
+
       const existing = serverUsers.get(canonicalId) || serverUsers.get(rawUser.id);
       const merged = {
         ...(existing || {}),
@@ -1358,14 +2086,67 @@ async function startServer() {
         updatedUser.hasPasswordSet = true;
 
         if (isSupabaseAdminConfigured()) {
-          upsertProfileAdmin({
+          // Team Leaders are always female + team_leader (never leave Auth trigger as male_user)
+          if (updatedUser.role === 'team_leader' || updatedUser.role === 'agency_manager') {
+            updatedUser.role = updatedUser.role === 'agency_manager' ? 'agency_manager' : 'team_leader';
+            updatedUser.gender = 'female';
+            updatedUser.genderLocked = true;
+          }
+
+          await upsertProfileAdmin({
             ...updatedUser,
             password_hash: hash,
             has_password_set: true,
-          }).catch((e) => console.warn('[Server] Supabase upsert error:', e));
+            role: updatedUser.role,
+            gender: updatedUser.gender,
+            genderLocked: updatedUser.genderLocked,
+          });
 
           if (rawUser.password && updatedUser.email) {
-            updateUserPasswordAdmin(updatedUser.id, rawUser.password, updatedUser.email).catch(() => {});
+            const pwRes = await updateUserPasswordAdmin(
+              updatedUser.id,
+              rawUser.password,
+              updatedUser.email,
+              {
+                role: updatedUser.role,
+                gender: updatedUser.gender === 'female' ? 'female' : updatedUser.gender || 'male',
+                name: updatedUser.name,
+              }
+            );
+            if (pwRes.authUserId) {
+              updatedUser.authId = pwRes.authUserId;
+            }
+
+            // Re-assert after Auth create (trigger historically overwrote TL → male_user)
+            if (updatedUser.role === 'team_leader' || updatedUser.role === 'agency_manager') {
+              const adminClient = getSupabaseAdmin();
+              if (adminClient) {
+                const assertPayload = {
+                  role: updatedUser.role,
+                  gender: 'female',
+                  gender_locked: true,
+                  updated_at: new Date().toISOString(),
+                };
+                await adminClient
+                  .from('profiles')
+                  .update(assertPayload as any)
+                  .eq('id', updatedUser.id);
+                if (cleanEmail) {
+                  await adminClient
+                    .from('profiles')
+                    .update(assertPayload as any)
+                    .ilike('email', cleanEmail);
+                }
+                if (pwRes.authUserId) {
+                  await adminClient
+                    .from('profiles')
+                    .update(assertPayload as any)
+                    .eq('auth_id', pwRes.authUserId);
+                }
+              }
+              updatedUser.gender = 'female';
+              updatedUser.genderLocked = true;
+            }
           }
         }
       } else if (isSupabaseAdminConfigured()) {
@@ -1544,19 +2325,98 @@ async function startServer() {
 
   // POST /api/calls/burn is handled by createCallRouter (requireAuth, server-computed amounts)
 
-  // POST /api/calls/sync - Sync call end status to server
+  // POST /api/calls/sync - Sync call end status + persist call log for platform analytics
   app.post('/api/calls/sync', requireAuth, async (req, res) => {
     try {
-      const { callId, callerId, receiverId, status } = req.body;
-      if (callId && status === 'ended') {
-        activeCalls.delete(callId);
-        if (callerId) presenceMap.set(callerId, getAuthoritativeStatus(callerId));
-        if (receiverId) presenceMap.set(receiverId, getAuthoritativeStatus(receiverId));
-        broadcastPresence();
-        broadcastActiveCalls();
-        broadcastAll({ type: 'call_logs:updated' });
+      const {
+        callId,
+        callerId,
+        receiverId,
+        status,
+        outcome,
+        endedBy,
+        reason,
+        code,
+        durationSeconds,
+        coinsSpent,
+        coinsEarned,
+        teamLeaderEarnedCoins,
+        teamLeaderId,
+        wasFriendCall,
+        callerName,
+        receiverName,
+        startTime,
+        endTime,
+      } = req.body || {};
+
+      if (!callId || status !== 'ended') {
+        return res.status(400).json({ success: false, error: 'callId and status=ended are required' });
       }
-      return res.json({ success: true });
+
+      const profileId = String((req as any).profileId || (req as any).profile?.id || '');
+      const memCall = activeCalls.get(String(callId));
+      const resolvedCallerId = String(callerId || memCall?.callerId || '');
+      const resolvedReceiverId = String(receiverId || memCall?.receiverId || '');
+
+      if (
+        profileId &&
+        resolvedCallerId &&
+        resolvedReceiverId &&
+        profileId !== resolvedCallerId &&
+        profileId !== resolvedReceiverId
+      ) {
+        const role = (req as any).profile?.role;
+        if (role !== 'admin') {
+          return res.status(403).json({ success: false, error: 'Only call participants can sync this call' });
+        }
+      }
+
+      const explicitOutcome = String(outcome || '').trim().toLowerCase();
+      const wasRinging = memCall
+        ? memCall.status === 'ringing'
+        : explicitOutcome === 'missed' ||
+          explicitOutcome === 'declined' ||
+          explicitOutcome === 'cancelled' ||
+          String(reason || '') === 'Ring timeout';
+
+      const result = await finalizeCallEnd({
+        callId: String(callId),
+        call: memCall || null,
+        callerId: resolvedCallerId,
+        receiverId: resolvedReceiverId,
+        wasRinging,
+        endedBy: endedBy || profileId || null,
+        reason: reason || null,
+        code: code || null,
+        outcome: outcome || null,
+        durationSeconds: Number(durationSeconds) || 0,
+        coinsSpent: Number(coinsSpent) || 0,
+        coinsEarned: Number(coinsEarned) || 0,
+        teamLeaderEarnedCoins: Number(teamLeaderEarnedCoins) || 0,
+        teamLeaderId: teamLeaderId || null,
+        wasFriendCall: Boolean(wasFriendCall),
+        callerName,
+        receiverName,
+        startTime,
+        endTime,
+        // If sync wins the race vs WS, notify so the remote party clears ringing UI.
+        // If WS already finalized (no memCall), skip duplicate call:ended toasts.
+        notifyParticipants: Boolean(memCall),
+        broadcastEnded: false,
+      });
+
+      if (resolvedCallerId) presenceMap.set(resolvedCallerId, getAuthoritativeStatus(resolvedCallerId));
+      if (resolvedReceiverId) presenceMap.set(resolvedReceiverId, getAuthoritativeStatus(resolvedReceiverId));
+      broadcastPresence();
+      broadcastActiveCalls();
+      broadcastAll({ type: 'call_logs:updated', callId: String(callId) });
+
+      return res.json({
+        success: true,
+        persisted: result.persisted,
+        outcome: result.status,
+        endReason: result.endReason,
+      });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
     }
@@ -1566,31 +2426,219 @@ async function startServer() {
   // TEAM LEADER DEDICATED REST APIS (Get managed creators, create creator, override rate)
   // ============================================================================
 
-  // GET Managed Creators for Team Leader
+  const isFemaleHostProfile = (u: { gender?: string; role?: string }) =>
+    u.gender === 'female' || (u.role as string) === 'female_creator' || (u.role as string) === 'female_host';
+
+  const DISPOSABLE_CREATOR_EMAIL_SUFFIXES = ['@livecall.app', '@minglecall.local', '@example.com', '@test.local'];
+
+  const resolveTeamLeaderScopeId = (req: express.Request, leader: any): { scopeLeaderId: string; allMode: boolean } => {
+    const isAdmin = leader?.role === 'admin';
+    const allMode = isAdmin && (String(req.query.all || '') === '1' || String(req.query.all || '') === 'true');
+    const queryLeaderId = isAdmin && req.query.leaderId ? String(req.query.leaderId) : '';
+    const scopeLeaderId = allMode ? '' : queryLeaderId || String(leader?.id || (req as any).profileId || '');
+    return { scopeLeaderId, allMode };
+  };
+
+  // GET Managed Creators for Team Leader (ID ownership only — not agencyName)
   app.get('/api/teamleader/creators', requireTeamLeader, (req, res) => {
     try {
       const leader = (req as any).profile;
-      const leaderId = String(leader?.id || (req as any).profileId || '');
-      const agencyName = leader?.agencyName;
       const isAdmin = leader?.role === 'admin';
+      const { scopeLeaderId, allMode } = resolveTeamLeaderScopeId(req, leader);
+      // Admin roster oversight: default to all hosts unless a specific leaderId is requested
+      const listAllMode = allMode || (isAdmin && !req.query.leaderId);
+      const agencyName = leader?.agencyName;
       const allUsers = getFormattedUsers();
 
       const creators = allUsers.filter((u) => {
-        const isFemale = u.gender === 'female' || (u.role as string) === 'female_creator' || (u.role as string) === 'female_host';
-        if (!isFemale) return false;
-        if (isAdmin) return true;
-        return callerOwnsCreator(leader, u);
+        if (!isFemaleHostProfile(u)) return false;
+        if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
+        if (listAllMode) return true;
+        const effectiveLeaderId = scopeLeaderId || String(leader?.id || '');
+        if (u.id === effectiveLeaderId) return false;
+        return ownsCreatorByLeaderId(effectiveLeaderId, u);
       });
 
       return res.json({
         success: true,
         creators,
         count: creators.length,
-        leaderId,
+        leaderId: scopeLeaderId || String(leader?.id || ''),
         agencyName,
+        allMode: listAllMode,
       });
     } catch (err: any) {
       console.error('Error in GET /api/teamleader/creators:', err);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // GET Authoritative Team Leader earnings / agency stats (from call_logs, not host-balance %)
+  app.get('/api/teamleader/stats', requireTeamLeader, async (req, res) => {
+    try {
+      const leader = (req as any).profile;
+      const { scopeLeaderId, allMode } = resolveTeamLeaderScopeId(req, leader);
+      const allUsers = getFormattedUsers();
+
+      const managedCreators = allUsers.filter((u) => {
+        if (!isFemaleHostProfile(u)) return false;
+        if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
+        if (allMode) return true;
+        return ownsCreatorByLeaderId(scopeLeaderId, u);
+      });
+      const managedIds = new Set(managedCreators.map((c) => c.id));
+
+      let totalCalls = 0;
+      let totalMinutes = 0;
+      let hostEarningsCoins = 0;
+      let teamLeaderEarnedCoins = 0;
+      let totalCoinsSpent = 0;
+      let statsSource: 'call_logs' | 'wallet_ledger' | 'profile_fallback' | 'empty' = 'empty';
+
+      let femalePayoutRatioUSD = 0.003;
+      let teamLeaderSharePercent = Number(leader?.commissionPercent) || 10;
+
+      if (isSupabaseAdminConfigured()) {
+        const supabase = getSupabaseAdmin();
+        if (supabase) {
+          const { data: cfg } = await supabase
+            .from('system_configs')
+            .select('coin_usd_peg, female_payout_ratio_usd, team_leader_share_percent')
+            .eq('id', 'default')
+            .maybeSingle();
+          if (cfg) {
+            femalePayoutRatioUSD =
+              Number((cfg as any).coin_usd_peg) ||
+              Number(cfg.female_payout_ratio_usd) ||
+              femalePayoutRatioUSD;
+            teamLeaderSharePercent = Number(cfg.team_leader_share_percent) || teamLeaderSharePercent;
+          }
+
+          let logs: any[] = [];
+
+          if (allMode) {
+            const { data, error: logsErr } = await supabase
+              .from('call_logs')
+              .select(
+                'id, receiver_id, host_id, team_leader_id, team_leader_earned_coins, coins_earned, coins_spent, duration_seconds'
+              )
+              .limit(20000);
+            if (!logsErr && Array.isArray(data)) logs = data;
+          } else if (scopeLeaderId) {
+            const managedIdList = [...managedIds];
+            const { data: byTl, error: tlErr } = await supabase
+              .from('call_logs')
+              .select(
+                'id, receiver_id, host_id, team_leader_id, team_leader_earned_coins, coins_earned, coins_spent, duration_seconds'
+              )
+              .eq('team_leader_id', scopeLeaderId)
+              .limit(20000);
+            if (!tlErr && Array.isArray(byTl)) logs.push(...byTl);
+
+            // Include managed-host sessions that may lack team_leader_id (legacy rows)
+            if (managedIdList.length > 0) {
+              const { data: byReceiver, error: rxErr } = await supabase
+                .from('call_logs')
+                .select(
+                  'id, receiver_id, host_id, team_leader_id, team_leader_earned_coins, coins_earned, coins_spent, duration_seconds'
+                )
+                .in('receiver_id', managedIdList)
+                .limit(20000);
+              if (!rxErr && Array.isArray(byReceiver)) logs.push(...byReceiver);
+            }
+          }
+
+          if (logs.length > 0) {
+            statsSource = 'call_logs';
+            const seen = new Set<string>();
+            for (const row of logs) {
+              const id = String(row.id || '');
+              if (id && seen.has(id)) continue;
+              if (id) seen.add(id);
+
+              const hostId = String(row.receiver_id || row.host_id || '');
+              const logTlId = row.team_leader_id ? String(row.team_leader_id) : '';
+              const belongs =
+                allMode ||
+                (scopeLeaderId && logTlId === scopeLeaderId) ||
+                (hostId && managedIds.has(hostId));
+              if (!belongs) continue;
+
+              totalCalls += 1;
+              totalMinutes += Math.round((Number(row.duration_seconds) || 0) / 60);
+              hostEarningsCoins += Math.max(0, Number(row.coins_earned) || 0);
+              totalCoinsSpent += Math.max(0, Number(row.coins_spent) || 0);
+              // Only count TL coins when this leader was credited (or allMode)
+              if (allMode || (scopeLeaderId && logTlId === scopeLeaderId)) {
+                teamLeaderEarnedCoins += Math.max(0, Number(row.team_leader_earned_coins) || 0);
+              }
+            }
+          }
+
+          // Cross-check / fill from wallet_ledger TL_EARN when logs under-report
+          if (scopeLeaderId && !allMode) {
+            const { data: ledgerRows } = await supabase
+              .from('wallet_ledger')
+              .select('amount')
+              .eq('user_id', scopeLeaderId)
+              .eq('transaction_type', 'TL_EARN')
+              .limit(20000);
+            if (Array.isArray(ledgerRows) && ledgerRows.length > 0) {
+              const ledgerSum = ledgerRows.reduce((acc, r) => acc + Math.max(0, Number(r.amount) || 0), 0);
+              if (ledgerSum > teamLeaderEarnedCoins) {
+                teamLeaderEarnedCoins = ledgerSum;
+                if (statsSource === 'empty') statsSource = 'wallet_ledger';
+              }
+            }
+          }
+        }
+      }
+
+      // Fallback: TL profile earningsCoins (authoritatively updated by burn path)
+      if (teamLeaderEarnedCoins <= 0 && scopeLeaderId && !allMode) {
+        const tlProfile = serverUsers.get(scopeLeaderId) || allUsers.find((u) => u.id === scopeLeaderId);
+        const profileTl = Math.max(0, Number(tlProfile?.earningsCoins) || 0);
+        if (profileTl > 0) {
+          teamLeaderEarnedCoins = profileTl;
+          statsSource = statsSource === 'empty' ? 'profile_fallback' : statsSource;
+        }
+      }
+
+      if (hostEarningsCoins <= 0) {
+        hostEarningsCoins = managedCreators.reduce((acc, c) => acc + Math.max(0, Number(c.earningsCoins) || 0), 0);
+      }
+      if (totalCalls <= 0) {
+        totalCalls = managedCreators.reduce((acc, c) => acc + Math.max(0, Number(c.totalCallsHosted) || 0), 0);
+      }
+      if (totalMinutes <= 0) {
+        totalMinutes = managedCreators.reduce((acc, c) => acc + Math.max(0, Number(c.totalCallMinutes) || 0), 0);
+      }
+
+      const hostEarningsUSD = hostEarningsCoins * femalePayoutRatioUSD;
+      const teamLeaderEarnedUSD = teamLeaderEarnedCoins * femalePayoutRatioUSD;
+
+      return res.json({
+        success: true,
+        data: {
+          leaderId: scopeLeaderId || String(leader?.id || ''),
+          agencyName: leader?.agencyName || null,
+          allMode,
+          managedCreatorCount: managedCreators.length,
+          totalCalls,
+          totalMinutes,
+          hostEarningsCoins,
+          hostEarningsUSD,
+          teamLeaderEarnedCoins,
+          teamLeaderEarnedUSD,
+          totalCoinsSpent,
+          /** Informational burn-split config — do NOT multiply again on teamLeaderEarnedCoins */
+          teamLeaderSharePercent,
+          femalePayoutRatioUSD,
+          statsSource,
+        },
+      });
+    } catch (err: any) {
+      console.error('Error in GET /api/teamleader/stats:', err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -1601,22 +2649,43 @@ async function startServer() {
       const leader = (req as any).profile;
       const leaderId = String(leader?.id || (req as any).profileId || '');
       const payload = req.body;
-      if (!payload || !payload.name) {
+      if (!payload || !String(payload.name || '').trim()) {
         return res.status(400).json({ success: false, error: 'Creator name is required' });
       }
 
-      const validId = payload.id || ensureValidUuid('');
+      const creatorEmail = String(payload.email || '').trim().toLowerCase();
+      if (!creatorEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(creatorEmail)) {
+        return res.status(400).json({ success: false, error: 'A valid email address is required' });
+      }
+      if (DISPOSABLE_CREATOR_EMAIL_SUFFIXES.some((suffix) => creatorEmail.endsWith(suffix))) {
+        return res.status(400).json({
+          success: false,
+          error: 'Disposable or placeholder emails are not allowed. Use a real email address.',
+        });
+      }
+
       const creatorPassword = String(payload.password || '');
       const creatorPasswordError = getPasswordPolicyError(creatorPassword);
       if (creatorPasswordError) {
         return res.status(400).json({ success: false, error: creatorPasswordError });
       }
+
+      const emailTaken = getFormattedUsers().some(
+        (u) => u.email && u.email.trim().toLowerCase() === creatorEmail && u.id !== payload.id
+      );
+      if (emailTaken) {
+        return res.status(409).json({ success: false, error: 'An account with this email already exists' });
+      }
+
+      const validId = payload.id || ensureValidUuid('');
       const passwordHash = await hashPassword(creatorPassword);
 
       // Force female_creator AFTER stripPrivileged (which removes role from body)
       const normalizedCreator = normalizeUserProfile({
         ...stripPrivilegedProfileFields(payload),
         id: validId,
+        name: String(payload.name).trim(),
+        email: creatorEmail,
         gender: 'female',
         genderLocked: true,
         role: 'female_creator',
@@ -1626,7 +2695,7 @@ async function startServer() {
         hasPasswordSet: true,
         teamLeaderId: leaderId,
         createdById: leaderId,
-        agencyName: leader?.agencyName || payload.agencyName,
+        agencyName: leader?.agencyName || null,
         coinEarnOverrideRate: null,
       });
       // Belt-and-suspenders: never persist TL/admin role onto a managed host
@@ -1634,6 +2703,7 @@ async function startServer() {
       normalizedCreator.gender = 'female';
       normalizedCreator.teamLeaderId = leaderId;
       normalizedCreator.createdById = leaderId;
+      normalizedCreator.email = creatorEmail;
 
       (normalizedCreator as any).password_hash = passwordHash;
       serverUsers.set(normalizedCreator.id, normalizedCreator);
@@ -1646,17 +2716,19 @@ async function startServer() {
           has_password_set: true,
         });
 
-        if (normalizedCreator.email) {
-          updateUserPasswordAdmin(
-            normalizedCreator.id,
-            creatorPassword,
-            normalizedCreator.email,
-            {
-              role: 'female_creator',
-              gender: 'female',
-              name: normalizedCreator.name,
-            }
-          ).catch(() => {});
+        const pwRes = await updateUserPasswordAdmin(
+          normalizedCreator.id,
+          creatorPassword,
+          creatorEmail,
+          {
+            role: 'female_creator',
+            gender: 'female',
+            name: normalizedCreator.name,
+          }
+        );
+        if (pwRes.authUserId) {
+          normalizedCreator.authId = pwRes.authUserId;
+          serverUsers.set(normalizedCreator.id, normalizedCreator);
         }
       }
 
@@ -1870,12 +2942,37 @@ async function startServer() {
       }
       const creatorName = existing?.name || 'Female Host';
 
-      serverUsers.delete(creatorId);
-      presenceMap.delete(creatorId);
+      let deleteResult = {
+        userId: String(creatorId),
+        authDeleted: false,
+        profileDeleted: false,
+        r2DeletedCount: 0,
+        warnings: [] as string[],
+      };
 
       if (isSupabaseAdminConfigured()) {
-        await deleteProfileAdmin(creatorId);
+        const { hardDeleteUserCompletely } = await import('./server/userHardDelete');
+        const hard = await hardDeleteUserCompletely(String(creatorId));
+        deleteResult = {
+          userId: hard.userId,
+          authDeleted: hard.authDeleted,
+          profileDeleted: hard.profileDeleted,
+          r2DeletedCount: hard.r2DeletedCount,
+          warnings: hard.warnings,
+        };
+        if (!hard.profileDeleted) {
+          return res.status(500).json({
+            success: false,
+            error: hard.error || 'Failed to delete creator profile',
+            data: deleteResult,
+          });
+        }
+      } else {
+        deleteResult.warnings.push('Supabase admin not configured; deleted from server memory only.');
+        deleteResult.profileDeleted = true;
       }
+
+      purgeUserRuntimeState(String(creatorId));
 
       broadcastAll({
         type: 'users:deleted',
@@ -1883,10 +2980,12 @@ async function startServer() {
         users: getFormattedUsers(),
       });
       broadcastPresence();
+      broadcastUsers();
 
       return res.json({
         success: true,
         message: `Host ${creatorName} was permanently deleted from your agency and the platform.`,
+        data: deleteResult,
       });
     } catch (err: any) {
       console.error('Error in POST /api/teamleader/delete-creator:', err);
@@ -1902,11 +3001,13 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Array of profiles is required' });
       }
 
-      const syncRes = await bulkUpsertProfilesAdmin(profiles);
+      const syncRes = await bulkUpsertProfilesAdmin(
+        profiles.filter((p: any) => p?.id && !deletedUserTombstones.has(String(p.id)))
+      );
 
       // Cache all in serverUsers
       for (const p of profiles) {
-        if (p.id) {
+        if (p.id && !deletedUserTombstones.has(String(p.id))) {
           const existing = serverUsers.get(p.id);
           serverUsers.set(p.id, { ...(existing || {}), ...p });
         }
@@ -1998,92 +3099,196 @@ async function startServer() {
   });
 
   // =========================================================================
-  // USER DAILY REWARDS & QUESTS API ENDPOINTS
+  // USER DAILY REWARDS — handled by createRewardsRouter (/api/rewards/*)
+  // Authoritative claims: claim-streak, claim-mission, claim-master-chest
+  // Progress: /progress (claim flags / coin totals from client are ignored)
   // =========================================================================
-  app.post('/api/rewards/get', requireAuth, async (req, res) => {
-    try {
-      const userId = String((req as any).profileId || (req as any).user?.id || '');
-      if (!userId) return res.status(400).json({ success: false, error: 'Missing userId' });
-      const result = await fetchUserDailyRewardsAdmin(userId);
-      return res.json(result);
-    } catch (err: any) {
-      return res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  app.post('/api/rewards/update', requireAuth, async (req, res) => {
-    try {
-      const callerId = String((req as any).profileId || (req as any).user?.id || '');
-      const record = { ...(req.body || {}), userId: callerId, user_id: callerId };
-      if (!record?.userId && !record?.user_id) {
-        return res.status(400).json({ success: false, error: 'Missing userId' });
-      }
-      const result = await upsertUserDailyRewardsAdmin(record);
-      return res.json(result);
-    } catch (err: any) {
-      return res.status(500).json({ success: false, error: err.message });
-    }
-  });
 
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
   // Process real-time virtual gift transaction
-  app.post('/api/gifts/send', requireAuth, async (req, res) => {
+  app.post('/api/gifts/send', requireAuth, sensitiveActionLimiter, async (req, res) => {
     try {
       const senderId = String((req as any).profileId || (req as any).user?.id || '');
       const { receiverId, giftId } = req.body;
-      const catalogGift = VIRTUAL_GIFTS.find((g) => g.id === giftId);
+
+      // Reject client-supplied earn fields
+      if (req.body?.hostCoinsEarned != null || req.body?.tlCoinsEarned != null) {
+        return res.status(400).json({
+          success: false,
+          error: { message: 'Client must not supply earn amounts', code: 'CLIENT_EARN_FORBIDDEN' },
+        });
+      }
+
+      const catalogGift = await resolveCatalogGiftById(String(giftId || ''), VIRTUAL_GIFTS);
       const giftCost = Number(catalogGift?.coinCost || 0);
       if (!senderId || !receiverId || !catalogGift || giftCost <= 0) {
         return res.status(400).json({ success: false, error: 'Invalid gift.' });
       }
 
       const sender = serverUsers.get(senderId);
-      const receiver = serverUsers.get(receiverId);
+      let receiver = serverUsers.get(receiverId);
 
-      if (!sender || (sender.coinBalance || 0) < giftCost) {
-        return res.status(400).json({ success: false, error: 'Insufficient coins.' });
-      }
-
-      sender.coinBalance = Math.max(0, (sender.coinBalance || 0) - giftCost);
-      serverUsers.set(senderId, sender);
-      if (isSupabaseAdminConfigured()) {
-        upsertProfileAdmin(sender).catch(() => {});
-      }
-
-      const isEligibleHost = receiver && (receiver.role === 'female_creator' || receiver.role === 'female_host' || Boolean(receiver.teamLeaderId || receiver.createdById));
-      const hostCoinsEarned = isEligibleHost ? Math.max(1, Math.round(giftCost * 0.5)) : 0;
-      const tlCoinsEarned = isEligibleHost ? Math.max(0, Math.round(giftCost * 0.1)) : 0;
-      const tlId = receiver?.teamLeaderId || receiver?.createdById;
-
-      if (receiver && hostCoinsEarned > 0 && isEligibleHost) {
-        receiver.earningsCoins = (receiver.earningsCoins || 0) + hostCoinsEarned;
-        receiver.totalGiftsReceivedCount = (receiver.totalGiftsReceivedCount || 0) + 1;
-        serverUsers.set(receiverId, receiver);
-        if (isSupabaseAdminConfigured()) {
-          upsertProfileAdmin(receiver).catch(() => {});
+      // Prefer DB balances when admin client available
+      const supabase = isSupabaseAdminConfigured() ? getSupabaseAdmin() : null;
+      let senderBalance = Number(sender?.coinBalance || 0);
+      if (supabase) {
+        const { data: senderRow } = await supabase
+          .from('profiles')
+          .select('id, coin_balance')
+          .eq('id', senderId)
+          .maybeSingle();
+        if (senderRow) senderBalance = Number(senderRow.coin_balance || 0);
+        if (!receiver) {
+          const { data: recvRow } = await supabase
+            .from('profiles')
+            .select(
+              'id, role, team_leader_id, created_by_id, earnings_coins, total_gifts_received_count, name'
+            )
+            .eq('id', receiverId)
+            .maybeSingle();
+          if (recvRow) {
+            receiver = {
+              id: recvRow.id,
+              role: recvRow.role,
+              teamLeaderId: recvRow.team_leader_id,
+              createdById: recvRow.created_by_id,
+              earningsCoins: recvRow.earnings_coins,
+              totalGiftsReceivedCount: recvRow.total_gifts_received_count,
+              name: recvRow.name,
+            } as any;
+          }
         }
       }
 
+      if (senderBalance < giftCost) {
+        return res.status(400).json({ success: false, error: 'Insufficient coins.' });
+      }
+
+      const isEligibleHost =
+        receiver &&
+        (receiver.role === 'female_creator' ||
+          receiver.role === 'female_host' ||
+          Boolean(receiver.teamLeaderId || receiver.createdById));
+
+      const shares = await loadGiftSharePercents(supabase);
+      const tlId = isEligibleHost
+        ? (receiver?.teamLeaderId || receiver?.createdById || null)
+        : null;
+      const split = computeGiftCoinSplit({
+        giftCost,
+        hostSharePercent: shares.host,
+        tlSharePercent: shares.tl,
+        hasTeamLeader: Boolean(tlId),
+        hostEligible: Boolean(isEligibleHost),
+      });
+      const hostCoinsEarned = split.hostCoins;
+      const tlCoinsEarned = split.tlCoins;
+
+      const newSenderBalance = Math.max(0, senderBalance - giftCost);
+      if (supabase) {
+        const { error: debitErr } = await supabase
+          .from('profiles')
+          .update({ coin_balance: newSenderBalance })
+          .eq('id', senderId)
+          .gte('coin_balance', giftCost);
+        if (debitErr) {
+          console.error('[gifts/send] debit:', debitErr.message);
+          return res.status(500).json({ success: false, error: 'Failed to debit coins.' });
+        }
+      }
+
+      if (sender) {
+        sender.coinBalance = newSenderBalance;
+        serverUsers.set(senderId, sender);
+        if (isSupabaseAdminConfigured()) {
+          upsertProfileAdmin(sender).catch(() => {});
+        }
+      }
+
+      let hostBalanceAfter = Number(receiver?.earningsCoins || 0);
+      if (receiver && hostCoinsEarned > 0 && isEligibleHost) {
+        hostBalanceAfter = hostBalanceAfter + hostCoinsEarned;
+        receiver.earningsCoins = hostBalanceAfter;
+        receiver.totalGiftsReceivedCount = (receiver.totalGiftsReceivedCount || 0) + 1;
+        serverUsers.set(receiverId, receiver);
+        if (supabase) {
+          await supabase
+            .from('profiles')
+            .update({
+              earnings_coins: hostBalanceAfter,
+              total_gifts_received_count: receiver.totalGiftsReceivedCount,
+            })
+            .eq('id', receiverId);
+        } else if (isSupabaseAdminConfigured()) {
+          upsertProfileAdmin(receiver).catch(() => {});
+        }
+        recordCreatorEarnCoins(receiverId, { giftCoins: hostCoinsEarned });
+      }
+
+      let tlBalanceAfter = 0;
       if (tlId && tlCoinsEarned > 0 && isEligibleHost) {
         const tl = serverUsers.get(tlId);
-        if (tl) {
+        if (supabase) {
+          const { data: tlRow } = await supabase
+            .from('profiles')
+            .select('id, earnings_coins')
+            .eq('id', tlId)
+            .maybeSingle();
+          const base = Number(tlRow?.earnings_coins ?? tl?.earningsCoins ?? 0);
+          tlBalanceAfter = base + tlCoinsEarned;
+          await supabase.from('profiles').update({ earnings_coins: tlBalanceAfter }).eq('id', tlId);
+        } else if (tl) {
           tl.earningsCoins = (tl.earningsCoins || 0) + tlCoinsEarned;
+          tlBalanceAfter = tl.earningsCoins;
           serverUsers.set(tlId, tl);
           if (isSupabaseAdminConfigured()) {
             upsertProfileAdmin(tl).catch(() => {});
           }
         }
+        if (tl) {
+          tl.earningsCoins = tlBalanceAfter;
+          serverUsers.set(tlId, tl);
+        }
+      }
+
+      if (isSupabaseAdminConfigured()) {
+        const sourceKey = `gift:${senderId}:${receiverId}:${giftId}:${Date.now()}`;
+        appendGiftEarnLedger({
+          sourceKey,
+          senderUserId: senderId,
+          giftCost,
+          senderBalanceAfter: newSenderBalance,
+          hostUserId: isEligibleHost ? receiverId : null,
+          hostCoins: hostCoinsEarned,
+          hostBalanceAfter,
+          tlUserId: tlId ? String(tlId) : null,
+          tlCoins: tlCoinsEarned,
+          tlBalanceAfter,
+          kind: 'gift',
+          metadata: {
+            giftId,
+            giftName: catalogGift.name,
+            giftCost,
+            senderId,
+            hostSharePercent: split.hostSharePercent,
+            tlSharePercent: split.tlSharePercent,
+            platformCoins: split.platformCoins,
+          },
+        }).catch((err) => console.warn('[gifts/send] wallet_ledger:', err?.message || err));
       }
 
       broadcastUsers();
 
       return res.json({
         success: true,
-        senderBalance: sender?.coinBalance,
-        hostEarnings: isEligibleHost ? receiver?.earningsCoins : 0,
+        senderBalance: newSenderBalance,
+        hostEarnings: isEligibleHost ? hostBalanceAfter : 0,
+        hostCoinsEarned,
+        tlCoinsEarned,
+        platformCoins: split.platformCoins,
       });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });

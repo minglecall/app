@@ -108,6 +108,8 @@ export const QuickMatchRoulette: React.FC<QuickMatchRouletteProps> = ({
     connectCallerToHost,
     disconnectCallerFromHost,
     setCallerQuickMatchBrowsing,
+    blockedUserIds,
+    blockedByUserIds,
   } = useApp();
 
   // Rule: Only female creators and regular females can go live
@@ -202,13 +204,14 @@ export const QuickMatchRoulette: React.FC<QuickMatchRouletteProps> = ({
     return currentUser.gender === 'female' ? ['male'] : ['female'];
   }, [currentUser.interestedIn, currentUser.gender]);
 
-  // Available live hosts or fallback active creators matching user interest
+  // Available live hosts matching user interest (STRICT live-only; no offline filler)
   const candidatePool = useMemo(() => {
     const validUsers = users.filter((u) => {
       if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') {
         return false;
       }
       if (u.id === currentUser.id) return false;
+      if (blockedUserIds.includes(u.id) || blockedByUserIds.includes(u.id)) return false;
 
       const isFemaleTarget = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
       const isMaleTarget = u.gender === 'male' || u.role === 'male_user';
@@ -226,7 +229,7 @@ export const QuickMatchRoulette: React.FC<QuickMatchRouletteProps> = ({
     // Rule: ONLY show female creators/users who are currently live in the Quick Match broadcast pool
     const liveHosts = validUsers.filter((u) => liveHostIds.includes(u.id));
     return { hosts: liveHosts, isFallback: false };
-  }, [users, currentUser.id, userInterestedIn, liveHostIds]);
+  }, [users, currentUser.id, userInterestedIn, liveHostIds, blockedUserIds, blockedByUserIds]);
 
   const currentHost: UserProfile | undefined =
     candidatePool.hosts.length > 0 && currentCandidateIndex < candidatePool.hosts.length
@@ -235,18 +238,29 @@ export const QuickMatchRoulette: React.FC<QuickMatchRouletteProps> = ({
 
   // Active callers queue for Female Host Studio mode (STRICT REAL-TIME ONLY - No mock data, no offline users)
   const hostCallerCandidates = useMemo(() => {
+    const notBlocked = (u: UserProfile) =>
+      !blockedUserIds.includes(u.id) && !blockedByUserIds.includes(u.id);
+
     // 1. Direct callers actively connected to this host right now
     const directCallers = connectedCallersByHost[currentUser.id] || [];
     if (directCallers.length > 0) {
-      return directCallers.filter((u) => u.id !== currentUser.id);
+      return directCallers.filter((u) => u.id !== currentUser.id && notBlocked(u));
     }
 
     // 2. Active callers currently matching in the Quick Match pool
     return users.filter((u) => {
       if (u.id === currentUser.id) return false;
+      if (!notBlocked(u)) return false;
       return activeQuickMatchCallerIds.includes(u.id);
     });
-  }, [connectedCallersByHost, currentUser.id, users, activeQuickMatchCallerIds]);
+  }, [
+    connectedCallersByHost,
+    currentUser.id,
+    users,
+    activeQuickMatchCallerIds,
+    blockedUserIds,
+    blockedByUserIds,
+  ]);
 
   const [hostCallerIndex, setHostCallerIndex] = useState<number>(0);
   const currentHostCaller =
@@ -527,9 +541,9 @@ export const QuickMatchRoulette: React.FC<QuickMatchRouletteProps> = ({
     }, 150);
   };
 
-  // Caller Match / Like Button Handler
-  const handleMatch = () => {
-    if (isLiked) return;
+  // Caller Match / Like Button Handler — persists mutual Quick Match via Express
+  const handleMatch = async () => {
+    if (isLiked || !currentHost) return;
     setIsLiked(true);
 
     if (timerRef.current) {
@@ -539,27 +553,31 @@ export const QuickMatchRoulette: React.FC<QuickMatchRouletteProps> = ({
 
     spawnParticles('💖');
 
-    if (currentHost) {
-      recordQuickMatch(currentHost);
+    const ok = await recordQuickMatch(currentHost);
+    if (ok) {
       showToast('🎉 Mutual Match!', `You and ${currentHost.name} matched!`, 'success');
+    } else {
+      setIsLiked(false);
     }
   };
 
   // Host Match with Caller Button Handler
-  const handleHostMatchWithCaller = (caller: UserProfile) => {
-    recordQuickMatch(caller);
-    spawnParticles('💖');
-    showToast('🎉 Match Saved!', `Matched with ${caller.name}! Added to your Matches tab.`, 'success');
+  const handleHostMatchWithCaller = async (caller: UserProfile) => {
+    const ok = await recordQuickMatch(caller);
+    if (ok) {
+      spawnParticles('💖');
+      showToast('🎉 Match Saved!', `Matched with ${caller.name}! Added to your Matches tab.`, 'success');
+    }
   };
 
-  // Quick Gift Handler
-  const handleSendGift = (gift: { key: string; name: string; icon: string; cost: number }) => {
+  // Quick Gift Handler — routes through /api/gifts/send when catalog-mapped
+  const handleSendGift = async (gift: { key: string; name: string; icon: string; cost: number }) => {
     if (!currentHost) return;
-    const success = sendQuickMatchGift(currentHost.id, gift.key, gift.cost, gift.name);
+    const success = await sendQuickMatchGift(currentHost.id, gift.key, gift.cost, gift.name);
     if (success) {
       spawnParticles(gift.icon);
       if (!isLiked) {
-        handleMatch();
+        await handleMatch();
       }
     }
   };

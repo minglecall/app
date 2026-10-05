@@ -3,7 +3,6 @@ import { AnalyticsDashboardHub } from './AnalyticsDashboardHub';
 
 interface FemaleEarningsDashboardProps {
   onOpenStore?: () => void;
-  onOpenVip?: () => void;
   onStartCall?: (creatorId: string) => void;
   onOpenChat?: (creatorId: string) => void;
   onOpenCallLogs?: () => void;

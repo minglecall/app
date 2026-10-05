@@ -2,16 +2,12 @@ import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Heart,
-  MessageCircle,
   MessageSquare,
   Video,
   Plus,
-  Send,
   Coins,
   Sparkles,
-  Share2,
   X,
-  ImageIcon,
 } from 'lucide-react';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 
@@ -26,15 +22,20 @@ export const MomentsFeed: React.FC<MomentsFeedProps> = ({ onStartCall, onOpenCha
   const [showAddModal, setShowAddModal] = useState(false);
   const [caption, setCaption] = useState('');
   const [mediaUrl, setMediaUrl] = useState('');
+  const [publishing, setPublishing] = useState(false);
+  const [likingId, setLikingId] = useState<string | null>(null);
+  const [tippingId, setTippingId] = useState<string | null>(null);
 
-  const handleCreatePost = (e: React.FormEvent) => {
+  const handleCreatePost = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (publishing) return;
     if (!caption.trim() || !mediaUrl.trim()) {
       showToast('Photo Required', 'Please upload or select a photo for your moment post.', 'warning');
       return;
     }
 
-    addFeedPost({
+    setPublishing(true);
+    const ok = await addFeedPost({
       creatorId: currentUser.id,
       creatorName: currentUser.name,
       creatorAvatar: currentUser.avatarUrl,
@@ -43,19 +44,32 @@ export const MomentsFeed: React.FC<MomentsFeedProps> = ({ onStartCall, onOpenCha
       mediaUrl,
       caption,
     });
+    setPublishing(false);
 
-    setCaption('');
-    setMediaUrl('');
-    setShowAddModal(false);
+    if (ok) {
+      setCaption('');
+      setMediaUrl('');
+      setShowAddModal(false);
+    }
   };
 
-  const handleTipPost = (creatorId: string) => {
+  const handleTipPost = async (creatorId: string, postId: string) => {
+    if (tippingId) return;
     if (currentUser.role === 'male_user' && currentUser.coinBalance < 20) {
       showToast('Insufficient Coins 🪙', 'You need at least 20 coins to tip a moment.', 'error');
       onOpenStore();
       return;
     }
-    tipMomentCreator(creatorId, 20);
+    setTippingId(postId);
+    await tipMomentCreator(creatorId, 20, postId);
+    setTippingId(null);
+  };
+
+  const handleLike = async (postId: string) => {
+    if (likingId) return;
+    setLikingId(postId);
+    await likePost(postId);
+    setLikingId(null);
   };
 
   return (
@@ -145,32 +159,30 @@ export const MomentsFeed: React.FC<MomentsFeedProps> = ({ onStartCall, onOpenCha
               <div className="flex items-center justify-between border-t border-slate-800 pt-3 text-xs">
                 <div className="flex items-center space-x-4">
                   <button
-                    onClick={() => likePost(post.id)}
-                    className={`flex items-center space-x-1.5 font-bold transition-colors ${
+                    type="button"
+                    disabled={likingId === post.id}
+                    onClick={() => void handleLike(post.id)}
+                    className={`flex items-center space-x-1.5 font-bold transition-colors disabled:opacity-60 ${
                       post.isLiked ? 'text-rose-500' : 'text-slate-400 hover:text-white'
                     }`}
                   >
                     <Heart className={`w-4 h-4 ${post.isLiked ? 'fill-current' : ''}`} />
                     <span>{post.likes}</span>
                   </button>
-
-                  <button
-                    onClick={() => onOpenChat(post.creatorId)}
-                    className="flex items-center space-x-1.5 font-bold text-slate-400 hover:text-white"
-                  >
-                    <MessageCircle className="w-4 h-4 text-pink-400" />
-                    <span>{post.commentsCount} Comments</span>
-                  </button>
                 </div>
 
                 {/* Direct Tip Button */}
-                <button
-                  onClick={() => handleTipPost(post.creatorId)}
-                  className="px-3 py-1.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 rounded-xl font-bold text-xs flex items-center space-x-1 hover:bg-amber-500/30 transition-all"
-                >
-                  <Coins className="w-3.5 h-3.5" />
-                  <span>Tip 20 🪙</span>
-                </button>
+                {post.creatorId !== currentUser.id && (
+                  <button
+                    type="button"
+                    disabled={tippingId === post.id}
+                    onClick={() => void handleTipPost(post.creatorId, post.id)}
+                    className="px-3 py-1.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 rounded-xl font-bold text-xs flex items-center space-x-1 hover:bg-amber-500/30 transition-all disabled:opacity-60"
+                  >
+                    <Coins className="w-3.5 h-3.5" />
+                    <span>{tippingId === post.id ? 'Sending…' : 'Tip 20 🪙'}</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -188,7 +200,7 @@ export const MomentsFeed: React.FC<MomentsFeedProps> = ({ onStartCall, onOpenCha
                 </div>
                 <div>
                   <h3 className="font-extrabold text-white text-base">Share a Moment Post</h3>
-                  <p className="text-[11px] text-slate-400">Cloudflare R2 Bucket Storage Sync</p>
+                  <p className="text-[11px] text-slate-400">Stored via R2; published through the Moments API</p>
                 </div>
               </div>
               <button
@@ -200,7 +212,7 @@ export const MomentsFeed: React.FC<MomentsFeedProps> = ({ onStartCall, onOpenCha
               </button>
             </div>
 
-            <form onSubmit={handleCreatePost} className="space-y-4">
+            <form onSubmit={(e) => void handleCreatePost(e)} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-300 mb-2">Moment Photo</label>
                 <UnifiedImageUploader
@@ -234,16 +246,17 @@ export const MomentsFeed: React.FC<MomentsFeedProps> = ({ onStartCall, onOpenCha
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
-                  className="w-1/2 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold text-xs transition-colors cursor-pointer"
+                  disabled={publishing}
+                  className="w-1/2 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold text-xs transition-colors cursor-pointer disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={!caption.trim()}
+                  disabled={!caption.trim() || !mediaUrl.trim() || publishing}
                   className="w-1/2 py-2.5 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white rounded-xl font-bold text-xs shadow-md transition-all cursor-pointer disabled:opacity-50"
                 >
-                  Publish Moment ✨
+                  {publishing ? 'Publishing…' : 'Publish Moment ✨'}
                 </button>
               </div>
             </form>
