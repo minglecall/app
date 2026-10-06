@@ -3,8 +3,9 @@
 ## Model
 
 - **Vercel** serves the Vite SPA + a small set of serverless functions (Hobby-safe; ≤12).
-- Isolated probes (plain CommonJS, crash-isolated): `api/health.js`, `api/ping.js`, `api/r2-test.js`.
-- Other `/api/*` routes: rewrite → `api/router.ts` (handlers in `api/_lib/handlers/`).
+- Isolated probes (plain CommonJS, crash-isolated): `api/health.js`, `api/ping.js`, `api/r2-test.js`, `api/livekit/config.js`, `api/livekit/token.js`, `api/admin/create-team-leader.js`, `api/users.js`.
+- Other `/api/*` routes: rewrite → `api/router.js` (CommonJS modules in `api/_lib/cjs/` — auth, teamleader, presence, messages, calls, gifts, v1 social, storage, admin, creator, rewards).
+- See `docs/VERCEL_API_AUDIT.md` for full coverage and orphaned TS handlers.
 - Public URLs stay `/api/...` (same-origin). Local `npm run dev` still uses Express + `/ws`.
 - **Supabase** is Auth + DB + Realtime (call/presence signaling).
 - **Do not** run a separate Express/WebSocket host for production.

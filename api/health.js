@@ -1,6 +1,6 @@
 /**
  * Deployment readiness probe — isolated CommonJS (Hobby-safe).
- * Kept separate from api/[...path] so a catch-all boot failure cannot break health.
+ * Kept separate from api/router so a catch-all boot failure cannot break health.
  */
 module.exports = function handler(_req, res) {
   const available = {
@@ -9,15 +9,24 @@ module.exports = function handler(_req, res) {
     authVerifyOtp: true,
     authLoginPassword: true,
     users: true,
+    usersSyncAll: true,
+    usersMeDelete: true,
     presence: true,
     messages: true,
     v1Social: true,
     giftsSend: true,
     callsSync: true,
+    callsBurn: true,
     livekit: true,
     storage: true,
+    storagePresigned: true,
     r2Test: true,
     createTeamLeader: true,
+    teamleaderCreators: true,
+    supabaseProfile: true,
+    creator: true,
+    rewards: true,
+    adminInfra: true,
   };
 
   res.statusCode = 200;
@@ -38,7 +47,9 @@ module.exports = function handler(_req, res) {
         ),
         supabaseAnon: Boolean(process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY),
         r2: Boolean(
-          process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY
+          process.env.R2_ACCOUNT_ID &&
+            process.env.R2_ACCESS_KEY_ID &&
+            process.env.R2_SECRET_ACCESS_KEY
         ),
         livekit: Boolean(
           process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
@@ -47,6 +58,7 @@ module.exports = function handler(_req, res) {
       },
       api: {
         mode: 'vercel-same-origin',
+        router: 'cjs',
         available,
         signaling: 'supabase-realtime',
         note: 'Connect minglecall.com to this Vercel project. Leave VITE_API_BASE_URL unset.',

@@ -20,12 +20,9 @@ const DEFAULT_R2_PURGE_PREFIXES = [
 ];
 
 let supabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
-let supabaseServiceKey = (
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.VITE_SUPABASE_ANON_KEY ||
-  process.env.SUPABASE_ANON_KEY ||
-  ''
-).trim();
+// Never fall back to anon/public key — that would silently lose service-role privileges
+// and break RLS-bypass admin mutations (or worse, look "configured" while failing writes).
+let supabaseServiceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
 
 let supabaseAdmin: SupabaseClient | null = null;
 
@@ -73,6 +70,12 @@ export function isSupabaseServiceRoleConfigured(): boolean {
 
 export function getSupabaseAdmin(): SupabaseClient | null {
   if (!isSupabaseAdminConfigured()) return null;
+  // Prefer service_role; warn loudly if a non-service JWT was configured
+  if (!isSupabaseServiceRoleConfigured()) {
+    console.error(
+      '[supabaseAdmin] SUPABASE_SERVICE_ROLE_KEY is missing or not a service_role JWT. Admin mutations will fail under RLS.'
+    );
+  }
   if (!supabaseAdmin) {
     try {
       supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
