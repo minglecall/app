@@ -3,13 +3,28 @@
   "outputDirectory": "dist",
   "framework": null,
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    {
+      "source": "/api/(health|ping|r2-test)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/api/storage/test-connection",
+      "destination": "/api/storage/test-connection"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api/router?path=:path*"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
   ],
   "functions": {
     "api/health.js": { "maxDuration": 10, "memory": 256 },
     "api/ping.js": { "maxDuration": 10, "memory": 256 },
     "api/r2-test.js": { "maxDuration": 30, "memory": 512 },
     "api/storage/test-connection.js": { "maxDuration": 30, "memory": 512 },
-    "api/[...path].ts": { "maxDuration": 30, "memory": 1024 }
+    "api/router.js": { "maxDuration": 30, "memory": 1024 }
   }
 }

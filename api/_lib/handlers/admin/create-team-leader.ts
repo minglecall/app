@@ -11,7 +11,7 @@ import {
   type VercelReq,
   type VercelRes,
 } from '../../vercelAuth';
-import { getPasswordPolicyError } from '../../../../shared/passwordPolicy';
+import { getPasswordPolicyError } from '../../passwordPolicy';
 
 function clean(v: unknown): string {
   return String(v || '')

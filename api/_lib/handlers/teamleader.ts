@@ -12,7 +12,7 @@ import {
   type VercelRes,
 } from '../vercelAuth';
 import { mapProfileRow, isValidEmail } from '../authHelpers';
-import { getPasswordPolicyError } from '../../../shared/passwordPolicy';
+import { getPasswordPolicyError } from '../passwordPolicy';
 
 const DISPOSABLE = ['@livecall.app', '@minglecall.local', '@example.com', '@test.local'];
 

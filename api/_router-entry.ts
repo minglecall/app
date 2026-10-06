@@ -1,15 +1,6 @@
 /**
- * Catch-all for app API routes (Hobby-safe; shared with a few probe functions).
- *
- * Critical probes are SEPARATE CommonJS functions so they never depend on this
- * file booting (avoids FUNCTION_INVOCATION_FAILED for /api/health, /api/ping,
- * /api/r2-test):
- *   - api/health.js
- *   - api/ping.js
- *   - api/r2-test.js
- *   - api/storage/test-connection.js
- *
- * Do not import Express/server.ts here.
+ * Bundled Vercel API router entry (compiled to api/router.js by vercel-build).
+ * Standalone probes stay as api/health.js, api/ping.js, api/r2-test.js.
  */
 import type { VercelReq, VercelRes } from './_lib/vercelAuth';
 
@@ -57,25 +48,33 @@ const AVAILABLE_ROUTES = [
   'GET /api/health (standalone)',
   'GET /api/ping (standalone)',
   'GET|POST /api/r2-test (standalone)',
-  'POST /api/admin/cms/seed-defaults',
+  'GET /api/admin/api-health',
+  'GET|POST /api/admin/infra-config',
   'POST /api/auth/*',
   'GET|POST /api/users',
+  'GET /api/storage/config',
+  'GET|POST /api/livekit/config',
+  'POST /api/livekit/token',
   'ALL /api/v1/*',
   'ALL /api/teamleader/*',
-  'POST /api/livekit/token',
-  'POST /api/storage/presigned-url',
 ];
 
 function pathAfterApi(req: VercelReq): string {
-  const q = (req as any).query?.path;
+  // Prefer rewrite query (?path=admin/api-health) so nested routes survive rewrite → /api/router
+  const q = (req as any).query?.path ?? (req as any).query?.__p;
   if (typeof q === 'string' && q.trim()) {
     return q.replace(/^\/+/, '').replace(/\/+$/, '');
   }
   if (Array.isArray(q) && q.length > 0) {
     return q.map(String).join('/').replace(/^\/+/, '').replace(/\/+$/, '');
   }
+
   try {
     const pathname = new URL(req.url || '', 'http://localhost').pathname;
+    // Ignore /api/router itself when rewrite destination is used without query
+    if (pathname === '/api/router' || pathname === '/api/router/') {
+      return '';
+    }
     return pathname.replace(/^\/api\/?/, '').replace(/\/+$/, '');
   } catch {
     return String(req.url || '')
@@ -103,12 +102,13 @@ function notImplemented(req: VercelReq, res: VercelRes) {
 }
 
 function resolveHandler(path: string): Handler | null {
-  // Probes are handled by dedicated api/*.js functions; do not bind them here.
   if (
+    !path ||
     path === 'health' ||
     path === 'ping' ||
     path === 'r2-test' ||
-    path === 'storage/test-connection'
+    path === 'storage/test-connection' ||
+    path === 'router'
   ) {
     return null;
   }
@@ -170,7 +170,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
 
     return await matched(req, res);
   } catch (err: any) {
-    console.error('[api/[...path]]', err);
+    console.error('[api/router]', pathAfterApi(req), err);
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');

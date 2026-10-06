@@ -4,7 +4,7 @@
 
 - **Vercel** serves the Vite SPA + a small set of serverless functions (Hobby-safe; ≤12).
 - Isolated probes (plain CommonJS, crash-isolated): `api/health.js`, `api/ping.js`, `api/r2-test.js`.
-- Other `/api/*` routes: `api/[...path].ts` → handlers in `api/_lib/handlers/`.
+- Other `/api/*` routes: rewrite → bundled `api/router.js` (built from `api/_router-entry.ts` during `vercel-build`).
 - Public URLs stay `/api/...` (same-origin). Local `npm run dev` still uses Express + `/ws`.
 - **Supabase** is Auth + DB + Realtime (call/presence signaling).
 - **Do not** run a separate Express/WebSocket host for production.

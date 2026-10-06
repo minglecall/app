@@ -26,6 +26,8 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       return sendJson(res, auth.status, { success: false, error: auth.error?.message || 'Unauthorized', ...auth.error });
     }
 
+    // Dynamic import — esbuild still bundles server/r2Storage into api/router.js;
+    // AWS SDK stays external (see scripts/bundle-vercel-api.mjs).
     const {
       generateR2PresignedUploadUrl,
       isR2Configured,

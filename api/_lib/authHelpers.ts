@@ -3,7 +3,7 @@
  */
 import { createClient } from '@supabase/supabase-js';
 import { createServiceClient, getSupabaseEnv } from './vercelAuth';
-import { getPasswordPolicyError } from '../../shared/passwordPolicy';
+import { getPasswordPolicyError } from './passwordPolicy';
 
 export function isValidEmail(email: unknown): email is string {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
