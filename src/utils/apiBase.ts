@@ -1,8 +1,7 @@
 /**
- * Split-deploy URL helpers.
- * - Local / same-origin: leave VITE_API_BASE_URL empty → relative `/api` and `/ws`
- * - Vercel SPA + Node API: set VITE_API_BASE_URL=https://api.minglecall.com (no trailing slash)
- * - Optional VITE_WS_URL=wss://api.minglecall.com/ws (defaults from API base)
+ * Split-deploy URL helpers (optional override).
+ * Default production path: Vercel-only same-origin `/api` + Supabase Realtime (leave VITE_API_BASE_URL unset).
+ * Optional: VITE_API_BASE_URL + VITE_WS_URL for a separate Node API host.
  */
 
 function trimSlash(url: string): string {
@@ -62,5 +61,9 @@ export function getWsUrl(): string {
 }
 
 export function getDeployModeLabel(): string {
-  return isSplitDeploy() ? 'split (Vercel SPA → Node API)' : 'same-origin';
+  if (isSplitDeploy()) return 'split (Vercel SPA → Node API)';
+  if (typeof import.meta !== 'undefined' && import.meta.env?.PROD) {
+    return 'vercel-only (same-origin /api + Realtime)';
+  }
+  return 'same-origin (local Express + /ws)';
 }

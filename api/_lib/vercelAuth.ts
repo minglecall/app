@@ -138,7 +138,7 @@ export async function requireAdminFromBearer(
   req: IncomingMessage
 ): Promise<{ ok: true; userId: string; email?: string } | { ok: false; status: number; error: any }> {
   const auth = await requireAuthFromBearer(req);
-  if (!auth.ok) return auth;
+  if (auth.ok === false) return auth;
 
   const isAdmin =
     auth.role === 'admin' ||
@@ -157,6 +157,50 @@ export async function requireAdminFromBearer(
     ok: true,
     userId: auth.profileId,
     email: auth.email,
+  };
+}
+
+export async function requireTeamLeaderFromBearer(
+  req: IncomingMessage
+): Promise<
+  | { ok: true; userId: string; profileId: string; role: string; email?: string; user: any; profile: any }
+  | { ok: false; status: number; error: any }
+> {
+  const auth = await requireAuthFromBearer(req);
+  if (auth.ok === false) return auth;
+
+  const role = String(auth.role || '').toLowerCase();
+  const allowed =
+    role === 'team_leader' ||
+    role === 'agency_manager' ||
+    role === 'admin' ||
+    auth.email === 'admin@livecall.app' ||
+    auth.email === 'superadmin@minglecall.com';
+
+  if (!allowed) {
+    return {
+      ok: false,
+      status: 403,
+      error: { message: 'Team leader role required.', code: 'FORBIDDEN' },
+    };
+  }
+
+  // Load fuller profile for agencyName / commission
+  const client = createServiceClient();
+  let profile = auth.profile;
+  if (client) {
+    const { data } = await client.from('profiles').select('*').eq('id', auth.profileId).maybeSingle();
+    if (data) profile = data;
+  }
+
+  return {
+    ok: true,
+    userId: auth.userId,
+    profileId: auth.profileId,
+    role: role || String(profile?.role || ''),
+    email: auth.email,
+    user: auth.user,
+    profile,
   };
 }
 

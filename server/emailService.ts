@@ -114,7 +114,7 @@ export function generateSixDigitOtp(): string {
   return digits.toString();
 }
 
-// Store OTP with 10-minute expiry
+// Store OTP with 10-minute expiry (memory + durable DB when Supabase is configured)
 export function saveOtp(email: string, code: string, metadata?: { name?: string; role?: string }): void {
   const cleanEmail = email.trim().toLowerCase();
   otpStore.set(cleanEmail, {
@@ -125,6 +125,19 @@ export function saveOtp(email: string, code: string, metadata?: { name?: string;
     expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
     attempts: 0,
   });
+  // Fire-and-forget durable write for Vercel / multi-instance
+  void (async () => {
+    try {
+      const { getSupabaseAdmin, isSupabaseAdminConfigured } = await import('./supabaseAdmin');
+      if (!isSupabaseAdminConfigured()) return;
+      const client = getSupabaseAdmin();
+      if (!client) return;
+      const { saveOtpDb } = await import('../api/_lib/otpDb');
+      await saveOtpDb(client, cleanEmail, code, metadata);
+    } catch (e: any) {
+      console.warn('[Email Service] auth_otps persist notice:', e?.message || e);
+    }
+  })();
 }
 
 // Verify OTP - Strictly matching the 6-digit OTP code sent to user email
@@ -132,35 +145,70 @@ export function verifyStoredOtp(email: string, inputCode: string): { success: bo
   const cleanEmail = email.trim().toLowerCase();
   const stored = otpStore.get(cleanEmail);
 
-  if (!stored) {
-    return { success: false, error: 'No active verification code found for this email. Please request a new code.' };
+  if (stored) {
+    if (Date.now() > stored.expiresAt) {
+      otpStore.delete(cleanEmail);
+    } else if (stored.attempts >= 5) {
+      otpStore.delete(cleanEmail);
+      return { success: false, error: 'Too many incorrect attempts. Please request a fresh verification code.' };
+    } else {
+      stored.attempts += 1;
+      if (stored.code === hashOtp(inputCode)) {
+        otpStore.delete(cleanEmail);
+        return {
+          success: true,
+          metadata: {
+            email: stored.email,
+            name: stored.name,
+            role: stored.role,
+          },
+        };
+      }
+      return { success: false, error: `Invalid verification code. ${5 - stored.attempts} attempt(s) remaining.` };
+    }
   }
 
-  if (Date.now() > stored.expiresAt) {
-    otpStore.delete(cleanEmail);
-    return { success: false, error: 'The verification code has expired. Please request a new one.' };
+  // Memory miss — caller should use verifyStoredOtpAsync for DB on Vercel
+  return { success: false, error: 'No active verification code found for this email. Please request a new code.' };
+}
+
+/** Async verify: memory first, then auth_otps table (required on Vercel). */
+export async function verifyStoredOtpAsync(
+  email: string,
+  inputCode: string
+): Promise<{ success: boolean; error?: string; metadata?: any }> {
+  const mem = verifyStoredOtp(email, inputCode);
+  if (mem.success) return mem;
+  // If memory said invalid code (not "no active"), keep that
+  if (mem.error && !/No active verification code/i.test(mem.error) && !/expired/i.test(mem.error || '')) {
+    // attempts remaining style — only skip DB if we had a memory entry that failed match
+    // (verifyStoredOtp already deleted expired). Re-check DB when "No active".
   }
-
-  if (stored.attempts >= 5) {
-    otpStore.delete(cleanEmail);
-    return { success: false, error: 'Too many incorrect attempts. Please request a fresh verification code.' };
+  if (mem.error && /No active verification code|expired/i.test(mem.error)) {
+    try {
+      const { getSupabaseAdmin, isSupabaseAdminConfigured } = await import('./supabaseAdmin');
+      if (!isSupabaseAdminConfigured()) return mem;
+      const client = getSupabaseAdmin();
+      if (!client) return mem;
+      const { verifyOtpDb } = await import('../api/_lib/otpDb');
+      return await verifyOtpDb(client, email, inputCode);
+    } catch (e: any) {
+      return { success: false, error: e?.message || mem.error };
+    }
   }
-
-  stored.attempts += 1;
-
-  if (stored.code === hashOtp(inputCode)) {
-    otpStore.delete(cleanEmail);
-    return {
-      success: true,
-      metadata: {
-        email: stored.email,
-        name: stored.name,
-        role: stored.role,
-      },
-    };
+  // Memory had wrong code — also try DB in case another instance stored it
+  try {
+    const { getSupabaseAdmin, isSupabaseAdminConfigured } = await import('./supabaseAdmin');
+    if (!isSupabaseAdminConfigured()) return mem;
+    const client = getSupabaseAdmin();
+    if (!client) return mem;
+    const { verifyOtpDb } = await import('../api/_lib/otpDb');
+    const db = await verifyOtpDb(client, email, inputCode);
+    if (db.success) return db;
+  } catch {
+    // ignore
   }
-
-  return { success: false, error: `Invalid verification code. ${5 - stored.attempts} attempt(s) remaining.` };
+  return mem;
 }
 
 // Check if SMTP is configured in environment or runtime

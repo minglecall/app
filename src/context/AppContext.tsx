@@ -49,6 +49,7 @@ import {
   INITIAL_CREATOR_REVIEWS,
 } from '../constants/appDefaults';
 import { authFetch, getAccessToken, apiUrl, getWsUrl } from '../utils/apiClient';
+import { RealtimeSignaling, shouldUseRealtimeSignaling } from '../services/realtimeSignaling';
 import {
   fetchProfilesFromSupabase,
   upsertProfileToSupabase,
@@ -724,9 +725,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (r) => r.receiverId === currentUser.id && r.status === 'pending'
   ).length;
 
-  // Real-time WebSockets Engine for Multi-Device Signaling & Presence
+  // Real-time signaling: Supabase Realtime on Vercel; WebSocket /ws for local Express
   const wsRef = useRef<WebSocket | null>(null);
+  const realtimeRef = useRef<RealtimeSignaling | null>(null);
   const wsAuthenticatedRef = useRef(false);
+  const signalSend = (data: Record<string, any>) => {
+    if (realtimeRef.current?.isConnected()) {
+      void realtimeRef.current.send(data);
+      return;
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(data));
+    }
+  };
+  const isSignalOpen = () =>
+    Boolean(realtimeRef.current?.isConnected()) ||
+    Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN);
   const wsConnectRef = useRef<() => void>(() => {});
   const pendingCallReceiverRef = useRef<string | null>(null);
   const showToastRef = useRef<(title: string, message: string, type?: 'success' | 'error' | 'info' | 'warning') => void>(
@@ -2359,6 +2373,54 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return;
       }
 
+      // Prefer Supabase Realtime on Vercel (no persistent /ws)
+      if (shouldUseRealtimeSignaling() && !realtimeRef.current?.isConnected()) {
+        const rt = realtimeRef.current || new RealtimeSignaling();
+        realtimeRef.current = rt;
+        void (async () => {
+          const accessToken = accessTokenRef.current || (await getAccessToken());
+          if (!accessToken || isCancelled) return;
+          const ok = await rt.connect(currentUserIdRef.current, accessToken, (data) => {
+            if (isCancelled || isResettingRef.current) return;
+            try {
+              if (data.type === 'presence:sync' && data.state) {
+                const state = data.state as Record<string, any[]>;
+                setUsers((prev) => {
+                  let changed = false;
+                  const onlineIds = new Set<string>();
+                  Object.values(state).forEach((arr) => {
+                    (arr || []).forEach((p: any) => {
+                      if (p?.userId) onlineIds.add(String(p.userId));
+                    });
+                  });
+                  const next = prev.map((u) => {
+                    if (u.id === currentUserIdRef.current) return u;
+                    const live = getUserCallStatus(u.id, onlineIds.has(u.id) ? 'online' : 'offline');
+                    if (u.onlineStatus !== live) {
+                      changed = true;
+                      return { ...u, onlineStatus: live };
+                    }
+                    return u;
+                  });
+                  return changed ? next : prev;
+                });
+                return;
+              }
+              const bridge = (window as any).__mingleDeliverSignal as ((d: any) => void) | undefined;
+              if (bridge) bridge(data);
+            } catch (e) {
+              console.warn('[Realtime] signal handler error', e);
+            }
+          });
+          if (!ok && !isCancelled && retryAttempt < 5) {
+            setTimeout(() => connect(retryAttempt + 1), 500 * (retryAttempt + 1));
+          }
+        })();
+        // Continue to register the shared signal deliverer below (no native WebSocket on Vercel)
+      }
+
+      const useNativeWs = !shouldUseRealtimeSignaling();
+      if (useNativeWs) {
       const wsUrl = getWsUrl();
 
       ws = new WebSocket(wsUrl);
@@ -2387,31 +2449,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           prevUserIdRef.current = currentUserIdRef.current;
         })();
       };
+      }
 
-      ws.onmessage = (event) => {
+      // Shared deliverer for WebSocket + Realtime broadcast payloads
+      const runDeliverRegistration = () => {
+      const deliver = (data: any) => {
         if (isCancelled || isResettingRef.current) return;
         try {
-          const data = JSON.parse(event.data);
-
           if (data.type === 'auth:ok') {
             wsAuthenticatedRef.current = true;
             const me = usersRef.current.find((u) => u.id === currentUserIdRef.current);
             if (me?.role === 'admin') {
-              ws?.send(JSON.stringify({ type: 'admin:get_active_calls' }));
+              signalSend({ type: 'admin:get_active_calls' });
             }
-            ws?.send(JSON.stringify({ type: 'heartbeat', userId: currentUserIdRef.current }));
+            signalSend({ type: 'heartbeat', userId: currentUserIdRef.current });
 
             // Flush a call that was waiting for signaling to come online
             const pendingReceiver = pendingCallReceiverRef.current;
-            if (pendingReceiver && wsRef.current?.readyState === WebSocket.OPEN) {
+            if (pendingReceiver && isSignalOpen()) {
               pendingCallReceiverRef.current = null;
-              wsRef.current.send(
-                JSON.stringify({
+              signalSend({
                   type: 'call:initiate',
                   callerId: currentUserIdRef.current,
                   receiverId: pendingReceiver,
-                })
-              );
+                });
               const receiver = usersRef.current.find((u) => u.id === pendingReceiver);
               showToastRef.current(
                 'Calling... 📞',
@@ -3004,17 +3065,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           console.error('WS Parse Error:', e);
         }
       };
-
-      ws.onclose = () => {
-        wsAuthenticatedRef.current = false;
-        if (!isCancelled && !isResettingRef.current && isLoggedInRef.current) {
-          setTimeout(() => connect(0), 1500);
-        }
+      (window as any).__mingleDeliverSignal = deliver;
+      if (useNativeWs && ws) {
+        ws.onmessage = (event) => {
+          try {
+            const raw = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+            deliver(raw);
+          } catch (e) {
+            console.error('WS Parse Error:', e);
+          }
+        };
+        ws.onclose = () => {
+          wsAuthenticatedRef.current = false;
+          if (!isCancelled && !isResettingRef.current && isLoggedInRef.current) {
+            setTimeout(() => connect(0), 1500);
+          }
+        };
+        ws.onerror = () => {
+          // Browser fires error before close for failed handshakes; reconnect handled in onclose
+        };
+      }
       };
 
-      ws.onerror = () => {
-        // Browser fires error before close for failed handshakes; reconnect handled in onclose
-      };
+      runDeliverRegistration();
     }
 
     wsConnectRef.current = () => connect(0);
@@ -3029,19 +3102,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       syncUserDirectory();
     }
 
-    // 1. WebSocket heartbeat — primary liveness signal to the signaling server
+    // 1. Signaling heartbeat — WS or Supabase Realtime
     heartbeatTimer = setInterval(() => {
       if (isResettingRef.current) return;
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'heartbeat', userId: currentUserId }));
+      if (isSignalOpen()) {
+        signalSend({ type: 'heartbeat', userId: currentUserId });
       }
     }, 5000);
 
-    // 2. HTTP presence fallback only when WS is down (avoids fragile 3s poll spam)
+    // 2. HTTP presence fallback only when signaling is down
     presenceSyncTimer = setInterval(() => {
       if (isResettingRef.current) return;
-      const wsOpen = wsRef.current && wsRef.current.readyState === WebSocket.OPEN;
-      if (!wsOpen) {
+      if (!isSignalOpen()) {
         syncPresenceDirect();
       }
     }, 15000);
@@ -3065,8 +3137,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         broadcastChannel = new BroadcastChannel('livecall_presence_sync_channel');
         broadcastChannel.onmessage = (event) => {
           if (event.data?.type === 'presence_updated' || event.data?.type === 'user_switched') {
-            // Prefer WS; HTTP only as reconnect aid
-            if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+            if (!isSignalOpen()) {
               syncPresenceDirect();
             }
             syncSupabaseStatusCycle();
@@ -3078,7 +3149,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'livecall_presence_trigger' || e.key === 'livecall_current_user_id') {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        if (!isSignalOpen()) {
           syncPresenceDirect();
         }
         syncSupabaseStatusCycle();
@@ -3088,8 +3159,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'heartbeat', userId: currentUserIdRef.current }));
+        if (isSignalOpen()) {
+          signalSend({ type: 'heartbeat', userId: currentUserIdRef.current });
         } else {
           syncPresenceDirect();
         }
@@ -3186,7 +3257,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('beforeunload', handleUnload);
       window.removeEventListener('pagehide', handleUnload);
+      try {
+        delete (window as any).__mingleDeliverSignal;
+      } catch {
+        // ignore
+      }
       if (ws) ws.close();
+      try {
+        realtimeRef.current?.disconnect();
+      } catch {
+        // ignore
+      }
+      realtimeRef.current = null;
       unsubscribeSupabaseChat();
     };
   }, [currentUserId, isLoggedIn]);

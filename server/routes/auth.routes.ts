@@ -4,6 +4,7 @@ import {
   generateSixDigitOtp,
   sendOtpEmail,
   verifyStoredOtp,
+  verifyStoredOtpAsync,
   getSmtpConfig,
   getShowOtpInForm,
 } from '../emailService';
@@ -384,7 +385,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         }
       }
 
-      const verifyResult = verifyStoredOtp(email, token.trim());
+      const verifyResult = await verifyStoredOtpAsync(email, token.trim());
       if (!verifyResult.success) {
         return res.status(400).json({
           success: false,
@@ -582,7 +583,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
       }
 
       const cleanEmail = email.trim().toLowerCase();
-      const verifyResult = verifyStoredOtp(cleanEmail, token.trim());
+      const verifyResult = await verifyStoredOtpAsync(cleanEmail, token.trim());
       if (!verifyResult.success) {
         return res.status(400).json({
           success: false,

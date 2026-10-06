@@ -1,35 +1,23 @@
 /**
- * Deployment readiness probe — lists which API surfaces exist on this Vercel build.
+ * Deployment readiness probe — Vercel-only same-origin APIs + env flags.
  */
 module.exports = function handler(_req, res) {
   const available = {
     health: true,
-    ping: true,
+    authSendOtp: true,
+    authVerifyOtp: true,
+    authLoginPassword: true,
+    users: true,
+    presence: true,
+    messages: true,
+    v1Social: true,
+    giftsSend: true,
+    callsSync: true,
+    livekit: true,
+    storage: true,
     r2Test: true,
-    adminInfraConfig: true,
-    adminCreateTeamLeader: true,
-    livekitConfig: true,
-    livekitToken: true,
-    storageConfig: true,
-    storagePresignedUrl: true,
-    storageTestConnection: true,
+    createTeamLeader: true,
   };
-
-  const missingCritical = [
-    '/api/auth/* (OTP, login-password, register-bootstrap, reset-password)',
-    '/api/users (GET/POST profile sync)',
-    '/api/messages/*',
-    '/api/v1/matches|favorites|friends|blocks|feed|reviews|reports|finance',
-    '/api/calls/*',
-    '/api/gifts/send',
-    '/api/presence|/ws (WebSocket signaling)',
-    '/api/teamleader/*',
-    '/api/rewards/*',
-    '/api/creator/*',
-    '/api/admin/* (except infra-config + create-team-leader)',
-    '/api/setup/*',
-    '/api/supabase/*',
-  ];
 
   res.statusCode = 200;
   res.setHeader('Content-Type', 'application/json');
@@ -38,6 +26,7 @@ module.exports = function handler(_req, res) {
     JSON.stringify({
       success: true,
       ok: true,
+      mode: 'vercel',
       vercel: Boolean(process.env.VERCEL),
       node: process.version,
       time: new Date().toISOString(),
@@ -53,13 +42,13 @@ module.exports = function handler(_req, res) {
         livekit: Boolean(
           process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
         ),
+        smtp: Boolean(process.env.RESEND_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_PASS)),
       },
       api: {
-        mode: 'vercel-partial',
+        mode: 'vercel-same-origin',
         available,
-        missingCritical,
-        recommendation:
-          'For full product (calls, chat, matching, OTP, presence): host Express+ws on a Node VPS/Railway and point api.minglecall.com there; keep the SPA on Vercel (minglecall.com).',
+        signaling: 'supabase-realtime',
+        note: 'Connect minglecall.com to this Vercel project. Leave VITE_API_BASE_URL unset. Enable Supabase Realtime for profiles/messages.',
       },
     })
   );

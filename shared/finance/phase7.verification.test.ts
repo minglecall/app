@@ -218,6 +218,9 @@ describe('Phase 7 — period close snapshot under peg', () => {
     });
     const config = {
       coinUsdPeg: 0.004,
+      femalePayoutRatioUsd: 0.004,
+      coinToUsdRatio: 0.004,
+      settlementEnabled: true,
       periodCloseUtcTime: '18:00',
       creatorTargetCycle: 'weekly',
       burn,

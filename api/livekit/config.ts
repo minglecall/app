@@ -19,7 +19,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     }
 
     const auth = await requireAdminFromBearer(req);
-    if (!auth.ok) {
+    if (auth.ok === false) {
       return sendJson(res, auth.status, { success: false, error: auth.error });
     }
 

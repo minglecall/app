@@ -25,7 +25,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     }
 
     const auth = await requireAuthFromBearer(req);
-    if (!auth.ok) {
+    if (auth.ok === false) {
       return sendJson(res, auth.status, { error: auth.error?.message || 'Unauthorized', ...auth.error });
     }
 

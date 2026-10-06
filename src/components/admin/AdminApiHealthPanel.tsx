@@ -16,6 +16,8 @@ import {
   Check,
 } from 'lucide-react';
 import { authFetch, apiFetch, getApiBaseUrl, getWsUrl, getDeployModeLabel, isSplitDeploy } from '../../utils/apiClient';
+import { isSupabaseConfigured, supabase } from '../../lib/supabase';
+import { shouldUseRealtimeSignaling } from '../../services/realtimeSignaling';
 
 type CheckRow = {
   id: string;
@@ -28,6 +30,7 @@ type CheckRow = {
 
 type HealthPayload = {
   success?: boolean;
+  ok?: boolean;
   mode?: string;
   status?: string;
   timestamp?: string;
@@ -38,6 +41,7 @@ type HealthPayload = {
   error?: { message?: string; code?: string } | string;
   vercel?: unknown;
   api?: unknown;
+  env?: Record<string, boolean>;
 };
 
 function StatusDot({ ok, pending }: { ok?: boolean; pending?: boolean }) {
@@ -46,17 +50,28 @@ function StatusDot({ ok, pending }: { ok?: boolean; pending?: boolean }) {
   return <span className="inline-block w-2.5 h-2.5 rounded-full bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]" />;
 }
 
-async function probeWs(timeoutMs = 4000): Promise<CheckRow> {
-  const url = getWsUrl();
+async function probeRealtime(timeoutMs = 5000): Promise<CheckRow> {
   const t0 = Date.now();
+  if (!isSupabaseConfigured()) {
+    return {
+      id: 'realtime-client',
+      label: 'Supabase Realtime (browser)',
+      ok: false,
+      latencyMs: Date.now() - t0,
+      detail: 'Supabase client not configured (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)',
+      source: 'client',
+    };
+  }
+
   return new Promise((resolve) => {
     let settled = false;
-    let ws: WebSocket | null = null;
+    const channel = supabase.channel(`admin-health-probe-${Date.now()}`);
     const finish = (row: CheckRow) => {
       if (settled) return;
       settled = true;
+      window.clearTimeout(timer);
       try {
-        ws?.close();
+        supabase.removeChannel(channel);
       } catch {
         // ignore
       }
@@ -64,51 +79,97 @@ async function probeWs(timeoutMs = 4000): Promise<CheckRow> {
     };
     const timer = window.setTimeout(() => {
       finish({
-        id: 'ws-client',
-        label: 'WebSocket connect (browser)',
+        id: 'realtime-client',
+        label: 'Supabase Realtime (browser)',
         ok: false,
         latencyMs: Date.now() - t0,
-        detail: `Timed out connecting to ${url}`,
+        detail: 'Timed out subscribing to Realtime channel',
         source: 'client',
       });
     }, timeoutMs);
 
     try {
-      ws = new WebSocket(url);
-      ws.onopen = () => {
-        window.clearTimeout(timer);
-        finish({
-          id: 'ws-client',
-          label: 'WebSocket connect (browser)',
-          ok: true,
-          latencyMs: Date.now() - t0,
-          detail: `Opened ${url}`,
-          source: 'client',
-        });
-      };
-      ws.onerror = () => {
-        window.clearTimeout(timer);
-        finish({
-          id: 'ws-client',
-          label: 'WebSocket connect (browser)',
-          ok: false,
-          latencyMs: Date.now() - t0,
-          detail: `Failed to open ${url}`,
-          source: 'client',
-        });
-      };
+      channel.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          finish({
+            id: 'realtime-client',
+            label: 'Supabase Realtime (browser)',
+            ok: true,
+            latencyMs: Date.now() - t0,
+            detail: 'Channel subscribed (Broadcast/Presence path for call signaling)',
+            source: 'client',
+          });
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          finish({
+            id: 'realtime-client',
+            label: 'Supabase Realtime (browser)',
+            ok: false,
+            latencyMs: Date.now() - t0,
+            detail: `Realtime status: ${status}`,
+            source: 'client',
+          });
+        }
+      });
     } catch (e: any) {
-      window.clearTimeout(timer);
       finish({
-        id: 'ws-client',
-        label: 'WebSocket connect (browser)',
+        id: 'realtime-client',
+        label: 'Supabase Realtime (browser)',
         ok: false,
         latencyMs: Date.now() - t0,
-        detail: e?.message || 'WebSocket constructor failed',
+        detail: e?.message || 'Realtime subscribe failed',
         source: 'client',
       });
     }
   });
+}
+
+async function probeRoute(
+  id: string,
+  label: string,
+  path: string,
+  opts?: { auth?: boolean; method?: string }
+): Promise<CheckRow> {
+  const t0 = Date.now();
+  try {
+    const res = opts?.auth
+      ? await authFetch(path, { method: opts.method || 'GET' })
+      : await apiFetch(path, { method: opts?.method || 'GET' });
+    const text = await res.text();
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = JSON.parse(text);
+      if (data?.error?.code === 'VERCEL_ROUTE_NOT_IMPLEMENTED') {
+        detail = '501 not implemented on Vercel';
+      } else if (data?.mode) {
+        detail = `mode=${data.mode}`;
+      } else if (data?.error?.message) {
+        detail = String(data.error.message).slice(0, 120);
+      } else if (res.ok) {
+        detail = 'OK';
+      }
+    } catch {
+      detail = text.slice(0, 80) || detail;
+    }
+    // 401/403/400 still prove the serverless handler exists (not 501 catch-all)
+    const ok = res.ok || res.status === 401 || res.status === 403 || res.status === 400;
+    return {
+      id,
+      label,
+      ok: ok && res.status !== 501,
+      latencyMs: Date.now() - t0,
+      detail,
+      source: 'client',
+    };
+  } catch (e: any) {
+    return {
+      id,
+      label,
+      ok: false,
+      latencyMs: Date.now() - t0,
+      detail: e?.message || 'unreachable',
+      source: 'client',
+    };
+  }
 }
 
 export const AdminApiHealthPanel: React.FC = () => {
@@ -123,6 +184,7 @@ export const AdminApiHealthPanel: React.FC = () => {
   const apiBase = getApiBaseUrl() || '(same-origin)';
   const wsUrl = getWsUrl();
   const mode = getDeployModeLabel();
+  const useRealtime = shouldUseRealtimeSignaling();
 
   const runProbes = useCallback(async () => {
     setRunning(true);
@@ -142,29 +204,19 @@ export const AdminApiHealthPanel: React.FC = () => {
           data = { success: false, error: text.slice(0, 200) };
         }
         setPublicHealth(data);
+        const looksLikeHtml = /^\s*</.test(text);
         nextClient.push({
           id: 'public-health',
           label: 'GET /api/health',
-          ok: res.ok && (data.success !== false || data.status === 'ok'),
+          ok: res.ok && !looksLikeHtml && (data.success !== false || data.status === 'ok' || data.ok === true),
           latencyMs: Date.now() - t0,
-          detail:
-            data.mode === 'express'
-              ? `Express · ${JSON.stringify(data.services || {})}`
-              : data.mode
-                ? `mode=${data.mode}`
-                : `HTTP ${res.status}`,
+          detail: looksLikeHtml
+            ? 'Got HTML (DNS may still point at parking, not Vercel)'
+            : data.mode
+              ? `mode=${data.mode} · signaling=${(data as any)?.api?.signaling || 'n/a'}`
+              : `HTTP ${res.status}`,
           source: 'client',
         });
-        if (data.mode && data.mode !== 'express' && isSplitDeploy()) {
-          nextClient.push({
-            id: 'split-target',
-            label: 'Split-deploy target',
-            ok: false,
-            detail:
-              'VITE_API_BASE_URL points at a host that is not the full Express API (got partial/Vercel stub). Point it at your Node API host.',
-            source: 'client',
-          });
-        }
       } catch (e: any) {
         setPublicHealth(null);
         nextClient.push({
@@ -172,13 +224,13 @@ export const AdminApiHealthPanel: React.FC = () => {
           label: 'GET /api/health',
           ok: false,
           latencyMs: Date.now() - t0,
-          detail: e?.message || 'Network error — is the Node API running and CORS_ORIGINS set?',
+          detail: e?.message || 'Network error — confirm minglecall.com DNS → Vercel',
           source: 'client',
         });
       }
     }
 
-    // Admin deep health
+    // Admin deep health (Vercel serverless)
     {
       const t0 = Date.now();
       try {
@@ -202,7 +254,8 @@ export const AdminApiHealthPanel: React.FC = () => {
           detail:
             typeof data.error === 'string'
               ? data.error
-              : data.error?.message || (Array.isArray(data.checks) ? `${data.checks.length} server checks` : `HTTP ${res.status}`),
+              : data.error?.message ||
+                (Array.isArray(data.checks) ? `${data.checks.length} server checks` : `HTTP ${res.status}`),
           source: 'client',
         });
       } catch (e: any) {
@@ -218,48 +271,93 @@ export const AdminApiHealthPanel: React.FC = () => {
       }
     }
 
-    // LiveKit config (auth)
-    {
-      const t0 = Date.now();
-      try {
-        const res = await authFetch('/api/livekit/config');
-        const data = await res.json().catch(() => ({}));
-        nextClient.push({
-          id: 'livekit-config',
-          label: 'GET /api/livekit/config',
-          ok: res.ok,
-          latencyMs: Date.now() - t0,
-          detail: res.ok ? 'LiveKit config reachable' : data?.error?.message || `HTTP ${res.status}`,
-          source: 'client',
-        });
-      } catch (e: any) {
-        nextClient.push({
-          id: 'livekit-config',
-          label: 'GET /api/livekit/config',
-          ok: false,
-          latencyMs: Date.now() - t0,
-          detail: e?.message || 'unreachable',
-          source: 'client',
-        });
-      }
-    }
+    nextClient.push(await probeRoute('auth-send-otp', 'POST /api/auth/send-otp (exists)', '/api/auth/send-otp', { method: 'POST' }));
+    nextClient.push(await probeRoute('users', 'GET /api/users', '/api/users', { auth: true }));
+    nextClient.push(await probeRoute('storage-config', 'GET /api/storage/config', '/api/storage/config', { auth: true }));
+    nextClient.push(await probeRoute('livekit-config', 'GET /api/livekit/config', '/api/livekit/config', { auth: true }));
 
-    // WebSocket
-    nextClient.push(await probeWs());
+    if (useRealtime || !isSplitDeploy()) {
+      nextClient.push(await probeRealtime());
+    } else {
+      // Legacy split-deploy Express WS probe
+      const t0 = Date.now();
+      nextClient.push(
+        await new Promise<CheckRow>((resolve) => {
+          let settled = false;
+          let ws: WebSocket | null = null;
+          const finish = (row: CheckRow) => {
+            if (settled) return;
+            settled = true;
+            try {
+              ws?.close();
+            } catch {
+              // ignore
+            }
+            resolve(row);
+          };
+          const timer = window.setTimeout(() => {
+            finish({
+              id: 'ws-client',
+              label: 'WebSocket connect (browser)',
+              ok: false,
+              latencyMs: Date.now() - t0,
+              detail: `Timed out connecting to ${wsUrl}`,
+              source: 'client',
+            });
+          }, 4000);
+          try {
+            ws = new WebSocket(wsUrl);
+            ws.onopen = () => {
+              window.clearTimeout(timer);
+              finish({
+                id: 'ws-client',
+                label: 'WebSocket connect (browser)',
+                ok: true,
+                latencyMs: Date.now() - t0,
+                detail: `Opened ${wsUrl}`,
+                source: 'client',
+              });
+            };
+            ws.onerror = () => {
+              window.clearTimeout(timer);
+              finish({
+                id: 'ws-client',
+                label: 'WebSocket connect (browser)',
+                ok: false,
+                latencyMs: Date.now() - t0,
+                detail: `Failed to open ${wsUrl}`,
+                source: 'client',
+              });
+            };
+          } catch (e: any) {
+            window.clearTimeout(timer);
+            finish({
+              id: 'ws-client',
+              label: 'WebSocket connect (browser)',
+              ok: false,
+              latencyMs: Date.now() - t0,
+              detail: e?.message || 'WebSocket constructor failed',
+              source: 'client',
+            });
+          }
+        })
+      );
+    }
 
     setClientChecks(nextClient);
     setLastRunAt(new Date().toLocaleString());
     setRunning(false);
 
-    const adminOk =
-      nextClient.find((c) => c.id === 'admin-health')?.ok !== false &&
-      nextClient.find((c) => c.id === 'public-health')?.ok !== false;
-    if (nextClient.some((c) => !c.ok) || !adminOk) {
-      setError('One or more probes failed. Fix Node API host, CORS_ORIGINS, or env secrets, then re-run.');
+    const criticalIds = ['public-health', 'admin-health', 'livekit-config', 'storage-config'];
+    const criticalFailed = nextClient.some((c) => criticalIds.includes(c.id) && !c.ok);
+    if (criticalFailed || nextClient.some((c) => !c.ok && c.id === 'realtime-client')) {
+      setError(
+        'One or more probes failed. Confirm Vercel Production env vars, DNS for minglecall.com → Vercel, and Supabase Realtime enabled.'
+      );
     } else {
       setError(null);
     }
-  }, []);
+  }, [useRealtime, wsUrl]);
 
   useEffect(() => {
     void runProbes();
@@ -271,7 +369,7 @@ export const AdminApiHealthPanel: React.FC = () => {
     const payload = {
       mode,
       apiBase,
-      wsUrl,
+      signaling: useRealtime ? 'supabase-realtime' : `websocket:${wsUrl}`,
       lastRunAt,
       clientChecks,
       publicHealth,
@@ -293,8 +391,8 @@ export const AdminApiHealthPanel: React.FC = () => {
             <h3 className="text-lg font-bold text-white">API Health</h3>
           </div>
           <p className="text-sm text-slate-400 max-w-2xl">
-            Probes the Node Express API (and WebSocket) used by this admin session. For split deploy, the SPA on
-            Vercel must call your Node host via <code className="text-cyan-400">VITE_API_BASE_URL</code>.
+            Probes same-origin Vercel <code className="text-cyan-400">/api/*</code> and Supabase Realtime signaling
+            (no Express <code className="text-slate-500">/ws</code> on production).
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -328,9 +426,14 @@ export const AdminApiHealthPanel: React.FC = () => {
         </div>
         <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
           <div className="flex items-center gap-2 text-slate-400 text-xs font-semibold uppercase tracking-wide mb-2">
-            <Wifi className="w-3.5 h-3.5 text-amber-400" /> WebSocket
+            <Wifi className="w-3.5 h-3.5 text-amber-400" /> Signaling
           </div>
-          <p className="text-white font-semibold text-sm font-mono break-all text-xs">{wsUrl}</p>
+          <p className="text-white font-semibold text-sm">
+            {useRealtime ? 'Supabase Realtime' : 'WebSocket (local/Express)'}
+          </p>
+          {!useRealtime && (
+            <p className="text-[11px] text-slate-500 mt-1 font-mono break-all">{wsUrl}</p>
+          )}
         </div>
         <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
           <div className="flex items-center gap-2 text-slate-400 text-xs font-semibold uppercase tracking-wide mb-2">
@@ -353,13 +456,12 @@ export const AdminApiHealthPanel: React.FC = () => {
       )}
 
       {!isSplitDeploy() && (
-        <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-xs text-amber-100/90 space-y-1">
-          <p className="font-semibold text-amber-200">Same-origin mode</p>
+        <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/10 px-4 py-3 text-xs text-cyan-100/90 space-y-1">
+          <p className="font-semibold text-cyan-200">Vercel-only (recommended)</p>
           <p>
-            Set <code className="text-amber-300">VITE_API_BASE_URL</code> on the Vercel SPA (e.g.{' '}
-            <code className="text-amber-300">https://api.minglecall.com</code>) and{' '}
-            <code className="text-amber-300">CORS_ORIGINS=https://minglecall.com,https://www.minglecall.com</code> on the
-            Node API host.
+            Leave <code className="text-cyan-300">VITE_API_BASE_URL</code> unset. Point{' '}
+            <code className="text-cyan-300">minglecall.com</code> (+ www) DNS to this Vercel project. Set Production
+            env: Supabase, R2, LiveKit, SMTP/Resend. Signaling uses Supabase Realtime — not <code>/ws</code>.
           </p>
         </div>
       )}
@@ -418,8 +520,8 @@ export const AdminApiHealthPanel: React.FC = () => {
         </h4>
         {serverChecks.length === 0 ? (
           <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-4 py-4 text-xs text-slate-500">
-            No server checks yet. This requires a successful <code className="text-slate-300">/api/admin/api-health</code>{' '}
-            response from the Express Node host (not the Vercel stub).
+            No server checks yet. Requires a successful{' '}
+            <code className="text-slate-300">/api/admin/api-health</code> response (admin session).
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -436,8 +538,12 @@ export const AdminApiHealthPanel: React.FC = () => {
                     {row.id === 'r2' && <HardDrive className="w-4 h-4 text-orange-400" />}
                     {row.id === 'livekit' && <Video className="w-4 h-4 text-indigo-400" />}
                     {row.id === 'smtp' && <Mail className="w-4 h-4 text-pink-400" />}
-                    {row.id === 'websocket' && <Wifi className="w-4 h-4 text-amber-400" />}
-                    {row.id === 'express' && <Server className="w-4 h-4 text-cyan-400" />}
+                    {(row.id === 'signaling' || row.id === 'websocket') && (
+                      <Wifi className="w-4 h-4 text-amber-400" />
+                    )}
+                    {(row.id === 'vercel' || row.id === 'express') && (
+                      <Server className="w-4 h-4 text-cyan-400" />
+                    )}
                     {row.label}
                   </div>
                   {row.ok ? (

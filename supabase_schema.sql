@@ -3418,3 +3418,33 @@ CREATE POLICY "admin select coin_purchases" ON public.coin_purchases FOR SELECT 
 -- No INSERT/UPDATE/DELETE policies for authenticated clients on Financial Module tables.
 -- Express service role bypasses RLS for all settlement mutations.
 
+
+-- =============================================================================
+-- Auth OTPs (Vercel / multi-instance safe — replaces in-memory otpStore)
+-- Service role only; no client policies.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.auth_otps (
+  email TEXT PRIMARY KEY,
+  code_hash TEXT NOT NULL,
+  name TEXT,
+  role TEXT,
+  expires_at TIMESTAMPTZ NOT NULL,
+  attempts INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_otps_expires ON public.auth_otps(expires_at);
+ALTER TABLE public.auth_otps ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "deny all auth_otps" ON public.auth_otps;
+-- No policies for authenticated/anon — only service_role bypasses RLS.
+
+CREATE TABLE IF NOT EXISTS public.auth_pending_signups (
+  email TEXT PRIMARY KEY,
+  password_hash TEXT NOT NULL,
+  name TEXT,
+  role TEXT,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE public.auth_pending_signups ENABLE ROW LEVEL SECURITY;
