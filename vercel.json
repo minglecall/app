@@ -10,6 +10,7 @@
     "api/health.js": { "maxDuration": 10, "memory": 256 },
     "api/ping.js": { "maxDuration": 10, "memory": 256 },
     "api/admin/infra-config.ts": { "maxDuration": 30, "memory": 512 },
+    "api/admin/create-team-leader.ts": { "maxDuration": 30, "memory": 512 },
     "api/storage/config.ts": { "maxDuration": 15, "memory": 256 },
     "api/storage/test-connection.js": { "maxDuration": 30, "memory": 512 },
     "api/storage/presigned-url.ts": { "maxDuration": 30, "memory": 512 },

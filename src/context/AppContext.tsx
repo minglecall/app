@@ -363,7 +363,7 @@ interface AppContextType {
   fetchUserMoments: (userId: string) => Promise<FeedPost[]>;
 
   // Team Leader Operations
-  createTeamLeader: (leaderData: Partial<UserProfile>) => UserProfile;
+  createTeamLeader: (leaderData: Partial<UserProfile> & { password?: string }) => Promise<UserProfile | null>;
   createCreatorByTeamLeader: (creatorData: Partial<UserProfile>, leaderId?: string) => Promise<UserProfile | null>;
   updateCreatorCoinEarnOverride: (creatorId: string, overrideRate: number | null) => void;
   banCreatorByTeamLeader: (creatorId: string, days: number, reason: string) => Promise<boolean>;
@@ -5394,80 +5394,117 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
   };
 
-  const createTeamLeader = (leaderData: Partial<UserProfile>): UserProfile => {
-    const newId = (leaderData.id && isValidUuid(leaderData.id)) ? leaderData.id : generateValidUuid();
-    const leaderAvatar = leaderData.avatarUrl || 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400';
-    const newLeader: UserProfile = {
-      id: newId,
-      authId: leaderData.authId || newId,
-      name: leaderData.name || 'New Team Leader',
-      email: leaderData.email || `teamleader_${Date.now().toString().slice(-4)}@livecall.app`,
-      gender: 'female',
-      genderLocked: true,
-      role: 'team_leader',
-      age: leaderData.age || 28,
-      dob: leaderData.dob || '1998-05-12',
-      nationality: leaderData.nationality || 'United States',
-      countryCode: leaderData.countryCode || 'US',
-      spokenLanguages: leaderData.spokenLanguages || ['English'],
-      bio: leaderData.bio || 'Talent Management & Creator Agency Director',
-      interests: ['Talent Growth', 'Creator Mentorship'],
-      tags: leaderData.tags || ['Team Leader', 'VIP Agency'],
-      avatarUrl: leaderAvatar,
-      gallery: (leaderData.gallery && leaderData.gallery.length > 0) ? leaderData.gallery : [leaderAvatar],
-      isVerified: true,
-      isOnboarded: true,
-      coinBalance: 5000,
-      hourlyCoinRate: 10,
-      earningsCoins: 0,
-      totalLifetimeEarnedUSD: 0,
-      onlineStatus: 'online',
-      hasPasswordSet: true,
-      agencyName: leaderData.agencyName || 'Aurora Talent Management',
-      commissionPercent: leaderData.commissionPercent || 15,
-      teamLeaderNote: leaderData.teamLeaderNote || '',
-      createdAt: new Date().toISOString(),
-    };
+  const createTeamLeader = async (
+    leaderData: Partial<UserProfile> & { password?: string }
+  ): Promise<UserProfile | null> => {
+    const name = String(leaderData.name || '').trim();
+    const email = String(leaderData.email || '')
+      .trim()
+      .toLowerCase();
+    const password = String((leaderData as any).password || '');
 
-    setUsers((prev) => {
-      const next = [newLeader, ...prev];
-      usersRef.current = next;
-      return next;
-    });
+    if (!name) {
+      showToast('Validation Error', 'Team leader name is required.', 'error');
+      return null;
+    }
+    if (!email || !email.includes('@')) {
+      showToast('Validation Error', 'A valid login email is required so the team leader can sign in.', 'error');
+      return null;
+    }
+    const pwError = getPasswordPolicyError(password);
+    if (pwError) {
+      showToast('Password Policy', pwError, 'error');
+      return null;
+    }
 
-    const leaderPayload = {
-      ...newLeader,
-      gender: 'female' as const,
-      genderLocked: true,
-      role: 'team_leader' as const,
-      password: (leaderData as any).password || 'leader123',
-    };
+    try {
+      const res = await authFetch('/api/admin/create-team-leader', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          email,
+          password,
+          agencyName: leaderData.agencyName || 'Aurora Talent Management',
+          commissionPercent: leaderData.commissionPercent ?? 15,
+          spokenLanguages: leaderData.spokenLanguages || ['English'],
+          nationality: leaderData.nationality || 'United States',
+          countryCode: leaderData.countryCode || 'US',
+          bio: leaderData.bio || 'Talent Management & Creator Agency Director',
+          avatarUrl:
+            leaderData.avatarUrl ||
+            'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400',
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success || !data?.user?.id) {
+        const msg =
+          data?.error?.message ||
+          data?.message ||
+          `Failed to create team leader (HTTP ${res.status}).`;
+        showToast('Team Leader Not Created', msg, 'error');
+        return null;
+      }
 
-    authFetch('/api/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(leaderPayload),
-    })
-      .then(async (res) => {
-        const data = await res.json().catch(() => ({}));
-        const linkedAuthId = data?.user?.authId || data?.user?.auth_id;
-        if (res.ok && data?.success && linkedAuthId && linkedAuthId !== newLeader.authId) {
-          setUsers((prev) => {
-            const next = prev.map((u) =>
-              u.id === newLeader.id ? { ...u, authId: linkedAuthId } : u
-            );
-            usersRef.current = next;
-            return next;
-          });
-        }
-      })
-      .catch((e) => console.warn('Team leader server sync warning:', e));
+      const created = data.user as UserProfile;
+      const newLeader: UserProfile = {
+        id: created.id,
+        authId: created.authId || created.id,
+        name: created.name || name,
+        email: created.email || email,
+        gender: 'female',
+        genderLocked: true,
+        role: 'team_leader',
+        age: created.age || 28,
+        dob: leaderData.dob || '1998-05-12',
+        nationality: created.nationality || leaderData.nationality || 'United States',
+        countryCode: created.countryCode || leaderData.countryCode || 'US',
+        spokenLanguages: created.spokenLanguages || leaderData.spokenLanguages || ['English'],
+        bio: created.bio || leaderData.bio || 'Talent Management & Creator Agency Director',
+        interests: created.interests || ['Talent Growth', 'Creator Mentorship'],
+        tags: created.tags || ['Team Leader', 'VIP Agency'],
+        avatarUrl:
+          created.avatarUrl ||
+          leaderData.avatarUrl ||
+          'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400',
+        gallery:
+          created.gallery && created.gallery.length > 0
+            ? created.gallery
+            : [
+                created.avatarUrl ||
+                  leaderData.avatarUrl ||
+                  'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400',
+              ],
+        isVerified: true,
+        isOnboarded: true,
+        coinBalance: Number(created.coinBalance) || 0,
+        hourlyCoinRate: Number(created.hourlyCoinRate) || 10,
+        earningsCoins: Number(created.earningsCoins) || 0,
+        totalLifetimeEarnedUSD: 0,
+        onlineStatus: created.onlineStatus || 'offline',
+        hasPasswordSet: true,
+        agencyName: created.agencyName || leaderData.agencyName || 'Aurora Talent Management',
+        commissionPercent: Number(created.commissionPercent ?? leaderData.commissionPercent ?? 15),
+        teamLeaderNote: leaderData.teamLeaderNote || '',
+        createdAt: created.createdAt || new Date().toISOString(),
+      };
 
-    // Auth + profile persist via POST /api/users (links auth_id after Auth create).
-    // Do not client-upsert here — that raced Auth create and previously nullified auth_id.
+      setUsers((prev) => {
+        const next = [newLeader, ...prev.filter((u) => u.id !== newLeader.id && u.email?.toLowerCase() !== email)];
+        usersRef.current = next;
+        return next;
+      });
 
-    showToast('Team Leader Created! 👑', `Successfully registered Team Leader ${newLeader.name} (${newLeader.agencyName || 'Agency'}).`, 'success');
-    return newLeader;
+      showToast(
+        'Team Leader Created',
+        `Saved to Supabase Auth + profiles. ${newLeader.name} can sign in with ${newLeader.email}.`,
+        'success'
+      );
+      return newLeader;
+    } catch (e: any) {
+      showToast('Team Leader Error', e?.message || 'Network error creating team leader.', 'error');
+      return null;
+    }
   };
 
   const refreshTeamLeaderCreators = async (): Promise<UserProfile[]> => {

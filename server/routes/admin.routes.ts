@@ -16,10 +16,14 @@ import {
   backfillMissingAuthIdsAdmin,
   authenticateUserWithPasswordAdmin,
   updateSupabaseRuntimeConfig,
+  updateUserPasswordAdmin,
+  upsertProfileAdmin,
+  getSupabaseAdmin,
 } from '../supabaseAdmin';
 import { hardDeleteUserCompletely, cleanupOrphanAuthUsersAdmin } from '../userHardDelete';
 import { isR2Configured, updateR2RuntimeConfig } from '../r2Storage';
 import { requireAdmin, requireAuth } from '../middleware/auth';
+import { getPasswordPolicyError } from '../../shared/passwordPolicy';
 
 /** Read ALLOW_FACTORY_RESET from live .env (so edits apply without full restart) + process.env. */
 function getAllowFactoryResetRaw(): string {
@@ -327,6 +331,222 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
     } catch (err: any) {
       console.error('Error in POST /api/admin/delete-user:', err);
       return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * Create Team Leader — Auth user + profiles row (role=team_leader).
+   * Must succeed in Supabase before the admin UI treats the account as created.
+   */
+  router.post('/create-team-leader', requireAdmin, async (req, res) => {
+    try {
+      if (!isSupabaseAdminConfigured()) {
+        return res.status(503).json({
+          success: false,
+          error: {
+            message: 'Supabase admin is not configured',
+            code: 'SUPABASE_NOT_CONFIGURED',
+          },
+        });
+      }
+
+      const body = req.body || {};
+      const name = String(body.name || '').trim();
+      const email = String(body.email || '')
+        .trim()
+        .toLowerCase();
+      const password = typeof body.password === 'string' ? body.password : '';
+      const agencyName = String(body.agencyName || body.agency_name || 'Talent Agency').trim();
+      const commissionPercent = Number(body.commissionPercent ?? body.commission_percent ?? 15);
+      const nationality = String(body.nationality || 'United States').trim();
+      const countryCode = String(body.countryCode || body.country_code || 'US')
+        .trim()
+        .toUpperCase() || 'US';
+      const bio = String(body.bio || 'Talent Management & Creator Agency Director').trim();
+      const avatarUrl =
+        String(body.avatarUrl || body.avatar_url || '').trim() ||
+        'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400';
+      const spokenLanguages = Array.isArray(body.spokenLanguages)
+        ? body.spokenLanguages.map((s: any) => String(s).trim()).filter(Boolean)
+        : String(body.spokenLanguages || 'English')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+
+      if (!name) {
+        return res.status(400).json({
+          success: false,
+          error: { message: 'Name is required.', code: 'NAME_REQUIRED' },
+        });
+      }
+      if (!email || !email.includes('@')) {
+        return res.status(400).json({
+          success: false,
+          error: { message: 'A valid login email is required.', code: 'EMAIL_REQUIRED' },
+        });
+      }
+      const pwError = getPasswordPolicyError(password);
+      if (pwError) {
+        return res.status(400).json({
+          success: false,
+          error: { message: pwError, code: 'PASSWORD_POLICY' },
+        });
+      }
+
+      const admin = getSupabaseAdmin();
+      if (!admin) {
+        return res.status(503).json({
+          success: false,
+          error: { message: 'Supabase admin client unavailable', code: 'SUPABASE_NOT_CONFIGURED' },
+        });
+      }
+
+      const { data: existingProfile } = await admin
+        .from('profiles')
+        .select('id, email')
+        .ilike('email', email)
+        .maybeSingle();
+      if (existingProfile?.id) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            message: `A profile already exists for ${email}. Use a different email.`,
+            code: 'EMAIL_EXISTS',
+          },
+        });
+      }
+
+      const { data: createdAuth, error: createErr } = await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          role: 'team_leader',
+          gender: 'female',
+          name,
+          full_name: name,
+        },
+      });
+      if (createErr || !createdAuth?.user?.id) {
+        const msg = createErr?.message || 'Failed to create Auth user';
+        const code = /already/i.test(msg) ? 'EMAIL_EXISTS' : 'AUTH_CREATE_FAILED';
+        return res.status(code === 'EMAIL_EXISTS' ? 409 : 500).json({
+          success: false,
+          error: { message: msg, code },
+        });
+      }
+
+      const authUserId = createdAuth.user.id;
+      const now = new Date().toISOString();
+      const profilePayload: Partial<UserProfile> & Record<string, any> = {
+        id: authUserId,
+        authId: authUserId,
+        name,
+        email,
+        gender: 'female',
+        genderLocked: true,
+        role: 'team_leader',
+        age: 28,
+        nationality,
+        countryCode,
+        bio,
+        interests: ['Talent Growth', 'Creator Mentorship'],
+        tags: ['Team Leader', 'VIP Agency'],
+        spokenLanguages: spokenLanguages.length ? spokenLanguages : ['English'],
+        avatarUrl,
+        gallery: [avatarUrl],
+        isVerified: true,
+        isOnboarded: true,
+        agreedToTerms: true,
+        onlineStatus: 'offline',
+        coinBalance: 0,
+        hourlyCoinRate: 10,
+        earningsCoins: 0,
+        agencyName,
+        commissionPercent: Number.isFinite(commissionPercent) ? commissionPercent : 15,
+        hasPasswordSet: true,
+        password,
+        createdAt: now,
+      };
+
+      const upsert = await upsertProfileAdmin(profilePayload);
+      if (!upsert.success) {
+        try {
+          await admin.auth.admin.deleteUser(authUserId);
+        } catch {
+          // ignore
+        }
+        return res.status(500).json({
+          success: false,
+          error: {
+            message: upsert.error || 'Failed to create team leader profile',
+            code: 'PROFILE_UPSERT_FAILED',
+          },
+        });
+      }
+
+      await updateUserPasswordAdmin(authUserId, password, email, {
+        role: 'team_leader',
+        gender: 'female',
+        name,
+      });
+
+      await admin
+        .from('profiles')
+        .update({
+          role: 'team_leader',
+          gender: 'female',
+          gender_locked: true,
+          auth_id: authUserId,
+          updated_at: new Date().toISOString(),
+        } as any)
+        .eq('id', authUserId);
+
+      const normalized = {
+        id: authUserId,
+        authId: authUserId,
+        name,
+        email,
+        role: 'team_leader' as const,
+        gender: 'female' as const,
+        genderLocked: true,
+        agencyName,
+        commissionPercent: Number.isFinite(commissionPercent) ? commissionPercent : 15,
+        avatarUrl,
+        gallery: [avatarUrl],
+        spokenLanguages: spokenLanguages.length ? spokenLanguages : ['English'],
+        nationality,
+        countryCode,
+        bio,
+        isVerified: true,
+        isOnboarded: true,
+        hasPasswordSet: true,
+        coinBalance: 0,
+        hourlyCoinRate: 10,
+        earningsCoins: 0,
+        onlineStatus: 'offline' as const,
+        createdAt: now,
+      };
+
+      serverUsers.set(authUserId, { ...(serverUsers.get(authUserId) || {}), ...normalized } as UserProfile);
+      broadcastUsers();
+      broadcastAll({
+        type: 'users:updated',
+        user: normalized,
+        users: getFormattedUsers(),
+      });
+
+      return res.json({
+        success: true,
+        user: normalized,
+        message: `Team leader ${name} created in Supabase Auth + profiles. They can sign in with ${email}.`,
+      });
+    } catch (err: any) {
+      console.error('Error in POST /api/admin/create-team-leader:', err);
+      return res.status(500).json({
+        success: false,
+        error: { message: err?.message || 'Failed to create team leader', code: 'INTERNAL' },
+      });
     }
   });
 

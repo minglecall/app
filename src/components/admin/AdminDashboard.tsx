@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { authFetch } from '../../utils/apiClient';
+import { getPasswordPolicyError, evaluatePasswordStrength } from '../../../shared/passwordPolicy';
 import {
   Settings,
   DollarSign,
@@ -261,7 +262,7 @@ export const AdminDashboard: React.FC = () => {
   const [newLeaderForm, setNewLeaderForm] = useState({
     name: '',
     email: '',
-    password: 'leader123',
+    password: '',
     agencyName: 'Aurora Talent Management',
     commissionPercent: systemSettings.teamLeaderSharePercent ?? 10,
     spokenLanguages: 'English, Spanish',
@@ -270,6 +271,7 @@ export const AdminDashboard: React.FC = () => {
     bio: 'Director of Creator Guild & Talent Management',
     avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400',
   });
+  const [isCreatingLeader, setIsCreatingLeader] = useState(false);
 
   useEffect(() => {
     if (activeSubTab === 'monitoring') {
@@ -2486,41 +2488,57 @@ export const AdminDashboard: React.FC = () => {
                 </div>
 
                 <form
-                  onSubmit={(e) => {
+                  onSubmit={async (e) => {
                     e.preventDefault();
                     if (!newLeaderForm.name.trim()) {
                       showToast('Validation Error', 'Name is required', 'error');
                       return;
                     }
-                    createTeamLeader({
-                      name: newLeaderForm.name,
-                      email: newLeaderForm.email || `teamleader_${Date.now().toString().slice(-4)}@livecall.app`,
-                      password: newLeaderForm.password || 'leader123',
-                      gender: 'female',
-                      genderLocked: true,
-                      role: 'team_leader',
-                      agencyName: newLeaderForm.agencyName || 'Aurora Talent Management',
-                      commissionPercent: Number(newLeaderForm.commissionPercent) || (systemSettings.teamLeaderSharePercent ?? 10),
-                      spokenLanguages: newLeaderForm.spokenLanguages.split(',').map((s) => s.trim()).filter(Boolean),
-                      nationality: newLeaderForm.nationality,
-                      countryCode: newLeaderForm.countryCode,
-                      bio: newLeaderForm.bio,
-                      avatarUrl: newLeaderForm.avatarUrl,
-                      gallery: [newLeaderForm.avatarUrl],
-                    });
-                    setIsAddLeaderOpen(false);
-                    setNewLeaderForm({
-                      name: '',
-                      email: '',
-                      password: 'leader123',
-                      agencyName: 'Aurora Talent Management',
-                      commissionPercent: systemSettings.teamLeaderSharePercent ?? 10,
-                      spokenLanguages: 'English, Spanish',
-                      nationality: 'United States',
-                      countryCode: 'US',
-                      bio: 'Director of Creator Guild & Talent Management',
-                      avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400',
-                    });
+                    if (!newLeaderForm.email.trim() || !newLeaderForm.email.includes('@')) {
+                      showToast('Validation Error', 'Login email is required so the team leader can sign in.', 'error');
+                      return;
+                    }
+                    const pwError = getPasswordPolicyError(newLeaderForm.password);
+                    if (pwError) {
+                      showToast('Password Policy', pwError, 'error');
+                      return;
+                    }
+                    setIsCreatingLeader(true);
+                    try {
+                      const created = await createTeamLeader({
+                        name: newLeaderForm.name,
+                        email: newLeaderForm.email.trim().toLowerCase(),
+                        password: newLeaderForm.password,
+                        gender: 'female',
+                        genderLocked: true,
+                        role: 'team_leader',
+                        agencyName: newLeaderForm.agencyName || 'Aurora Talent Management',
+                        commissionPercent: Number(newLeaderForm.commissionPercent) || (systemSettings.teamLeaderSharePercent ?? 10),
+                        spokenLanguages: newLeaderForm.spokenLanguages.split(',').map((s) => s.trim()).filter(Boolean),
+                        nationality: newLeaderForm.nationality,
+                        countryCode: newLeaderForm.countryCode,
+                        bio: newLeaderForm.bio,
+                        avatarUrl: newLeaderForm.avatarUrl,
+                        gallery: [newLeaderForm.avatarUrl],
+                      });
+                      if (created) {
+                        setIsAddLeaderOpen(false);
+                        setNewLeaderForm({
+                          name: '',
+                          email: '',
+                          password: '',
+                          agencyName: 'Aurora Talent Management',
+                          commissionPercent: systemSettings.teamLeaderSharePercent ?? 10,
+                          spokenLanguages: 'English, Spanish',
+                          nationality: 'United States',
+                          countryCode: 'US',
+                          bio: 'Director of Creator Guild & Talent Management',
+                          avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=400',
+                        });
+                      }
+                    } finally {
+                      setIsCreatingLeader(false);
+                    }
                   }}
                   className="space-y-3.5 text-xs"
                 >
@@ -2540,11 +2558,12 @@ export const AdminDashboard: React.FC = () => {
                     </div>
                     <div>
                       <label className="block font-semibold text-slate-300 mb-1">
-                        Login Email
+                        Login Email <span className="text-rose-400">*</span>
                       </label>
                       <input
                         type="email"
-                        placeholder="elena@livecall.app"
+                        required
+                        placeholder="elena@minglecall.com"
                         value={newLeaderForm.email}
                         onChange={(e) => setNewLeaderForm({ ...newLeaderForm, email: e.target.value })}
                         className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
@@ -2563,7 +2582,7 @@ export const AdminDashboard: React.FC = () => {
                         required
                         value={newLeaderForm.password}
                         onChange={(e) => setNewLeaderForm({ ...newLeaderForm, password: e.target.value })}
-                        placeholder="leader123"
+                        placeholder="Min 8 chars, upper, lower, number, special"
                         className="w-full pl-3 pr-10 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 font-mono"
                       />
                       <button
@@ -2575,9 +2594,23 @@ export const AdminDashboard: React.FC = () => {
                         {showLeaderPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-1">
-                      Default initial password for Team Leader agency dashboard access.
-                    </p>
+                    {newLeaderForm.password ? (
+                      <p
+                        className={`text-[11px] mt-1 ${
+                          evaluatePasswordStrength(newLeaderForm.password).isValid
+                            ? 'text-emerald-400'
+                            : 'text-rose-400'
+                        }`}
+                      >
+                        {evaluatePasswordStrength(newLeaderForm.password).isValid
+                          ? 'Password meets policy — Auth account can be created.'
+                          : evaluatePasswordStrength(newLeaderForm.password).error}
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Required. Must include uppercase, lowercase, number, and special character (min 8).
+                      </p>
+                    )}
                   </div>
 
                   {/* Agency & Commission Override */}
@@ -2819,11 +2852,15 @@ export const AdminDashboard: React.FC = () => {
                     </button>
                     <button
                       type="submit"
-                      disabled={isUploadingLeaderAvatar}
+                      disabled={isUploadingLeaderAvatar || isCreatingLeader}
                       className="px-5 py-2 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold rounded-xl shadow-lg cursor-pointer disabled:opacity-50 flex items-center space-x-1.5"
                     >
-                      <Check className="w-4 h-4" />
-                      <span>Create Team Leader</span>
+                      {isCreatingLeader ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Check className="w-4 h-4" />
+                      )}
+                      <span>{isCreatingLeader ? 'Creating in Supabase…' : 'Create Team Leader'}</span>
                     </button>
                   </div>
                 </form>
