@@ -20,22 +20,50 @@ const CLIENT_SUPABASE_OVERRIDE_KEY = 'minglecall_supabase_client_override';
 
 type ClientOverride = { url: string; anonKey: string };
 
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(String(value || '').trim().replace(/^["']|["']$/g, ''));
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function clearClientOverride() {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(CLIENT_SUPABASE_OVERRIDE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function readClientOverride(): ClientOverride | null {
   try {
     if (typeof localStorage === 'undefined') return null;
     const raw = localStorage.getItem(CLIENT_SUPABASE_OVERRIDE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ClientOverride;
+    const url = String(parsed?.url || '')
+      .trim()
+      .replace(/^["']|["']$/g, '');
+    const anonKey = String(parsed?.anonKey || '')
+      .trim()
+      .replace(/^["']|["']$/g, '');
     if (
-      parsed?.url &&
-      parsed?.anonKey &&
-      !parsed.url.includes('placeholder') &&
-      !String(parsed.anonKey).startsWith('••••')
+      url &&
+      anonKey &&
+      isValidHttpUrl(url) &&
+      !url.includes('placeholder') &&
+      !anonKey.startsWith('••••')
     ) {
-      return { url: String(parsed.url).trim(), anonKey: String(parsed.anonKey).trim() };
+      return { url, anonKey };
     }
+    // Bad override (e.g. after DB switch) would crash createClient → black page.
+    clearClientOverride();
   } catch {
-    /* ignore */
+    clearClientOverride();
   }
   return null;
 }
@@ -79,10 +107,29 @@ const clientOptions = {
   },
 };
 
-let supabaseClient: SupabaseClient<Database> = createClient<Database>(
+function safeCreateClient(url: string, key: string): SupabaseClient<Database> {
+  const nextUrl = isValidHttpUrl(url) ? url : FALLBACK_URL;
+  const nextKey = String(key || '').trim() || FALLBACK_ANON_KEY;
+  try {
+    return createClient<Database>(nextUrl, nextKey, clientOptions);
+  } catch (err) {
+    console.warn('[supabase] createClient failed, using placeholder client:', err);
+    clearClientOverride();
+    supabaseUrl = '';
+    supabaseAnonKey = '';
+    return createClient<Database>(FALLBACK_URL, FALLBACK_ANON_KEY, clientOptions);
+  }
+}
+
+if (supabaseUrl && !isValidHttpUrl(supabaseUrl)) {
+  clearClientOverride();
+  supabaseUrl = isValidHttpUrl(envUrl) ? envUrl : '';
+  supabaseAnonKey = supabaseUrl ? envAnonKey : '';
+}
+
+let supabaseClient: SupabaseClient<Database> = safeCreateClient(
   supabaseUrl || FALLBACK_URL,
-  supabaseAnonKey || FALLBACK_ANON_KEY,
-  clientOptions
+  supabaseAnonKey || FALLBACK_ANON_KEY
 );
 
 /**
@@ -142,9 +189,10 @@ export function reconfigureSupabaseClient(url: string, anonKey: string): { succe
     supabaseUrl = nextUrl;
     supabaseAnonKey = nextKey;
     writeClientOverride(nextUrl, nextKey);
-    supabaseClient = createClient<Database>(nextUrl, nextKey, clientOptions);
+    supabaseClient = safeCreateClient(nextUrl, nextKey);
     return { success: true };
   } catch (err: any) {
+    clearClientOverride();
     return { success: false, error: err?.message || 'Failed to reconfigure Supabase client' };
   }
 }

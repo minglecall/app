@@ -1,13 +1,59 @@
 /**
  * Single Vercel serverless entry for all /api/* routes (Hobby plan ≤12 functions).
  *
- * Handlers are loaded via dynamic import() so a heavy dependency (AWS SDK / LiveKit /
- * server/r2Storage+dotenv) cannot crash the whole function at cold-start. That was
- * causing FUNCTION_INVOCATION_FAILED even for /api/health and /api/r2-test.
+ * Handlers MUST be statically imported so Vercel bundles them into this function.
+ * Dynamic import('./_lib/handlers/...') fails at runtime with:
+ *   Cannot find module '/var/task/api/_lib/handlers/...'
+ *
+ * Heavy deps (AWS SDK via server/r2Storage) stay behind dynamic import() inside
+ * those specific handlers — not at this file's top level.
  *
  * Do not import Express/server.ts here.
  */
 import type { VercelReq, VercelRes } from './_lib/vercelAuth';
+
+import health from './_lib/handlers/health';
+import ping from './_lib/handlers/ping';
+import r2Test from './_lib/handlers/r2Test';
+
+import authSendOtp from './_lib/handlers/auth/send-otp';
+import authVerifyOtp from './_lib/handlers/auth/verify-otp';
+import authLoginPassword from './_lib/handlers/auth/login-password';
+import authRegisterBootstrap from './_lib/handlers/auth/register-bootstrap';
+import authResetPassword from './_lib/handlers/auth/reset-password';
+import authUpdatePassword from './_lib/handlers/auth/update-password';
+
+import adminApiHealth from './_lib/handlers/admin/api-health';
+import adminInfraConfig from './_lib/handlers/admin/infra-config';
+import adminCreateTeamLeader from './_lib/handlers/admin/create-team-leader';
+import adminCmsSeedDefaults from './_lib/handlers/admin/cms-seed-defaults';
+
+import users from './_lib/handlers/users/index';
+import usersSyncAll from './_lib/handlers/users/sync-all';
+import usersMeDelete from './_lib/handlers/users/me-delete';
+
+import messages from './_lib/handlers/messages/index';
+import messagesRead from './_lib/handlers/messages/read';
+import messagesConversation from './_lib/handlers/messages/conversation';
+
+import presence from './_lib/handlers/presence/index';
+import presenceHeartbeat from './_lib/handlers/presence/heartbeat';
+
+import callsSync from './_lib/handlers/calls/sync';
+import callsBurn from './_lib/handlers/calls/burn';
+
+import storageConfig from './_lib/handlers/storage/config';
+import storagePresignedUrl from './_lib/handlers/storage/presigned-url';
+import storageTestConnection from './_lib/handlers/storage/test-connection';
+
+import livekitConfig from './_lib/handlers/livekit/config';
+import livekitToken from './_lib/handlers/livekit/token';
+
+import giftsSend from './_lib/handlers/gifts/send';
+import supabaseUpdateStatus from './_lib/handlers/supabase/update-status';
+
+import v1Router from './_lib/handlers/v1';
+import teamleaderRouter from './_lib/handlers/teamleader';
 
 type Handler = (req: VercelReq, res: VercelRes) => unknown | Promise<unknown>;
 
@@ -47,7 +93,6 @@ const AVAILABLE_ROUTES = [
 ];
 
 function pathAfterApi(req: VercelReq): string {
-  // Vercel Node catch-all may expose segments on query.path (string | string[]).
   const q = (req as any).query?.path;
   if (typeof q === 'string' && q.trim()) {
     return q.replace(/^\/+/, '').replace(/\/+$/, '');
@@ -89,82 +134,49 @@ function notImplemented(req: VercelReq, res: VercelRes) {
   );
 }
 
-async function loadHandler(path: string): Promise<Handler | null> {
-  // Lightweight probes first — no AWS/LiveKit/dotenv.
-  if (path === 'health') return (await import('./_lib/handlers/health')).default;
-  if (path === 'ping') return (await import('./_lib/handlers/ping')).default;
-  if (path === 'r2-test') return (await import('./_lib/handlers/r2Test')).default;
-  if (path === 'storage/test-connection') {
-    return (await import('./_lib/handlers/storage/test-connection')).default;
-  }
+function resolveHandler(path: string): Handler | null {
+  if (path === 'health') return health;
+  if (path === 'ping') return ping;
+  if (path === 'r2-test') return r2Test;
+  if (path === 'storage/test-connection') return storageTestConnection;
 
-  if (path === 'auth/send-otp') return (await import('./_lib/handlers/auth/send-otp')).default;
-  if (path === 'auth/verify-otp') return (await import('./_lib/handlers/auth/verify-otp')).default;
-  if (path === 'auth/login-password') {
-    return (await import('./_lib/handlers/auth/login-password')).default;
-  }
-  if (path === 'auth/register-bootstrap') {
-    return (await import('./_lib/handlers/auth/register-bootstrap')).default;
-  }
-  if (path === 'auth/reset-password') {
-    return (await import('./_lib/handlers/auth/reset-password')).default;
-  }
-  if (path === 'auth/update-password') {
-    return (await import('./_lib/handlers/auth/update-password')).default;
-  }
+  if (path === 'auth/send-otp') return authSendOtp;
+  if (path === 'auth/verify-otp') return authVerifyOtp;
+  if (path === 'auth/login-password') return authLoginPassword;
+  if (path === 'auth/register-bootstrap') return authRegisterBootstrap;
+  if (path === 'auth/reset-password') return authResetPassword;
+  if (path === 'auth/update-password') return authUpdatePassword;
 
-  if (path === 'admin/api-health') return (await import('./_lib/handlers/admin/api-health')).default;
-  if (path === 'admin/infra-config') {
-    return (await import('./_lib/handlers/admin/infra-config')).default;
-  }
-  if (path === 'admin/create-team-leader') {
-    return (await import('./_lib/handlers/admin/create-team-leader')).default;
-  }
-  if (path === 'admin/cms/seed-defaults') {
-    return (await import('./_lib/handlers/admin/cms-seed-defaults')).default;
-  }
+  if (path === 'admin/api-health') return adminApiHealth;
+  if (path === 'admin/infra-config') return adminInfraConfig;
+  if (path === 'admin/create-team-leader') return adminCreateTeamLeader;
+  if (path === 'admin/cms/seed-defaults') return adminCmsSeedDefaults;
 
-  if (path === 'users' || path === 'users/index') {
-    return (await import('./_lib/handlers/users/index')).default;
-  }
-  if (path === 'users/sync-all') return (await import('./_lib/handlers/users/sync-all')).default;
-  if (path === 'users/me/delete') return (await import('./_lib/handlers/users/me-delete')).default;
+  if (path === 'users' || path === 'users/index') return users;
+  if (path === 'users/sync-all') return usersSyncAll;
+  if (path === 'users/me/delete') return usersMeDelete;
 
-  if (path === 'messages' || path === 'messages/index') {
-    return (await import('./_lib/handlers/messages/index')).default;
-  }
-  if (path === 'messages/read') return (await import('./_lib/handlers/messages/read')).default;
-  if (path.startsWith('messages/conversation/')) {
-    return (await import('./_lib/handlers/messages/conversation')).default;
-  }
+  if (path === 'messages' || path === 'messages/index') return messages;
+  if (path === 'messages/read') return messagesRead;
+  if (path.startsWith('messages/conversation/')) return messagesConversation;
 
-  if (path === 'presence' || path === 'presence/index') {
-    return (await import('./_lib/handlers/presence/index')).default;
-  }
-  if (path === 'presence/heartbeat') {
-    return (await import('./_lib/handlers/presence/heartbeat')).default;
-  }
+  if (path === 'presence' || path === 'presence/index') return presence;
+  if (path === 'presence/heartbeat') return presenceHeartbeat;
 
-  if (path === 'calls/sync') return (await import('./_lib/handlers/calls/sync')).default;
-  if (path === 'calls/burn') return (await import('./_lib/handlers/calls/burn')).default;
+  if (path === 'calls/sync') return callsSync;
+  if (path === 'calls/burn') return callsBurn;
 
-  if (path === 'storage/config') return (await import('./_lib/handlers/storage/config')).default;
-  if (path === 'storage/presigned-url') {
-    return (await import('./_lib/handlers/storage/presigned-url')).default;
-  }
+  if (path === 'storage/config') return storageConfig;
+  if (path === 'storage/presigned-url') return storagePresignedUrl;
 
-  if (path === 'livekit/config') return (await import('./_lib/handlers/livekit/config')).default;
-  if (path === 'livekit/token') return (await import('./_lib/handlers/livekit/token')).default;
+  if (path === 'livekit/config') return livekitConfig;
+  if (path === 'livekit/token') return livekitToken;
 
-  if (path === 'gifts/send') return (await import('./_lib/handlers/gifts/send')).default;
-  if (path === 'supabase/update-status') {
-    return (await import('./_lib/handlers/supabase/update-status')).default;
-  }
+  if (path === 'gifts/send') return giftsSend;
+  if (path === 'supabase/update-status') return supabaseUpdateStatus;
 
-  if (path === 'v1' || path.startsWith('v1/')) return (await import('./_lib/handlers/v1')).default;
-  if (path === 'teamleader' || path.startsWith('teamleader/')) {
-    return (await import('./_lib/handlers/teamleader')).default;
-  }
+  if (path === 'v1' || path.startsWith('v1/')) return v1Router;
+  if (path === 'teamleader' || path.startsWith('teamleader/')) return teamleaderRouter;
 
   return null;
 }
@@ -178,29 +190,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     }
 
     const path = pathAfterApi(req);
-    let matched: Handler | null = null;
-    try {
-      matched = await loadHandler(path);
-    } catch (loadErr: any) {
-      console.error('[api/[...path]] load failed', path, loadErr);
-      if (!res.headersSent) {
-        res.statusCode = 500;
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Cache-Control', 'no-store');
-        res.end(
-          JSON.stringify({
-            success: false,
-            error: {
-              message: loadErr?.message || 'Failed to load API route handler',
-              code: 'VERCEL_HANDLER_LOAD_FAILED',
-              path,
-            },
-          })
-        );
-      }
-      return;
-    }
-
+    const matched = resolveHandler(path);
     if (!matched) {
       return notImplemented(req, res);
     }

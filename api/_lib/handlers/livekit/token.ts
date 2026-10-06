@@ -1,9 +1,8 @@
 /**
  * LiveKit token minting for Vercel — uses LIVEKIT_* from server env.
- * Room membership for non-admin rooms still requires the long-lived Node call state;
- * on Vercel, admin test rooms and rooms named with the caller's profile id are allowed.
+ * AccessToken is dynamically imported so the catch-all cold-start does not
+ * require livekit-server-sdk evaluation for /api/health and /api/r2-test.
  */
-import { AccessToken } from 'livekit-server-sdk';
 import {
   sendJson,
   readJsonBody,
@@ -79,6 +78,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       auth.email ||
       identity;
 
+    const { AccessToken } = await import('livekit-server-sdk');
     const at = new AccessToken(livekit.apiKey, livekit.apiSecret, {
       identity,
       name: displayName,
