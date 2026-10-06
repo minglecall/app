@@ -31,7 +31,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { supabase, testSupabaseConnection, isSupabaseConfigured, reconfigureSupabaseClient } from '../../lib/supabase';
+import { supabase, testSupabaseConnection, isSupabaseConfigured } from '../../lib/supabase';
 import { getSupabaseProfilesStats, pushAllTaxonomiesAndSettingsToSupabase } from '../../services/supabaseService';
 import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { InfraSystemConfig } from '../../types';
@@ -85,8 +85,6 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     mockStorageActive: boolean;
   } | null>(null);
 
-  const [showSecretKey, setShowSecretKey] = useState(false);
-  const [showAnonKey, setShowAnonKey] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isUpdatingSchema, setIsUpdatingSchema] = useState(false);
@@ -391,21 +389,20 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
     if (e) e.preventDefault();
     setIsSaving(true);
     try {
-      const payload = {
-        ...config,
-        // Do not send masked placeholders back to the API.
-        supabaseAnonKey: String(config.supabaseAnonKey || '').startsWith('••••')
-          ? undefined
-          : config.supabaseAnonKey,
-        r2SecretAccessKey: String(config.r2SecretAccessKey || '').startsWith('••••')
-          ? undefined
-          : config.r2SecretAccessKey,
-      };
-
+      // Secrets come from env only — POST acknowledges non-secret tuning / refreshes status.
       const res = await authFetch('/api/admin/infra-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          dbMaxPoolSize: config.dbMaxPoolSize,
+          dbIdleTimeoutSeconds: config.dbIdleTimeoutSeconds,
+          dbStatementTimeoutMs: config.dbStatementTimeoutMs,
+          dbQueryCachingEnabled: config.dbQueryCachingEnabled,
+          r2MaxImageSizeMb: config.r2MaxImageSizeMb,
+          r2MaxVideoSizeMb: config.r2MaxVideoSizeMb,
+          r2AllowedMimeTypes: config.r2AllowedMimeTypes,
+          r2CdnCacheTtlSeconds: config.r2CdnCacheTtlSeconds,
+        }),
       });
       const text = await res.text();
       let data: any = {};
@@ -415,81 +412,21 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
         data = { message: text.substring(0, 200) };
       }
 
-      const looksLikeHostFailure =
-        res.status === 404 ||
-        res.status >= 500 ||
-        /NOT_FOUND|FUNCTION_INVOCATION_FAILED|FUNCTION_BOOT_FAILED/i.test(
-          String(data.message || data.error?.message || data.error || '')
-        ) ||
-        /page could not be found/i.test(String(data.message || ''));
-
-      const cleanedSupabaseUrl = String(config.supabaseUrl || '')
-        .trim()
-        .replace(/^["']|["']$/g, '');
-      const cleanedAnonKey = String(config.supabaseAnonKey || '')
-        .trim()
-        .replace(/^["']|["']$/g, '');
-      let supabaseUrlLooksValid = false;
-      try {
-        const u = new URL(cleanedSupabaseUrl);
-        supabaseUrlLooksValid = u.protocol === 'http:' || u.protocol === 'https:';
-      } catch {
-        supabaseUrlLooksValid = false;
-      }
-      const canReconfigureClient =
-        supabaseUrlLooksValid &&
-        Boolean(cleanedAnonKey) &&
-        !cleanedAnonKey.startsWith('••••');
-
-      if (canReconfigureClient) {
-        const clientRes = reconfigureSupabaseClient(cleanedSupabaseUrl, cleanedAnonKey);
-        if (!clientRes.success) {
-          showToast('Client Config Failed', clientRes.error || 'Could not apply Supabase client settings.', 'error');
-          return;
-        }
-      } else if (cleanedSupabaseUrl && !supabaseUrlLooksValid) {
-        showToast(
-          'Client Config Skipped',
-          'Supabase URL must be a full https://… URL (e.g. https://xxxx.supabase.co). Set VITE_SUPABASE_URL in Vercel env and Redeploy.',
-          'warning'
-        );
-      }
-
       if (res.ok && data.success !== false) {
         showToast(
           'Infrastructure Status ⚡',
           data.message ||
-            'Using server environment credentials. Set VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Vercel Environment Variables (not in this form).',
+            'Using server environment credentials. Set VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Vercel Environment Variables.',
           'success'
         );
-        fetchConfig();
+        await fetchConfig();
         await checkProfilesStatus();
         return;
       }
 
-      if (looksLikeHostFailure) {
-        if (canReconfigureClient) {
-          showToast(
-            'Client Updated (API Error)',
-            'Browser Supabase URL/anon key applied locally. Set the same values plus SUPABASE_SERVICE_ROLE_KEY in Vercel → Settings → Environment Variables, then Redeploy so /api works reliably.',
-            'warning'
-          );
-          await checkProfilesStatus();
-        } else {
-          showToast(
-            'API Failed on Vercel',
-            data.error?.message ||
-              data.message ||
-              'Paste a fresh anon key (not ••••••••), set Vercel env vars (VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY), and Redeploy.',
-            'error'
-          );
-        }
-        return;
-      }
-
       showToast(
-        'Save Failed',
-        data.error?.message || data.error || data.message || 'Could not update infrastructure settings.',
+        'Status Refresh Failed',
+        data.error?.message || data.error || data.message || 'Could not read infrastructure status from server env.',
         'error'
       );
     } catch (e: any) {
@@ -872,7 +809,7 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
               className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white shadow-lg shadow-emerald-600/30 flex items-center space-x-2 transition-all cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
-              <span>{isSaving ? 'Saving...' : 'Save Config'}</span>
+              <span>{isSaving ? 'Refreshing...' : 'Refresh Env Status'}</span>
             </button>
           </div>
         </div>
@@ -1014,42 +951,26 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
               )}
             </div>
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1.5">
-                  SUPABASE PROJECT URL (REST API)
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={config.supabaseUrl}
-                    onChange={(e) => setConfig({ ...config, supabaseUrl: e.target.value })}
-                    placeholder="https://your-project-id.supabase.co"
-                    className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs text-white placeholder-slate-600 font-mono focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
+            <div className="rounded-xl border border-slate-800 bg-[#0F1115] p-4 space-y-2 font-mono text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">VITE_SUPABASE_URL</span>
+                <span className="text-emerald-300 truncate max-w-[65%] text-right">
+                  {config.supabaseUrl || '— not set in env —'}
+                </span>
               </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1.5">
-                  SUPABASE ANON PUBLIC KEY
-                </label>
-                <div className="relative">
-                  <input
-                    type={showAnonKey ? 'text' : 'password'}
-                    value={config.supabaseAnonKey}
-                    onChange={(e) => setConfig({ ...config, supabaseAnonKey: e.target.value })}
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                    className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs text-white placeholder-slate-600 font-mono pr-10 focus:outline-none focus:border-emerald-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowAnonKey(!showAnonKey)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
-                  >
-                    {showAnonKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">VITE_SUPABASE_ANON_KEY</span>
+                <span className="text-amber-300">
+                  {(config as any).supabaseAnonKeyConfigured || config.supabaseAnonKey
+                    ? '•••••••• (from env)'
+                    : '— not set —'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">SUPABASE_SERVICE_ROLE_KEY</span>
+                <span className="text-rose-300">
+                  {(config as any).supabaseServiceRoleConfigured ? '•••••••• (from env)' : '— not set —'}
+                </span>
               </div>
             </div>
 
@@ -1312,83 +1233,28 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1.5">
-                  R2 ACCOUNT ID
-                </label>
-                <input
-                  type="text"
-                  value={config.r2AccountId}
-                  onChange={(e) => setConfig({ ...config, r2AccountId: e.target.value })}
-                  placeholder="e.g. 5d92a18f4c02..."
-                  className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
+            <div className="rounded-xl border border-slate-800 bg-[#0F1115] p-4 space-y-2 font-mono text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">R2_ACCOUNT_ID</span>
+                <span className="text-cyan-300">{config.r2AccountId || '— not set —'}</span>
               </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1.5">
-                  R2 BUCKET NAME
-                </label>
-                <input
-                  type="text"
-                  value={config.r2BucketName}
-                  onChange={(e) => setConfig({ ...config, r2BucketName: e.target.value })}
-                  placeholder="livecall-media-storage"
-                  className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">R2_BUCKET_NAME</span>
+                <span className="text-cyan-300">{config.r2BucketName || '— not set —'}</span>
               </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1.5">
-                  R2 ACCESS KEY ID
-                </label>
-                <input
-                  type="text"
-                  value={config.r2AccessKeyId}
-                  onChange={(e) => setConfig({ ...config, r2AccessKeyId: e.target.value })}
-                  placeholder="e.g. 76fa9021..."
-                  className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">R2_ACCESS_KEY_ID</span>
+                <span className="text-amber-300">{config.r2AccessKeyId ? `${config.r2AccessKeyId} (masked)` : '— not set —'}</span>
               </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1.5">
-                  R2 SECRET ACCESS KEY
-                </label>
-                <div className="relative">
-                  <input
-                    type={showSecretKey ? 'text' : 'password'}
-                    value={config.r2SecretAccessKey}
-                    onChange={(e) => setConfig({ ...config, r2SecretAccessKey: e.target.value })}
-                    placeholder="e.g. ab38c9284..."
-                    className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs text-white font-mono pr-10 focus:outline-none focus:border-cyan-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowSecretKey(!showSecretKey)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
-                  >
-                    {showSecretKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">R2_SECRET_ACCESS_KEY</span>
+                <span className="text-rose-300">{config.r2SecretAccessKey ? '•••••••• (from env)' : '— not set —'}</span>
               </div>
-
-              <div className="sm:col-span-2">
-                <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider mb-1.5 flex items-center justify-between">
-                  <span>R2 PUBLIC CUSTOM DOMAIN / CDN URL (OPTIONAL)</span>
-                  <span className="text-[10px] text-cyan-400 font-normal">e.g. https://pub-xxx.r2.dev</span>
-                </label>
-                <input
-                  type="text"
-                  value={config.r2PublicUrl}
-                  onChange={(e) => setConfig({ ...config, r2PublicUrl: e.target.value })}
-                  placeholder="https://pub-yourhash.r2.dev (Leave empty to use high-speed backend proxy)"
-                  className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  💡 Note: Do NOT enter the <code className="text-cyan-400">https://&lt;accountId&gt;.r2.cloudflarestorage.com</code> S3 API endpoint. Leave this empty if you do not have an R2 public custom domain configured—the system will seamlessly stream media via backend proxy.
-                </p>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">R2_PUBLIC_URL</span>
+                <span className="text-slate-300 truncate max-w-[65%] text-right">
+                  {config.r2PublicUrl || '— optional / proxy —'}
+                </span>
               </div>
             </div>
 

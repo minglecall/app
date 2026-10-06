@@ -307,11 +307,9 @@ export const AdminDashboard: React.FC = () => {
     systemSettings.livekitVideoCodec || 'vp8'
   );
 
-  const [showSecret, setShowSecret] = useState(false);
   const [isSavingLivekit, setIsSavingLivekit] = useState(false);
   const [testTokenResult, setTestTokenResult] = useState<{ success?: boolean; message?: string; token?: string } | null>(null);
   const [isTestingToken, setIsTestingToken] = useState(false);
-  const [copiedKey, setCopiedKey] = useState(false);
 
   useEffect(() => {
     if (systemSettings.livekitApiKey !== undefined) setLivekitApiKey(systemSettings.livekitApiKey);
@@ -385,16 +383,11 @@ export const AdminDashboard: React.FC = () => {
     setEditingGift(null);
   };
 
-  const handleSaveLiveKitKeys = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSaveLiveKitQuality = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     setIsSavingLivekit(true);
-    const success = await updateLiveKitConfig({
-      apiKey: livekitApiKey.trim(),
-      apiSecret: livekitApiSecret.trim(),
-      wsUrl: livekitWsUrl.trim(),
-    });
+    await updateLiveKitConfig();
 
-    // Also persist video encoding parameters to system settings
     const currentProfile =
       livekitCaptureResolution === '4k' ? 'ultra_4k' :
       livekitCaptureResolution === '1080p' ? 'hd_1080p' :
@@ -405,7 +398,6 @@ export const AdminDashboard: React.FC = () => {
       livekitCaptureResolution,
       videoQualityProfile: currentProfile,
       livekitMaxBitrateKbps: Number(livekitMaxBitrateKbps),
-      // Never persist 60fps as publish target — client clamps too; keep stored policy honest
       livekitMaxFramerate: Math.min(30, Math.max(24, Number(livekitMaxFramerate) || 30)),
       livekitSimulcastEnabled: Boolean(livekitSimulcastEnabled),
       livekitAdaptiveStream: Boolean(livekitAdaptiveStream),
@@ -414,30 +406,14 @@ export const AdminDashboard: React.FC = () => {
       livekitExplicitlySet: true,
     });
     setLivekitMaxFramerate(Math.min(30, Math.max(24, Number(livekitMaxFramerate) || 30)));
-
     setIsSavingLivekit(false);
-    if (success) {
-      setTestTokenResult(null);
-    }
   };
 
   const handleTestTokenGen = async () => {
     setIsTestingToken(true);
     setTestTokenResult(null);
     try {
-      const saved = await updateLiveKitConfig({
-        apiKey: livekitApiKey.trim(),
-        apiSecret: livekitApiSecret.trim(),
-        wsUrl: livekitWsUrl.trim(),
-      });
-
-      if (!saved) {
-        setTestTokenResult({
-          success: false,
-          message: 'Could not save LiveKit credentials before testing. Check you are logged in as admin.',
-        });
-        return;
-      }
+      await updateLiveKitConfig();
 
       const res = await authFetch('/api/livekit/token', {
         method: 'POST',
@@ -468,7 +444,7 @@ export const AdminDashboard: React.FC = () => {
       if (res.ok && data.configured && data.token) {
         setTestTokenResult({
           success: true,
-          message: 'Token generated successfully! LiveKit WebRTC authentication is active.',
+          message: 'Token generated successfully! LiveKit WebRTC authentication is active from server env.',
           token: data.token,
         });
         showToast('Token Verified 🟢', 'LiveKit WebRTC token signed successfully!', 'success');
@@ -489,9 +465,9 @@ export const AdminDashboard: React.FC = () => {
           success: false,
           message:
             errorMessage ||
-            'Token generation failed. Please verify your API Key, Secret, and WebSocket URL.',
+            'Token generation failed. Set LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET in Vercel env and Redeploy.',
         });
-        showToast('Verification Failed 🔴', errorMessage || 'Check LiveKit keys.', 'error');
+        showToast('Verification Failed 🔴', errorMessage || 'Check LiveKit Vercel env.', 'error');
       }
     } catch (err: any) {
       setTestTokenResult({
@@ -1262,7 +1238,7 @@ export const AdminDashboard: React.FC = () => {
         />
       )}
 
-      {/* TAB 1.5: LiveKit API Keys & WebRTC Cloud Configuration */}
+      {/* TAB 1.5: LiveKit WebRTC (env-backed credentials) */}
       {activeSubTab === 'livekit' && (
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-6">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
@@ -1273,120 +1249,52 @@ export const AdminDashboard: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-lg font-extrabold text-white flex items-center space-x-2">
-                    <span>LiveKit WebRTC Cloud API Keys & Credentials</span>
+                    <span>LiveKit WebRTC Connection</span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Directly configure LiveKit API Key, Secret, and Server WebSocket URL for HD live video calls.
+                    Credentials load from server env (<code className="text-slate-300">LIVEKIT_URL</code>,{' '}
+                    <code className="text-slate-300">LIVEKIT_API_KEY</code>,{' '}
+                    <code className="text-slate-300">LIVEKIT_API_SECRET</code>). Set them in Vercel → Environment Variables, then Redeploy.
                   </p>
                 </div>
               </div>
             </div>
 
-            {/* Status Badge */}
             <div className="flex items-center space-x-2 font-mono text-xs">
-              {livekitApiKey && livekitApiSecret && livekitApiKey !== 'devkey' ? (
+              {livekitApiKey && livekitApiKey !== 'devkey' && livekitWsUrl && !livekitWsUrl.includes('your-livekit') ? (
                 <span className="px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center space-x-1.5 font-bold">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span>LIVEKIT CONFIGURED & ACTIVE</span>
+                  <span>LIVEKIT ENV ACTIVE</span>
                 </span>
               ) : (
                 <span className="px-3 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center space-x-1.5 font-bold">
                   <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-                  <span>CREDENTIALS REQUIRED</span>
+                  <span>SET LIVEKIT_* IN VERCEL ENV</span>
                 </span>
               )}
             </div>
           </div>
 
-          <form onSubmit={handleSaveLiveKitKeys} className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Server URL */}
-              <div className="md:col-span-2">
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
-                  <span className="flex items-center space-x-1.5">
-                    <Server className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>LiveKit Server WebSocket URL (LIVEKIT_URL)</span>
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-mono">e.g. wss://your-project.livekit.cloud</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={livekitWsUrl}
-                    onChange={(e) => setLivekitWsUrl(e.target.value)}
-                    placeholder="wss://your-project-id.livekit.cloud"
-                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                    required
-                  />
-                </div>
-              </div>
-
-              {/* API Key */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
-                  <span className="flex items-center space-x-1.5">
-                    <Key className="w-3.5 h-3.5 text-amber-400" />
-                    <span>LiveKit API Key (LIVEKIT_API_KEY)</span>
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-mono">Project API Key</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={livekitApiKey}
-                    onChange={(e) => setLivekitApiKey(e.target.value)}
-                    placeholder="e.g. APIKeyXXXXXXXX"
-                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-amber-300 font-mono placeholder-slate-600 focus:outline-none focus:border-amber-500"
-                    required
-                  />
-                  {livekitApiKey && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(livekitApiKey);
-                        setCopiedKey(true);
-                        setTimeout(() => setCopiedKey(false), 2000);
-                      }}
-                      className="absolute right-2.5 top-2.5 text-slate-500 hover:text-white"
-                      title="Copy Key"
-                    >
-                      {copiedKey ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* API Secret */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
-                  <span className="flex items-center space-x-1.5">
-                    <Lock className="w-3.5 h-3.5 text-rose-400" />
-                    <span>LiveKit API Secret (LIVEKIT_API_SECRET)</span>
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-mono">Private Secret Key</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type={showSecret ? 'text' : 'password'}
-                    value={livekitApiSecret}
-                    onChange={(e) => setLivekitApiSecret(e.target.value)}
-                    placeholder="e.g. SecretKeyXXXXXXXXXXXXXXXX"
-                    className="w-full pr-10 pl-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono placeholder-slate-600 focus:outline-none focus:border-purple-500"
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowSecret(!showSecret)}
-                    className="absolute right-3 top-2.5 text-slate-400 hover:text-white"
-                  >
-                    {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 space-y-2 font-mono text-xs">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-slate-500">LIVEKIT_URL</span>
+              <span className="text-indigo-300 truncate max-w-[70%] text-right">
+                {livekitWsUrl && !livekitWsUrl.includes('your-livekit') ? livekitWsUrl : '— not set —'}
+              </span>
             </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-slate-500">LIVEKIT_API_KEY</span>
+              <span className="text-amber-300">{livekitApiKey ? '•••••••• (from env)' : '— not set —'}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-slate-500">LIVEKIT_API_SECRET</span>
+              <span className="text-rose-300">{livekitApiSecret ? '•••••••• (from env)' : '— not set —'}</span>
+            </div>
+          </div>
 
+          <form onSubmit={handleSaveLiveKitQuality} className="space-y-6">
             {/* System Defined Video Quality Presets & Global Policy */}
-            <div className="pt-5 border-t border-slate-800 space-y-4">
+            <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="flex items-center space-x-2">
                   <Video className="w-4 h-4 text-cyan-400" />
@@ -1530,7 +1438,16 @@ export const AdminDashboard: React.FC = () => {
                 ) : (
                   <CheckCircle2 className="w-4 h-4 text-slate-950" />
                 )}
-                <span>Save LiveKit API Keys & Activate</span>
+                <span>Save Video Quality Policy</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void updateLiveKitConfig()}
+                className="px-5 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs rounded-xl transition-all flex items-center space-x-2"
+              >
+                <RefreshCw className="w-4 h-4 text-indigo-400" />
+                <span>Refresh Env Status</span>
               </button>
 
               <button
@@ -1549,7 +1466,6 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </form>
 
-          {/* Verification Test Result Card */}
           {testTokenResult && (
             <div
               className={`p-4 rounded-2xl border ${
@@ -1576,17 +1492,15 @@ export const AdminDashboard: React.FC = () => {
             </div>
           )}
 
-          {/* Setup Guide Box */}
           <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-2">
             <h4 className="text-xs font-bold text-white flex items-center space-x-1.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>How to get your LiveKit Cloud API Keys</span>
+              <span>Where LiveKit keys live</span>
             </h4>
             <ol className="list-decimal list-inside text-xs text-slate-400 space-y-1 font-sans">
-              <li>Log in or create a free account at <a href="https://livekit.io" target="_blank" rel="noopener noreferrer" className="text-indigo-400 underline">livekit.io</a>.</li>
-              <li>Create a new project and open <strong>Project Settings &rarr; Keys</strong>.</li>
-              <li>Copy your <strong>Server URL (wss://...)</strong>, <strong>API Key</strong>, and <strong>API Secret</strong>.</li>
-              <li>Paste them directly into the fields above and click <strong>"Save LiveKit API Keys & Activate"</strong>.</li>
+              <li>Local: set <code className="text-slate-300">LIVEKIT_*</code> in <code className="text-slate-300">.env</code>.</li>
+              <li>Production: Vercel → Project → Settings → Environment Variables (Production).</li>
+              <li>Redeploy after any key change, then click <strong>Verify Token Signature</strong>.</li>
             </ol>
           </div>
         </div>

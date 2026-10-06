@@ -718,74 +718,34 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                   </div>
                 )}
 
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Supabase Project URL (<code className="text-emerald-400 font-mono">VITE_SUPABASE_URL</code>)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.supabaseUrl}
-                      onChange={(e) => setFormData({ ...formData, supabaseUrl: e.target.value })}
-                      placeholder="https://your-project-id.supabase.co"
-                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-emerald-300 font-mono focus:outline-none focus:border-emerald-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Supabase Anon Public Key (<code className="text-slate-400 font-mono">VITE_SUPABASE_ANON_KEY</code>)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.supabaseAnonKey}
-                      onChange={(e) => setFormData({ ...formData, supabaseAnonKey: e.target.value })}
-                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center justify-between">
-                      <span>Supabase Service Role Secret (<code className="text-rose-400 font-mono">SUPABASE_SERVICE_ROLE_KEY</code>)</span>
-                      <span className="text-[10px] text-slate-500">Required for Admin Operations</span>
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showSecretKey['sb_service'] ? 'text' : 'password'}
-                        value={formData.supabaseServiceRoleKey}
-                        onChange={(e) => setFormData({ ...formData, supabaseServiceRoleKey: e.target.value })}
-                        placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                        className="w-full pr-10 pl-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleSecret('sb_service')}
-                        className="absolute right-3 top-2.5 text-slate-500 hover:text-white"
-                      >
-                        {showSecretKey['sb_service'] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="pt-2">
-                    <button
-                      type="button"
-                      onClick={handleTestDatabase}
-                      disabled={testStates.db.loading || !formData.supabaseUrl}
-                      className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center space-x-2 transition-all shadow-md shadow-emerald-600/30 cursor-pointer"
-                    >
-                      {testStates.db.loading ? (
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <>
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>Test Database Connection</span>
-                        </>
-                      )}
-                    </button>
+                <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-xs text-emerald-200 font-sans space-y-2">
+                  <p className="font-bold text-emerald-300">Keys come from <code className="text-white">.env</code> / Vercel Environment Variables — not from this form.</p>
+                  <p className="text-emerald-200/80">
+                    Set <code className="text-white">VITE_SUPABASE_URL</code>, <code className="text-white">VITE_SUPABASE_ANON_KEY</code>, and{' '}
+                    <code className="text-white">SUPABASE_SERVICE_ROLE_KEY</code>, then restart / redeploy.
+                  </p>
+                  <div className="font-mono text-[11px] text-slate-300 space-y-1 pt-1">
+                    <div>URL: <span className="text-emerald-300">{formData.supabaseUrl || '— not loaded —'}</span></div>
+                    <div>Anon: <span className="text-amber-300">{formData.supabaseAnonKey ? '•••••••• (env)' : '— not loaded —'}</span></div>
+                    <div>Service: <span className="text-rose-300">{formData.supabaseServiceRoleKey ? '•••••••• (env)' : '— not loaded —'}</span></div>
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={handleTestDatabase}
+                  disabled={testStates.db.loading || !formData.supabaseUrl}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center space-x-2 transition-all shadow-md shadow-emerald-600/30 cursor-pointer"
+                >
+                  {testStates.db.loading ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Test Database Connection</span>
+                    </>
+                  )}
+                </button>
               </div>
             )}
 
@@ -826,56 +786,20 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                   </div>
                 )}
 
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs text-amber-100 font-sans space-y-2">
+                  <p className="font-bold text-amber-300">LiveKit keys come from <code className="text-white">.env</code> / Vercel — not this form.</p>
+                  <p className="text-amber-100/80">
+                    Set <code className="text-white">LIVEKIT_URL</code>, <code className="text-white">LIVEKIT_API_KEY</code>,{' '}
+                    <code className="text-white">LIVEKIT_API_SECRET</code>, then restart / redeploy.
+                  </p>
+                  <div className="font-mono text-[11px] text-slate-300 space-y-1 pt-1">
+                    <div>URL: <span className="text-amber-300">{formData.livekitUrl || '— not loaded —'}</span></div>
+                    <div>API Key: <span className="text-amber-200">{formData.livekitApiKey ? '•••••••• (env)' : '— not loaded —'}</span></div>
+                    <div>Secret: <span className="text-rose-300">{formData.livekitApiSecret ? '•••••••• (env)' : '— not loaded —'}</span></div>
+                  </div>
+                </div>
+
                 <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      LiveKit Server WebSocket URL (<code className="text-amber-400 font-mono">LIVEKIT_URL</code>)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.livekitUrl}
-                      onChange={(e) => setFormData({ ...formData, livekitUrl: e.target.value })}
-                      placeholder="wss://your-project.livekit.cloud or wss://livekit.yourdomain.com"
-                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-amber-300 font-mono focus:outline-none focus:border-amber-500"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        API Key (<code className="text-slate-400 font-mono">LIVEKIT_API_KEY</code>)
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.livekitApiKey}
-                        onChange={(e) => setFormData({ ...formData, livekitApiKey: e.target.value })}
-                        placeholder="e.g. APIxxxxxxxx"
-                        className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-amber-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        API Secret (<code className="text-slate-400 font-mono">LIVEKIT_API_SECRET</code>)
-                      </label>
-                      <div className="relative">
-                        <input
-                          type={showSecretKey['lk_secret'] ? 'text' : 'password'}
-                          value={formData.livekitApiSecret}
-                          onChange={(e) => setFormData({ ...formData, livekitApiSecret: e.target.value })}
-                          placeholder="e.g. secretxxxxxxxx"
-                          className="w-full pr-10 pl-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-amber-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret('lk_secret')}
-                          className="absolute right-3 top-2.5 text-slate-500 hover:text-white"
-                        >
-                          {showSecretKey['lk_secret'] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
 
                   <div className="pt-2">
                     <button
@@ -926,79 +850,17 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Cloudflare Account ID (<code className="text-indigo-400 font-mono">R2_ACCOUNT_ID</code>)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.r2AccountId}
-                      onChange={(e) => setFormData({ ...formData, r2AccountId: e.target.value })}
-                      placeholder="e.g. 488a0e8d087b328..."
-                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      R2 Access Key ID (<code className="text-slate-400 font-mono">R2_ACCESS_KEY_ID</code>)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.r2AccessKeyId}
-                      onChange={(e) => setFormData({ ...formData, r2AccessKeyId: e.target.value })}
-                      placeholder="e.g. 8d31a5bc382..."
-                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      R2 Secret Access Key (<code className="text-slate-400 font-mono">R2_SECRET_ACCESS_KEY</code>)
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showSecretKey['r2_secret'] ? 'text' : 'password'}
-                        value={formData.r2SecretAccessKey}
-                        onChange={(e) => setFormData({ ...formData, r2SecretAccessKey: e.target.value })}
-                        placeholder="e.g. 74ef09..."
-                        className="w-full pr-10 pl-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleSecret('r2_secret')}
-                        className="absolute right-3 top-2.5 text-slate-500 hover:text-white"
-                      >
-                        {showSecretKey['r2_secret'] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Bucket Name (<code className="text-slate-400 font-mono">R2_BUCKET_NAME</code>)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.r2BucketName}
-                      onChange={(e) => setFormData({ ...formData, r2BucketName: e.target.value })}
-                      placeholder="livecall-media-storage"
-                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Public CDN URL (<code className="text-slate-400 font-mono">R2_PUBLIC_URL</code>)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.r2PublicUrl}
-                      onChange={(e) => setFormData({ ...formData, r2PublicUrl: e.target.value })}
-                      placeholder="https://media.yourdomain.com"
-                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
-                    />
+                <div className="rounded-2xl border border-indigo-500/30 bg-indigo-500/5 p-4 text-xs text-indigo-100 font-sans space-y-2">
+                  <p className="font-bold text-indigo-300">R2 keys come from <code className="text-white">.env</code> / Vercel — not this form.</p>
+                  <p className="text-indigo-100/80">
+                    Set <code className="text-white">R2_ACCOUNT_ID</code>, <code className="text-white">R2_ACCESS_KEY_ID</code>,{' '}
+                    <code className="text-white">R2_SECRET_ACCESS_KEY</code>, <code className="text-white">R2_BUCKET_NAME</code>, then restart / redeploy.
+                  </p>
+                  <div className="font-mono text-[11px] text-slate-300 space-y-1 pt-1">
+                    <div>Account: <span className="text-indigo-300">{formData.r2AccountId || '— not loaded —'}</span></div>
+                    <div>Bucket: <span className="text-indigo-300">{formData.r2BucketName || '— not loaded —'}</span></div>
+                    <div>Access Key: <span className="text-amber-300">{formData.r2AccessKeyId ? '•••••••• (env)' : '— not loaded —'}</span></div>
+                    <div>Secret: <span className="text-rose-300">{formData.r2SecretAccessKey ? '•••••••• (env)' : '— not loaded —'}</span></div>
                   </div>
                 </div>
 

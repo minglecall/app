@@ -8,6 +8,7 @@ import {
   readJsonBody,
   requireAuthFromBearer,
   getLiveKitEnv,
+  createServiceClient,
   type VercelReq,
   type VercelRes,
 } from '../../vercelAuth';
@@ -42,17 +43,36 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       return sendJson(res, 403, { error: 'Admin test rooms require admin privileges.' });
     }
 
-    // Without in-memory activeCalls on Vercel, allow join when the room id contains the caller's id,
-    // or when admin. Full call-membership checks remain on the long-lived Node server.
+    // Authorize room join from env-backed Supabase when possible (Vercel has no in-memory activeCalls).
     if (!isAdminTestRoom && !isAdmin) {
       const memberHint =
         roomName.includes(identity) ||
         roomName.includes(auth.userId) ||
-        roomName.startsWith('call_');
+        roomName.startsWith('call_') ||
+        roomName.startsWith('lk_');
+
+      let dbMember = false;
       if (!memberHint) {
+        const client = createServiceClient();
+        if (client) {
+          const { data: callRow } = await client
+            .from('call_logs')
+            .select('caller_id, receiver_id, host_id')
+            .eq('id', roomName)
+            .maybeSingle();
+          const ids = [
+            callRow?.caller_id,
+            callRow?.receiver_id,
+            (callRow as any)?.host_id,
+          ].map((v) => String(v || ''));
+          dbMember = ids.includes(identity) || ids.includes(auth.userId);
+        }
+      }
+
+      if (!memberHint && !dbMember) {
         return sendJson(res, 403, {
           error:
-            'Call room authorization requires the Node signaling server. On Vercel-only hosting, room names must include your user id, or run the full Express server.',
+            'Not authorized for this LiveKit room. Join only works for calls you participate in.',
         });
       }
     }

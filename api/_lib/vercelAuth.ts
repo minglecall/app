@@ -38,9 +38,10 @@ export function extractBearer(req: IncomingMessage): string | null {
 }
 
 export function getSupabaseEnv() {
-  const url = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
-  const anonKey = (process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
-  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  const clean = (v: string) => v.trim().replace(/^["']|["']$/g, '');
+  const url = clean(process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '');
+  const anonKey = clean(process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '');
+  const serviceKey = clean(process.env.SUPABASE_SERVICE_ROLE_KEY || '');
   return { url, anonKey, serviceKey };
 }
 
@@ -56,10 +57,11 @@ export function getR2Env() {
 }
 
 export function getLiveKitEnv() {
+  const clean = (v: string) => v.trim().replace(/^["']|["']$/g, '');
   return {
-    wsUrl: (process.env.LIVEKIT_URL || '').trim(),
-    apiKey: (process.env.LIVEKIT_API_KEY || '').trim(),
-    apiSecret: (process.env.LIVEKIT_API_SECRET || '').trim(),
+    wsUrl: clean(process.env.LIVEKIT_URL || ''),
+    apiKey: clean(process.env.LIVEKIT_API_KEY || ''),
+    apiSecret: clean(process.env.LIVEKIT_API_SECRET || ''),
   };
 }
 

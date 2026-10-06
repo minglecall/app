@@ -333,7 +333,7 @@ interface AppContextType {
 
   // Admin Operations
   updateSystemSettings: (newSettings: Partial<SystemSettings>) => void;
-  updateLiveKitConfig: (config: { apiKey: string; apiSecret: string; wsUrl: string }) => Promise<boolean>;
+  updateLiveKitConfig: (config?: { apiKey?: string; apiSecret?: string; wsUrl?: string }) => Promise<boolean>;
   saveCoinPackage: (pkg: Partial<CoinPackage> & { id?: string }) => void;
   deleteCoinPackage: (packageId: string) => void;
   saveCurrencyConfigs: (configs: CurrencyItem[]) => void;
@@ -5055,19 +5055,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return false;
   };
 
-  // Load initial LiveKit config from server on mount
+  // Load LiveKit status from server env on mount (never accept secrets from the browser).
   useEffect(() => {
     authFetch('/api/livekit/config')
       .then((res) => res.json())
       .then((data) => {
-        if (data && (data.apiKey || data.wsUrl)) {
-          setSystemSettings((prev) => ({
-            ...prev,
-            livekitApiKey: data.apiKey || prev.livekitApiKey || '',
-            livekitApiSecret: data.apiSecret || prev.livekitApiSecret || '',
-            livekitWsUrl: data.wsUrl || prev.livekitWsUrl || 'wss://your-livekit-project.livekit.cloud',
-          }));
-        }
+        if (!data) return;
+        setSystemSettings((prev) => ({
+          ...prev,
+          livekitApiKey: data.configured ? '••••••••' : '',
+          livekitApiSecret: data.configured ? '••••••••' : '',
+          livekitWsUrl: data.wsUrl || prev.livekitWsUrl || '',
+        }));
       })
       .catch(() => { });
   }, []);
@@ -5126,35 +5125,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     showToast('System Settings Saved ⚙️', 'Economy parameters, taxonomies, and platform settings saved live.', 'success');
   };
 
-  const updateLiveKitConfig = async (config: { apiKey: string; apiSecret: string; wsUrl: string }): Promise<boolean> => {
+  /** Refresh LiveKit status from server env (secrets are never accepted from the browser). */
+  const updateLiveKitConfig = async (_config?: {
+    apiKey?: string;
+    apiSecret?: string;
+    wsUrl?: string;
+  }): Promise<boolean> => {
     try {
-      const res = await authFetch('/api/livekit/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
+      const res = await authFetch('/api/livekit/config');
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success !== false) {
         setSystemSettings((prev) => ({
           ...prev,
-          // Server does not echo secrets back — keep the values we just saved
-          livekitApiKey: config.apiKey || prev.livekitApiKey || '',
-          livekitApiSecret: config.apiSecret || prev.livekitApiSecret || '',
-          livekitWsUrl: data.wsUrl || config.wsUrl || prev.livekitWsUrl || '',
+          livekitApiKey: data.configured ? '••••••••' : '',
+          livekitApiSecret: data.configured ? '••••••••' : '',
+          livekitWsUrl: data.wsUrl || prev.livekitWsUrl || '',
         }));
-        showToast('LiveKit Keys Saved 🔑', 'LiveKit WebRTC credentials updated and active on server!', 'success');
-        return true;
-      } else {
-        const errMsg =
-          (typeof data?.error === 'string' && data.error) ||
-          data?.error?.message ||
-          data?.message ||
-          'Failed to update credentials';
-        showToast('Error Saving LiveKit Keys', errMsg, 'error');
-        return false;
+        if (data.configured) {
+          showToast(
+            'LiveKit Env Active 🔑',
+            data.message || 'LiveKit credentials are loaded from server environment variables.',
+            'success'
+          );
+        } else {
+          showToast(
+            'LiveKit Not Configured',
+            data.message || 'Set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET in Vercel env and Redeploy.',
+            'warning'
+          );
+        }
+        return Boolean(data.configured);
       }
-    } catch (err: any) {
-      showToast('Connection Error', 'Could not reach server to update LiveKit keys.', 'error');
+      showToast('LiveKit Status Error', data?.error?.message || data?.error || 'Could not read LiveKit config', 'error');
+      return false;
+    } catch {
+      showToast('Connection Error', 'Could not reach server for LiveKit status.', 'error');
       return false;
     }
   };
