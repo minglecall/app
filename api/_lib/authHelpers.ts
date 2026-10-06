@@ -97,3 +97,15 @@ export async function signInWithPassword(email: string, password: string) {
 }
 
 export { getPasswordPolicyError };
+
+/** Find Auth user by email — typed for Vercel serverless TS (listUsers users can infer as never). */
+export function findAuthUserByEmail(
+  users: Array<{ id: string; email?: string | null }> | null | undefined,
+  email: string
+): { id: string; email?: string | null } | undefined {
+  const target = String(email || '')
+    .trim()
+    .toLowerCase();
+  if (!target || !Array.isArray(users)) return undefined;
+  return users.find((u) => String(u?.email || '').toLowerCase() === target);
+}

@@ -7,7 +7,7 @@ import {
   type VercelReq,
   type VercelRes,
 } from '../_lib/vercelAuth';
-import { mapProfileRow } from '../_lib/authHelpers';
+import { mapProfileRow, findAuthUserByEmail } from '../_lib/authHelpers';
 
 export default async function handler(req: VercelReq, res: VercelRes) {
   if (req.method === 'OPTIONS') {
@@ -108,7 +108,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     // Password sync for admin creates
     if (isAdmin && typeof raw.password === 'string' && raw.password && raw.email) {
       const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-      const matched = list?.users?.find((u) => u.email?.toLowerCase() === String(raw.email).toLowerCase());
+      const matched = findAuthUserByEmail(list?.users as any, String(raw.email));
       if (matched) {
         await client.auth.admin.updateUserById(matched.id, {
           password: raw.password,

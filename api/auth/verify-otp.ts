@@ -5,6 +5,7 @@ import {
   sanitizePublicSignupRole,
   getPasswordPolicyError,
   findProfileByEmail,
+  findAuthUserByEmail,
 } from '../_lib/authHelpers';
 import { verifyOtpDb, takePendingSignupDb } from '../_lib/otpDb';
 
@@ -71,7 +72,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       // Ignore "already registered" — client may have signed up already
       if (createErr && !/already/i.test(createErr.message)) {
         const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-        const matched = list?.users?.find((u) => u.email?.toLowerCase() === cleanEmail);
+        const matched = findAuthUserByEmail(list?.users as any, cleanEmail);
         if (matched) {
           await client.auth.admin.updateUserById(matched.id, {
             password,
@@ -86,7 +87,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       }
     } else {
       const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-      const matched = list?.users?.find((u) => u.email?.toLowerCase() === cleanEmail);
+      const matched = findAuthUserByEmail(list?.users as any, cleanEmail);
       if (matched) {
         await client.auth.admin.updateUserById(matched.id, { email_confirm: true });
       }

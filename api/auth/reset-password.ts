@@ -1,5 +1,5 @@
 import { sendJson, readJsonBody, createServiceClient, type VercelReq, type VercelRes } from '../_lib/vercelAuth';
-import { isValidEmail, isValidOtpToken, getPasswordPolicyError } from '../_lib/authHelpers';
+import { isValidEmail, isValidOtpToken, getPasswordPolicyError, findAuthUserByEmail } from '../_lib/authHelpers';
 import { verifyOtpDb } from '../_lib/otpDb';
 
 export default async function handler(req: VercelReq, res: VercelRes) {
@@ -37,7 +37,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     }
 
     const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-    const matched = list?.users?.find((u) => u.email?.toLowerCase() === email);
+    const matched = findAuthUserByEmail(list?.users as any, email);
     if (!matched) {
       return sendJson(res, 404, { success: false, error: 'No auth user found for this email' });
     }

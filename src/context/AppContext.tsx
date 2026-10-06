@@ -2665,22 +2665,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                             u.email.toLowerCase().trim() === cleanEmail
                         )))
                 );
-                const mergedUser = {
+                const resolvedId =
+                  (refersToLoggedInUser ? currentId : undefined) ||
+                  incoming.id ||
+                  prior?.id;
+                if (!resolvedId) {
+                  return prev;
+                }
+                const mergedUser: UserProfile = {
                   ...(prior || {}),
                   ...incoming,
-                  id: refersToLoggedInUser ? currentId! : incoming.id || prior?.id,
+                  id: resolvedId,
                   coinBalance:
                     incoming.coinBalance !== undefined
                       ? incoming.coinBalance
-                      : prior?.coinBalance,
+                      : prior?.coinBalance ?? 0,
                   earningsCoins:
                     incoming.earningsCoins !== undefined
                       ? incoming.earningsCoins
-                      : prior?.earningsCoins,
+                      : prior?.earningsCoins ?? 0,
                   onlineStatus:
-                    refersToLoggedInUser
+                    (refersToLoggedInUser
                       ? prior?.onlineStatus || incoming.onlineStatus
-                      : incoming.onlineStatus ?? prior?.onlineStatus,
+                      : incoming.onlineStatus ?? prior?.onlineStatus) ?? 'offline',
                 };
                 return [...remaining, mergedUser];
               });
