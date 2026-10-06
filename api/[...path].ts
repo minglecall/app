@@ -1,20 +1,17 @@
 /**
- * Single Vercel serverless entry for all /api/* routes (Hobby plan ≤12 functions).
+ * Catch-all for app API routes (Hobby-safe; shared with a few probe functions).
  *
- * Handlers MUST be statically imported so Vercel bundles them into this function.
- * Dynamic import('./_lib/handlers/...') fails at runtime with:
- *   Cannot find module '/var/task/api/_lib/handlers/...'
- *
- * Heavy deps (AWS SDK via server/r2Storage) stay behind dynamic import() inside
- * those specific handlers — not at this file's top level.
+ * Critical probes are SEPARATE CommonJS functions so they never depend on this
+ * file booting (avoids FUNCTION_INVOCATION_FAILED for /api/health, /api/ping,
+ * /api/r2-test):
+ *   - api/health.js
+ *   - api/ping.js
+ *   - api/r2-test.js
+ *   - api/storage/test-connection.js
  *
  * Do not import Express/server.ts here.
  */
 import type { VercelReq, VercelRes } from './_lib/vercelAuth';
-
-import health from './_lib/handlers/health';
-import ping from './_lib/handlers/ping';
-import r2Test from './_lib/handlers/r2Test';
 
 import authSendOtp from './_lib/handlers/auth/send-otp';
 import authVerifyOtp from './_lib/handlers/auth/verify-otp';
@@ -44,7 +41,6 @@ import callsBurn from './_lib/handlers/calls/burn';
 
 import storageConfig from './_lib/handlers/storage/config';
 import storagePresignedUrl from './_lib/handlers/storage/presigned-url';
-import storageTestConnection from './_lib/handlers/storage/test-connection';
 
 import livekitConfig from './_lib/handlers/livekit/config';
 import livekitToken from './_lib/handlers/livekit/token';
@@ -58,38 +54,16 @@ import teamleaderRouter from './_lib/handlers/teamleader';
 type Handler = (req: VercelReq, res: VercelRes) => unknown | Promise<unknown>;
 
 const AVAILABLE_ROUTES = [
-  'GET /api/health',
-  'GET /api/ping',
-  'GET /api/admin/api-health',
-  'GET|POST /api/r2-test',
-  'GET|POST /api/admin/infra-config',
-  'POST /api/admin/create-team-leader',
+  'GET /api/health (standalone)',
+  'GET /api/ping (standalone)',
+  'GET|POST /api/r2-test (standalone)',
   'POST /api/admin/cms/seed-defaults',
-  'POST /api/auth/send-otp',
-  'POST /api/auth/verify-otp',
-  'POST /api/auth/login-password',
-  'POST /api/auth/register-bootstrap',
-  'POST /api/auth/reset-password',
-  'POST /api/auth/update-password',
+  'POST /api/auth/*',
   'GET|POST /api/users',
-  'POST /api/users/sync-all',
-  'POST /api/users/me/delete',
-  'GET|POST /api/presence',
-  'POST /api/presence/heartbeat',
-  'POST /api/supabase/update-status',
-  'GET|POST /api/messages',
-  'GET /api/messages/conversation/:id',
-  'POST /api/messages/read',
-  'ALL /api/v1/* (matches, friends, blocks, favorites, feed)',
-  'POST /api/gifts/send',
-  'POST /api/calls/sync',
-  'POST /api/calls/burn',
+  'ALL /api/v1/*',
   'ALL /api/teamleader/*',
-  'GET|POST /api/livekit/config',
   'POST /api/livekit/token',
-  'GET /api/storage/config',
   'POST /api/storage/presigned-url',
-  'POST /api/storage/test-connection',
 ];
 
 function pathAfterApi(req: VercelReq): string {
@@ -100,7 +74,6 @@ function pathAfterApi(req: VercelReq): string {
   if (Array.isArray(q) && q.length > 0) {
     return q.map(String).join('/').replace(/^\/+/, '').replace(/\/+$/, '');
   }
-
   try {
     const pathname = new URL(req.url || '', 'http://localhost').pathname;
     return pathname.replace(/^\/api\/?/, '').replace(/\/+$/, '');
@@ -120,25 +93,25 @@ function notImplemented(req: VercelReq, res: VercelRes) {
     JSON.stringify({
       success: false,
       error: {
-        message:
-          'This API route is not implemented on the Vercel serverless deployment yet. Core auth, users, presence, messages, social (v1), gifts, calls, LiveKit, and storage are available. Signaling uses Supabase Realtime (not /ws).',
+        message: 'This API route is not implemented on the Vercel serverless deployment yet.',
         code: 'VERCEL_ROUTE_NOT_IMPLEMENTED',
         path: String(req.url || ''),
       },
-      vercel: {
-        availableRoutes: AVAILABLE_ROUTES,
-        signaling: 'supabase-realtime',
-        note: 'Leave VITE_API_BASE_URL unset. Point minglecall.com DNS to this Vercel project. All /api/* routes share one Hobby-safe serverless function.',
-      },
+      vercel: { availableRoutes: AVAILABLE_ROUTES, signaling: 'supabase-realtime' },
     })
   );
 }
 
 function resolveHandler(path: string): Handler | null {
-  if (path === 'health') return health;
-  if (path === 'ping') return ping;
-  if (path === 'r2-test') return r2Test;
-  if (path === 'storage/test-connection') return storageTestConnection;
+  // Probes are handled by dedicated api/*.js functions; do not bind them here.
+  if (
+    path === 'health' ||
+    path === 'ping' ||
+    path === 'r2-test' ||
+    path === 'storage/test-connection'
+  ) {
+    return null;
+  }
 
   if (path === 'auth/send-otp') return authSendOtp;
   if (path === 'auth/verify-otp') return authVerifyOtp;
