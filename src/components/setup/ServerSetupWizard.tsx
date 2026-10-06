@@ -27,6 +27,7 @@ import {
 import { ServerDiagnosticInfo, SetupConfigPayload } from '../../types';
 import { PasswordStrengthField } from '../auth/PasswordStrengthField';
 import { getPasswordPolicyError } from '../../../shared/passwordPolicy';
+import { apiFetch } from '../../utils/apiClient';
 
 interface ServerSetupWizardProps {
   onComplete?: () => void;
@@ -112,7 +113,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
   const fetchServerStatus = async () => {
     setLoadingDiag(true);
     try {
-      const res = await fetch('/api/setup/status');
+      const res = await apiFetch('/api/setup/status');
       const data = await res.json();
       if (data.success) {
         setDiagInfo(data);
@@ -153,7 +154,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     setAuthLoading(true);
     setAuthError('');
     try {
-      const res = await fetch('/api/setup/auth', {
+      const res = await apiFetch('/api/setup/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({ email: authEmail, password: authPassword }),
@@ -182,7 +183,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
   const handleTestDatabase = async () => {
     setTestStates((prev) => ({ ...prev, db: { loading: true } }));
     try {
-      const res = await fetch('/api/setup/test-db', {
+      const res = await apiFetch('/api/setup/test-db', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
@@ -207,7 +208,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
   const handleTestLiveKit = async () => {
     setTestStates((prev) => ({ ...prev, livekit: { loading: true } }));
     try {
-      const res = await fetch('/api/setup/test-livekit', {
+      const res = await apiFetch('/api/setup/test-livekit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
@@ -233,7 +234,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
   const handleTestR2 = async () => {
     setTestStates((prev) => ({ ...prev, r2: { loading: true } }));
     try {
-      const res = await fetch('/api/setup/test-r2', {
+      const res = await apiFetch('/api/setup/test-r2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
@@ -261,7 +262,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
   const handleTestSmtp = async () => {
     setTestStates((prev) => ({ ...prev, smtp: { loading: true } }));
     try {
-      const res = await fetch('/api/setup/test-smtp', {
+      const res = await apiFetch('/api/setup/test-smtp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify({
@@ -307,7 +308,7 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
     }
     setTestStates((prev) => ({ ...prev, save: { loading: true } }));
     try {
-      const res = await fetch('/api/setup/save-all', {
+      const res = await apiFetch('/api/setup/save-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Setup-Token': setupToken },
         body: JSON.stringify(formData),

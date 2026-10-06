@@ -2,7 +2,7 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { UserProfile, UserRole, OnboardingFormData } from '../types';
 import { mapDbProfileToUserProfile, upsertProfileToSupabase, isValidUuid } from './supabaseService';
 import { getPasswordPolicyError } from '../../shared/passwordPolicy';
-import { authFetch, getAccessToken } from '../utils/apiClient';
+import { authFetch, getAccessToken, apiFetch } from '../utils/apiClient';
 
 export interface SupabaseAuthResult {
   success: boolean;
@@ -187,7 +187,7 @@ export async function signUpWithEmailOtp(params: {
     // Resilient path: service-role bootstrap for orphan Auth / trigger / empty-user cases
     if (!createdUserId && (clientSignUpFailedForBootstrap || !createdUserId)) {
       try {
-        const bootRes = await fetch('/api/auth/register-bootstrap', {
+        const bootRes = await apiFetch('/api/auth/register-bootstrap', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -235,7 +235,7 @@ export async function signUpWithEmailOtp(params: {
 
   // 2. Dispatch custom 6-digit OTP (also stores pending password for post-verify Auth confirm)
   try {
-    const sRes = await fetch('/api/auth/send-otp', {
+    const sRes = await apiFetch('/api/auth/send-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -494,7 +494,7 @@ export async function verifyEmailOtp(
 
   // Server-side OTP verification fallback (custom email OTP when Supabase verifyOtp fails)
   try {
-    const serverVerifyRes = await fetch('/api/auth/verify-otp', {
+    const serverVerifyRes = await apiFetch('/api/auth/verify-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -655,7 +655,7 @@ export async function resendEmailOtp(email: string): Promise<{ success: boolean;
 
   // 1. Trigger server email dispatch
   try {
-    const sRes = await fetch('/api/auth/send-otp', {
+    const sRes = await apiFetch('/api/auth/send-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: cleanEmail }),
@@ -822,7 +822,7 @@ export async function signInWithEmailPassword(
 
   // Server Auth-only verification when client Supabase is not configured
   try {
-    const res = await fetch('/api/auth/login-password', {
+    const res = await apiFetch('/api/auth/login-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: cleanEmail, password }),
@@ -874,7 +874,7 @@ export async function requestPasswordResetOtp(email: string): Promise<{
   }
 
   try {
-    const sRes = await fetch('/api/auth/send-otp', {
+    const sRes = await apiFetch('/api/auth/send-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -915,7 +915,7 @@ export async function resetPasswordWithOtp(params: {
   }
 
   try {
-    const res = await fetch('/api/auth/reset-password', {
+    const res = await apiFetch('/api/auth/reset-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -989,7 +989,7 @@ export async function updateUserPassword(params: {
 
   // 2. Call server update-password API (updates Supabase Auth via admin and server memory)
   try {
-    const res = await fetch('/api/auth/update-password', {
+    const res = await apiFetch('/api/auth/update-password', {
       method: 'POST',
       headers: await (await import('../utils/apiClient')).authHeaders(),
       body: JSON.stringify({ newPassword }),

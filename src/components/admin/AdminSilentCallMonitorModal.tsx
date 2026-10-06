@@ -34,6 +34,7 @@ import {
 import { AdminActiveCall } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { DEFAULT_COIN_BURN_RATE_PER_MIN } from '../../../shared/finance/economyBurn';
+import { authFetch } from '../../utils/apiClient';
 
 interface AdminSilentCallMonitorModalProps {
   call: AdminActiveCall;
@@ -99,7 +100,7 @@ export const AdminSilentCallMonitorModal: React.FC<AdminSilentCallMonitorModalPr
     async function connectSilentSpectator() {
       try {
         setLivekitStatusText('Requesting Surveillance Token...');
-        const res = await fetch('/api/livekit/token', {
+        const res = await authFetch('/api/livekit/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

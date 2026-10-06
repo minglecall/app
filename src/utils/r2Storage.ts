@@ -1,4 +1,5 @@
 import { getAccessToken } from './apiClient';
+import { apiUrl } from './apiBase';
 
 export interface DirectUploadOptions {
   file: File;
@@ -91,7 +92,7 @@ async function uploadMediaViaServerFallback(
 
   if (onProgress) onProgress(70);
 
-  const res = await fetch('/api/storage/upload', {
+  const res = await fetch(apiUrl('/api/storage/upload'), {
     method: 'POST',
     headers: await getAuthJsonHeaders(),
     body: JSON.stringify({
@@ -179,7 +180,7 @@ export async function uploadMediaDirectlyToR2(
 
   try {
     // 1. Request presigned URL from server API (authenticated)
-    const presignRes = await fetch('/api/storage/presigned-url', {
+    const presignRes = await fetch(apiUrl('/api/storage/presigned-url'), {
       method: 'POST',
       headers: await getAuthJsonHeaders(),
       body: JSON.stringify({

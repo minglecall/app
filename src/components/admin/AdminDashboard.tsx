@@ -57,6 +57,7 @@ import {
   ChevronRight,
   Target,
   Landmark,
+  Activity,
 } from 'lucide-react';
 import { CoinPackage, UserProfile, AdminActiveCall, getUserRoleLabel, getFemaleRoleMark, VirtualGift } from '../../types';
 import { getCoinUsdPeg, coinsToUsd, usdToCoins, formatPegExample } from '../../../shared/finance/fx';
@@ -89,6 +90,7 @@ import { AdminHomeCMS } from './AdminHomeCMS';
 import { UserAnalyticsModal } from './UserAnalyticsModal';
 import { AdminSilentCallMonitorModal } from './AdminSilentCallMonitorModal';
 import { AdminDatabaseStorageConfig } from './AdminDatabaseStorageConfig';
+import { AdminApiHealthPanel } from './AdminApiHealthPanel';
 import { ResetMockDataModal } from './ResetMockDataModal';
 import { AdminTaxonomyManager } from './AdminTaxonomyManager';
 import { AdminCreatorTargetConfig } from './AdminCreatorTargetConfig';
@@ -174,7 +176,7 @@ export const AdminDashboard: React.FC = () => {
   const [isSyncingFromDb, setIsSyncingFromDb] = useState(false);
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
 
-  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'monitoring' | 'financials' | 'finance-module' | 'gifts' | 'countries' | 'creator-ops' | 'livekit' | 'infra' | 'skus' | 'leaders' | 'payouts' | 'users' | 'cms'>('analytics');
+  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'monitoring' | 'financials' | 'finance-module' | 'gifts' | 'countries' | 'creator-ops' | 'livekit' | 'infra' | 'api-health' | 'skus' | 'leaders' | 'payouts' | 'users' | 'cms'>('analytics');
   /** Deep-link section inside Coin Burn / Economy hub (A–F). */
   const [economySection, setEconomySection] = useState<'A' | 'B' | 'C' | 'D' | 'E' | 'F' | undefined>(undefined);
   const [activeSpectatorCall, setActiveSpectatorCall] = useState<AdminActiveCall | null>(null);
@@ -719,6 +721,15 @@ export const AdminDashboard: React.FC = () => {
           >
             <Database className="w-3.5 h-3.5 text-emerald-400" />
             <span>Supabase & R2 Storage</span>
+          </button>
+          <button
+            onClick={() => setActiveSubTab('api-health')}
+            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
+              activeSubTab === 'api-health' ? 'bg-cyan-600 text-white font-bold shadow-md shadow-cyan-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5 text-cyan-400" />
+            <span>API Health</span>
           </button>
           <button
             onClick={() => setActiveSubTab('skus')}
@@ -3503,6 +3514,7 @@ export const AdminDashboard: React.FC = () => {
 
       {/* Sub-Tab 7: Supabase PostgreSQL & Cloudflare R2 Infrastructure Management */}
       {activeSubTab === 'infra' && <AdminDatabaseStorageConfig />}
+      {activeSubTab === 'api-health' && <AdminApiHealthPanel />}
 
       {/* Manual Coin Addition Modal */}
       <ManualCoinModal

@@ -48,7 +48,7 @@ import {
   INITIAL_HOME_QUICK_LINKS,
   INITIAL_CREATOR_REVIEWS,
 } from '../constants/appDefaults';
-import { authFetch, getAccessToken } from '../utils/apiClient';
+import { authFetch, getAccessToken, apiUrl, getWsUrl } from '../utils/apiClient';
 import {
   fetchProfilesFromSupabase,
   upsertProfileToSupabase,
@@ -2359,8 +2359,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return;
       }
 
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const wsUrl = getWsUrl();
 
       ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -3108,8 +3107,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         try {
           if (navigator.sendBeacon) {
             const blob = new Blob([payload], { type: 'application/json' });
-            navigator.sendBeacon('/api/supabase/update-status', blob);
-            navigator.sendBeacon('/api/presence', blob);
+            navigator.sendBeacon(apiUrl('/api/supabase/update-status'), blob);
+            navigator.sendBeacon(apiUrl('/api/presence'), blob);
           } else {
             authFetch('/api/supabase/update-status', {
               method: 'POST',
@@ -3349,12 +3348,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
 
       const persistOffline = async (url: string) => {
+        const absolute = apiUrl(url);
         try {
           if (token && typeof navigator !== 'undefined' && navigator.sendBeacon) {
             const blob = new Blob([offlineBody], { type: 'application/json' });
-            navigator.sendBeacon(url, blob);
+            navigator.sendBeacon(absolute, blob);
           }
-          await fetch(url, {
+          await fetch(absolute, {
             method: 'POST',
             headers,
             body: offlineBody,
