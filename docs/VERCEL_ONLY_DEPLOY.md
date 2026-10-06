@@ -2,9 +2,12 @@
 
 ## Model
 
-- **Vercel** serves the Vite SPA and serverless `api/*` routes.
+- **Vercel** serves the Vite SPA and a **single** serverless catch-all at `api/[...path].ts` (Hobby-safe; ≤12 functions).
+- Handler implementations live under `api/_lib/handlers/` (private; not counted as separate functions).
+- Public URLs stay `/api/...` (same-origin). Local `npm run dev` still uses Express + `/ws`.
 - **Supabase** is Auth + DB + Realtime (call/presence signaling).
 - **Do not** run a separate Express/WebSocket host for production.
+- **Do not** import Express/`server.ts` into the Vercel API entry (causes `FUNCTION_INVOCATION_FAILED`).
 
 ## Required Production env (Vercel → Settings → Environment Variables)
 
