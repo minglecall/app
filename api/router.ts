@@ -1,5 +1,5 @@
 /**
- * Bundled Vercel API router entry (compiled to api/router.js by vercel-build).
+ * Vercel API router — all nested /api/* routes rewrite here (see vercel.json).
  * Standalone probes stay as api/health.js, api/ping.js, api/r2-test.js.
  */
 import type { VercelReq, VercelRes } from './_lib/vercelAuth';

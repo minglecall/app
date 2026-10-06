@@ -7,4 +7,3 @@ build/
 .next/
 .DS_Store
 .cursor/
-api/router.js

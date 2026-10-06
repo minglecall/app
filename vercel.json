@@ -25,6 +25,6 @@
     "api/ping.js": { "maxDuration": 10, "memory": 256 },
     "api/r2-test.js": { "maxDuration": 30, "memory": 512 },
     "api/storage/test-connection.js": { "maxDuration": 30, "memory": 512 },
-    "api/router.js": { "maxDuration": 30, "memory": 1024 }
+    "api/router.ts": { "maxDuration": 30, "memory": 1024 }
   }
 }
