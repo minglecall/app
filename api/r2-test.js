@@ -1,47 +1,39 @@
 /**
- * /api/r2-test — self-contained Vercel handler.
- * No Express, no @aws-sdk (SDK cold-start often causes FUNCTION_INVOCATION_FAILED).
- * Uses Node crypto + fetch for a minimal AWS SigV4 ListObjectsV2 probe.
+ * /api/r2-test — plain CommonJS, zero AWS SDK.
+ * Avoids Vercel FUNCTION_INVOCATION_FAILED from ESM/TS/SDK cold-start crashes.
  */
-import type { IncomingMessage, ServerResponse } from 'http';
-import { createHash, createHmac } from 'crypto';
-import { createClient } from '@supabase/supabase-js';
+const { createHash, createHmac } = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
-function send(res: ServerResponse, status: number, body: unknown) {
+function send(res, status, body) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Cache-Control', 'no-store');
   res.end(JSON.stringify(body));
 }
 
-function clean(v: string | undefined): string {
+function clean(v) {
   return String(v || '')
     .trim()
     .replace(/^["']|["']$/g, '');
 }
 
-function bearer(req: IncomingMessage): string | null {
-  const h = req.headers.authorization || (req.headers as any).Authorization;
+function bearer(req) {
+  const h = req.headers.authorization || req.headers.Authorization;
   if (!h || typeof h !== 'string') return null;
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
 }
 
-function hmac(key: Buffer | string, data: string): Buffer {
+function hmac(key, data) {
   return createHmac('sha256', key).update(data, 'utf8').digest();
 }
 
-function sha256Hex(data: string): string {
+function sha256Hex(data) {
   return createHash('sha256').update(data, 'utf8').digest('hex');
 }
 
-/** Minimal AWS Signature V4 for Cloudflare R2 ListObjectsV2 (GET, empty body). */
-async function r2ListObjectsProbe(opts: {
-  accountId: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  bucketName: string;
-}): Promise<{ ok: true; status: number } | { ok: false; status: number; detail: string }> {
+async function r2ListObjectsProbe(opts) {
   const { accountId, accessKeyId, secretAccessKey, bucketName } = opts;
   const host = `${accountId}.r2.cloudflarestorage.com`;
   const region = 'auto';
@@ -64,13 +56,10 @@ async function r2ListObjectsProbe(opts: {
     payloadHash,
   ].join('\n');
   const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    'AWS4-HMAC-SHA256',
-    amzDate,
-    credentialScope,
-    sha256Hex(canonicalRequest),
-  ].join('\n');
-  const kDate = hmac(`AWS4${secretAccessKey}`, dateStamp);
+  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, sha256Hex(canonicalRequest)].join(
+    '\n'
+  );
+  const kDate = hmac('AWS4' + secretAccessKey, dateStamp);
   const kRegion = hmac(kDate, region);
   const kService = hmac(kRegion, service);
   const kSigning = hmac(kService, 'aws4_request');
@@ -80,7 +69,6 @@ async function r2ListObjectsProbe(opts: {
     `SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
   const url = `https://${host}${canonicalUri}?${canonicalQuerystring}`;
-  // Do not set Host manually — fetch derives it from the URL; signature still covers host.
   const response = await fetch(url, {
     method,
     headers: {
@@ -98,7 +86,7 @@ async function r2ListObjectsProbe(opts: {
   return { ok: false, status: response.status, detail: text || response.statusText || 'R2 request failed' };
 }
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
+module.exports = async function handler(req, res) {
   try {
     if (req.method === 'OPTIONS') {
       res.statusCode = 204;
@@ -143,7 +131,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       auth: { persistSession: false, autoRefreshToken: false },
     });
     const { data: userData, error: userErr } = await admin.auth.getUser(token);
-    if (userErr || !userData?.user) {
+    if (userErr || !userData || !userData.user) {
       return send(res, 401, {
         success: false,
         message: 'Invalid or expired admin session. Sign in again.',
@@ -157,8 +145,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       .or(`auth_id.eq.${authUser.id},id.eq.${authUser.id}`)
       .maybeSingle();
 
-    const role = String(profile?.role || '').toLowerCase();
-    const email = String(profile?.email || authUser.email || '').toLowerCase();
+    const role = String((profile && profile.role) || '').toLowerCase();
+    const email = String((profile && profile.email) || authUser.email || '').toLowerCase();
     const isAdmin =
       role === 'admin' || email === 'admin@livecall.app' || email === 'superadmin@minglecall.com';
     if (!isAdmin) {
@@ -211,12 +199,12 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       latencyMs: Date.now() - started,
       message: `Cloudflare R2 bucket "${bucketName}" is reachable using Vercel environment credentials.`,
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error('[api/r2-test]', err);
     return send(res, 200, {
       success: false,
-      message: err?.message || 'R2 connectivity test failed',
-      detail: String(err?.name || ''),
+      message: (err && err.message) || 'R2 connectivity test failed',
+      detail: String((err && err.name) || ''),
     });
   }
-}
+};
