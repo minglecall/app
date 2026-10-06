@@ -110,13 +110,32 @@ export const isSupabaseConfigured = (): boolean => {
  * Still set Vercel Project env vars + redeploy for a permanent build-time config.
  */
 export function reconfigureSupabaseClient(url: string, anonKey: string): { success: boolean; error?: string } {
-  const nextUrl = String(url || '').trim();
-  const nextKey = String(anonKey || '').trim();
+  const nextUrl = String(url || '')
+    .trim()
+    .replace(/^["']|["']$/g, '');
+  const nextKey = String(anonKey || '')
+    .trim()
+    .replace(/^["']|["']$/g, '');
   if (!nextUrl || !nextKey || nextKey.startsWith('••••')) {
     return { success: false, error: 'Supabase URL and anon key are required.' };
   }
   if (nextUrl.includes('placeholder') || nextUrl.includes('your-project')) {
     return { success: false, error: 'Replace the placeholder Supabase project URL.' };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(nextUrl);
+  } catch {
+    return {
+      success: false,
+      error: 'Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL (e.g. https://xxxx.supabase.co).',
+    };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return {
+      success: false,
+      error: 'Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL (e.g. https://xxxx.supabase.co).',
+    };
   }
 
   try {

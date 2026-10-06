@@ -9,8 +9,13 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-import dotenv from 'dotenv';
-dotenv.config();
+try {
+  // Optional local .env — never crash serverless cold-start if dotenv is unavailable.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  require('dotenv').config();
+} catch {
+  /* ignore */
+}
 
 export interface R2CredentialsConfig {
   accountId?: string;

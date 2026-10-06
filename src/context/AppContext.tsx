@@ -569,10 +569,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     localStorage.setItem('livecall_live_host_ids_v2', JSON.stringify(liveHostIds));
   }, [liveHostIds]);
 
-  // Home Banners, Policies & Quick Links — authoritative source is Supabase (not localStorage)
-  const [homeBanners, setHomeBanners] = useState<HomeBanner[]>([]);
-  const [policyDocuments, setPolicyDocuments] = useState<PolicyDocument[]>([]);
-  const [homeQuickLinks, setHomeQuickLinks] = useState<HomeQuickLink[]>([]);
+  // Home Banners, Policies & Quick Links — authoritative source is Supabase (not localStorage).
+  // Start with built-in defaults so a fresh/empty DB never blanks the hero & shortcuts.
+  const [homeBanners, setHomeBanners] = useState<HomeBanner[]>(() => [...INITIAL_HOME_BANNERS]);
+  const [policyDocuments, setPolicyDocuments] = useState<PolicyDocument[]>(() => [...INITIAL_POLICY_DOCUMENTS]);
+  const [homeQuickLinks, setHomeQuickLinks] = useState<HomeQuickLink[]>(() => [...INITIAL_HOME_QUICK_LINKS]);
 
   const [activePolicyDoc, setActivePolicyDoc] = useState<PolicyDocument | null>(null);
 
@@ -1997,35 +1998,32 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       fetchHomeBannersFromSupabase()
         .then((banners) => {
-          if (banners !== null) {
-            setHomeBanners(banners);
-            localStorage.removeItem('livecall_home_banners');
-          }
+          if (banners === null) return;
+          // Empty new DB → keep built-in hero defaults (do not blank the homepage).
+          setHomeBanners(banners.length > 0 ? banners : [...INITIAL_HOME_BANNERS]);
+          localStorage.removeItem('livecall_home_banners');
         })
         .catch((e) => console.warn('Home banners hydrate failed:', e));
 
       fetchCmsPoliciesFromSupabase()
         .then((policies) => {
-          if (policies !== null) {
-            setPolicyDocuments(policies);
-            localStorage.removeItem('livecall_policy_documents');
-          }
+          if (policies === null) return;
+          setPolicyDocuments(policies.length > 0 ? policies : [...INITIAL_POLICY_DOCUMENTS]);
+          localStorage.removeItem('livecall_policy_documents');
         })
         .catch((e) => console.warn('CMS policies hydrate failed:', e));
 
       fetchHomeQuickLinksFromSupabase()
         .then((links) => {
-          if (links !== null) {
-            // Drop retired VIP Pass shortcut if a stale DB/CMS row still exists
-            setHomeQuickLinks(
-              links.filter((l: any) => {
-                const title = String(l?.title || '').trim().toLowerCase();
-                const target = String(l?.actionTarget || '').trim().toLowerCase();
-                return title !== 'vip pass' && target !== 'vip' && l?.id !== 'link_vip_club';
-              })
-            );
-            localStorage.removeItem('livecall_home_quick_links');
-          }
+          if (links === null) return;
+          // Drop retired VIP Pass shortcut if a stale DB/CMS row still exists
+          const filtered = links.filter((l: any) => {
+            const title = String(l?.title || '').trim().toLowerCase();
+            const target = String(l?.actionTarget || '').trim().toLowerCase();
+            return title !== 'vip pass' && target !== 'vip' && l?.id !== 'link_vip_club';
+          });
+          setHomeQuickLinks(filtered.length > 0 ? filtered : [...INITIAL_HOME_QUICK_LINKS]);
+          localStorage.removeItem('livecall_home_quick_links');
         })
         .catch((e) => console.warn('Home quick links hydrate failed:', e));
 

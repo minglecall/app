@@ -1,7 +1,7 @@
 -- ============================================================================
 -- LIVECALL DATING & MONETIZATION ECOSYSTEM - SUPABASE POSTGRESQL SCHEMA
 -- Version: 3.2 (Production Master Schema - 100% Idempotent)
--- CANONICAL SOURCE OF TRUTH — do not maintain parallel schema copies.
+-- CANONICAL SOURCE OF TRUTH ? do not maintain parallel schema copies.
 -- Served by GET /api/admin/schema via server/schemaLoader.ts
 -- ============================================================================
 
@@ -128,7 +128,7 @@ BEGIN
         WHERE email IS NOT NULL AND btrim(email) <> '';
 EXCEPTION
     WHEN unique_violation THEN
-        RAISE NOTICE 'idx_profiles_email_unique_lower skipped: duplicate emails already present — clean them before enabling uniqueness';
+        RAISE NOTICE 'idx_profiles_email_unique_lower skipped: duplicate emails already present ? clean them before enabling uniqueness';
     WHEN OTHERS THEN
         RAISE NOTICE 'idx_profiles_email_unique_lower skipped: %', SQLERRM;
 END $$;
@@ -323,7 +323,7 @@ DROP POLICY IF EXISTS "authenticated update payout_requests" ON public.payout_re
 CREATE TABLE IF NOT EXISTS public.country_configs (
     code VARCHAR(8) PRIMARY KEY,
     name TEXT NOT NULL,
-    flag TEXT NOT NULL DEFAULT '🌍',
+    flag TEXT NOT NULL DEFAULT '??',
     region TEXT NOT NULL DEFAULT 'Worldwide',
     is_tier1 BOOLEAN NOT NULL DEFAULT false,
     enabled BOOLEAN NOT NULL DEFAULT true,
@@ -388,7 +388,7 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     coin_burn_rate_per_min INT DEFAULT 120,
     coin_burn_rate_friend_per_min INT DEFAULT 80,
     female_earning_rate_per_min INT DEFAULT 48,
-    -- Call burn shares (Phase 2): base vs target-met host %. Platform = 100 − host − TL (display).
+    -- Call burn shares (Phase 2): base vs target-met host %. Platform = 100 ? host ? TL (display).
     female_host_share_percent NUMERIC DEFAULT 30,
     female_host_target_share_percent NUMERIC DEFAULT 40,
     team_leader_share_percent NUMERIC DEFAULT 10,
@@ -403,10 +403,10 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     flag_sizes_json TEXT DEFAULT '',
     show_dev_persona_bar BOOLEAN DEFAULT false,
     enable_regular_female_coin_earning BOOLEAN DEFAULT false,
-    -- Fixed Peg / Economy (Phase 1): ONE coin→USD rate for host, TL, and platform.
-    -- Example: coin_usd_peg = 0.003 ⇒ 1000 coins = $3. Package price_usd stays purchase amount (not coins×peg).
+    -- Fixed Peg / Economy (Phase 1): ONE coin?USD rate for host, TL, and platform.
+    -- Example: coin_usd_peg = 0.003 ? 1000 coins = $3. Package price_usd stays purchase amount (not coins�peg).
     coin_usd_peg NUMERIC DEFAULT 0.003,
-    -- LEGACY (kept for backward compat; synced to coin_usd_peg on admin save — do not use in new code paths):
+    -- LEGACY (kept for backward compat; synced to coin_usd_peg on admin save ? do not use in new code paths):
     coin_to_usd_ratio NUMERIC DEFAULT 0.003,
     female_payout_ratio_usd NUMERIC DEFAULT 0.003,
     min_payout_threshold_usd INT DEFAULT 50,
@@ -500,21 +500,21 @@ COMMENT ON COLUMN public.system_configs.female_host_share_percent IS
 COMMENT ON COLUMN public.system_configs.female_host_target_share_percent IS
   'Call burn: host target share % applied at period END via true-up if bronze+ hours AND coins met. Not used mid-call.';
 COMMENT ON COLUMN public.system_configs.team_leader_share_percent IS
-  'Call burn: TL share % of burn when host has a linked team leader. Platform retained = 100 − host − TL.';
+  'Call burn: TL share % of burn when host has a linked team leader. Platform retained = 100 ? host ? TL.';
 COMMENT ON COLUMN public.system_configs.coin_burn_rate_per_min IS
   'Caller burn coins/min (non-friends). Economy hub only.';
 COMMENT ON COLUMN public.system_configs.coin_burn_rate_friend_per_min IS
   'Caller burn coins/min (friends). Economy hub only.';
 COMMENT ON COLUMN public.system_configs.female_earning_rate_per_min IS
-  'LEGACY derived display (burn × host%). Not used by burn_call_coins_atomic / call burn path.';
+  'LEGACY derived display (burn � host%). Not used by burn_call_coins_atomic / call burn path.';
 COMMENT ON COLUMN public.system_configs.gift_female_host_share_percent IS
-  'Gift/tip host share % of gift coin cost. Editable only in Admin → Coin Burn & Economy §C. Catalog SKUs do not edit this.';
+  'Gift/tip host share % of gift coin cost. Editable only in Admin ? Coin Burn & Economy �C. Catalog SKUs do not edit this.';
 COMMENT ON COLUMN public.system_configs.gift_team_leader_share_percent IS
-  'Gift/tip TL share % of gift coin cost when host has linked TL. Economy §C only. Platform = 100 − host − TL.';
--- Fixed Peg (Phase 1): canonical coin→USD for host/TL/platform. Legacy ratios kept & synced.
+  'Gift/tip TL share % of gift coin cost when host has linked TL. Economy �C only. Platform = 100 ? host ? TL.';
+-- Fixed Peg (Phase 1): canonical coin?USD for host/TL/platform. Legacy ratios kept & synced.
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS coin_usd_peg NUMERIC DEFAULT 0.003;
 COMMENT ON COLUMN public.system_configs.coin_usd_peg IS
-  'Fixed Peg: USD per coin for host/TL payables and platform retained FX. 0.003 = 1000 coins = $3. Package price_usd is purchase amount, not forced to coins×peg.';
+  'Fixed Peg: USD per coin for host/TL payables and platform retained FX. 0.003 = 1000 coins = $3. Package price_usd is purchase amount, not forced to coins�peg.';
 COMMENT ON COLUMN public.system_configs.female_payout_ratio_usd IS
   'LEGACY: was host/TL payout FX. Synced to coin_usd_peg; prefer coin_usd_peg in application code.';
 COMMENT ON COLUMN public.system_configs.coin_to_usd_ratio IS
@@ -549,7 +549,7 @@ COMMENT ON COLUMN public.system_configs.period_close_utc_time IS
 COMMENT ON COLUMN public.system_configs.settlement_enabled IS
   'When true, period-end settlement batches are the intended cash-out path (Financial Module). Mid-period manual payouts will be disabled in a later phase.';
 COMMENT ON COLUMN public.system_configs.creator_target_cycle IS
-  'weekly = Monday 00:00 UTC → next Monday 00:00 UTC; monthly = calendar month 1st 00:00 UTC → next 1st 00:00 UTC (not rolling 30 days).';
+  'weekly = Monday 00:00 UTC ? next Monday 00:00 UTC; monthly = calendar month 1st 00:00 UTC ? next 1st 00:00 UTC (not rolling 30 days).';
 
 -- ============================================================================
 -- 9. MODERATION REPORTS TABLE (User incident telemetry & live QA evidence)
@@ -706,6 +706,84 @@ CREATE TABLE IF NOT EXISTS public.home_quick_links (
     active BOOLEAN DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Default homepage CMS content for fresh databases (safe to re-run).
+INSERT INTO public.home_banners (
+  id, title, subtitle, badge, cta_text, tag_color, image_url,
+  action_type, action_target, bg_gradient, order_num, active
+) VALUES
+  (
+    'banner_live_dating',
+    'Experience Genuine 1-on-1 Video Moments',
+    'Connect with creators and matches around the globe in HD video calls.',
+    '?? TRENDING NOW',
+    'Explore Matches',
+    'bg-rose-500 text-white',
+    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=1200',
+    'tab', 'discovery',
+    'from-purple-900/90 via-pink-900/60 to-slate-900/90',
+    1, true
+  ),
+  (
+    'banner_quick_roulette',
+    'Instant Video Roulette Matching',
+    'Skip endless texting. Jump into a live match and meet someone new in seconds.',
+    '? QUICK RADAR',
+    'Start Match',
+    'bg-amber-400 text-slate-950',
+    'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=1200',
+    'modal', 'match',
+    'from-amber-950/90 via-rose-950/60 to-slate-900/90',
+    2, true
+  ),
+  (
+    'banner_coin_store',
+    'Top Up Your Coin Balance',
+    'Unlock longer video calls and send gifts with coin packages built for every budget.',
+    '?? COIN STORE',
+    'Open Coin Store',
+    'bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950',
+    'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&q=80&w=1200',
+    'modal', 'store',
+    'from-amber-900/90 via-purple-950/70 to-slate-900/90',
+    3, true
+  ),
+  (
+    'banner_creator_earnings',
+    'Earn As a Verified Host',
+    'Get paid for completed video calls. Request payouts through supported methods after verification.',
+    '?? CREATOR REWARDS',
+    'Creator Dashboard',
+    'bg-emerald-500 text-slate-950',
+    'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=1200',
+    'tab', 'earnings',
+    'from-emerald-950/90 via-teal-950/60 to-slate-900/90',
+    4, true
+  ),
+  (
+    'banner_safety_first',
+    'Your Privacy & Safety Matters',
+    'Zero tolerance for harassment. Use Block & Report anytime ? our team reviews safety reports.',
+    '??? SAFETY CENTER',
+    'Read Safety Policy',
+    'bg-indigo-500 text-white',
+    'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&q=80&w=1200',
+    'policy', 'policy_safety',
+    'from-indigo-950/90 via-slate-900/80 to-slate-950/90',
+    5, true
+  )
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.home_quick_links (
+  id, title, subtitle, icon, badge, action_type, action_target, color_gradient, order_num, active
+) VALUES
+  ('link_quick_match', 'Quick Match', 'Instant Video Radar', 'Zap', 'HOT', 'modal', 'match', 'from-amber-500 to-rose-500', 1, true),
+  ('link_swipe_deck', 'Swipe Deck', 'Browse Cards', 'Layers', 'NEW', 'tab', 'swipe', 'from-pink-500 to-purple-600', 2, true),
+  ('link_discovery', 'Discover', 'Browse Creators', 'Globe', 'LIVE', 'tab', 'discovery', 'from-yellow-400 to-amber-600', 3, true),
+  ('link_coin_store', 'Get Coins', 'Refill Balance', 'Coins', 'STORE', 'modal', 'store', 'from-emerald-400 to-teal-600', 4, true),
+  ('link_moments_feed', 'Moments Feed', 'Creator Stories', 'Sparkles', 'FEED', 'tab', 'moments', 'from-blue-500 to-indigo-600', 5, true),
+  ('link_safety_policy', 'Safety Center', 'Policies & Reporting', 'ShieldCheck', 'INFO', 'policy', 'policy_safety', 'from-indigo-500 to-cyan-600', 6, true)
+ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
 -- 11. FEED POSTS & CREATOR MOMENTS TABLE
@@ -931,7 +1009,7 @@ ALTER TABLE public.creator_goals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.creator_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_daily_rewards ENABLE ROW LEVEL SECURITY;
 
--- Financial Module RLS is enabled after CREATE TABLE (section 16.55), not here —
+-- Financial Module RLS is enabled after CREATE TABLE (section 16.55), not here ?
 -- those relations are defined later in this file.
 
 -- Replace permissive "Public full access" policies with command-specific policies.
@@ -1200,7 +1278,7 @@ CREATE POLICY "admin delete friend_requests" ON public.friend_requests
     )
   );
 
--- PAYOUT REQUESTS (Phase 7: SELECT/DELETE only — no client INSERT/UPDATE)
+-- PAYOUT REQUESTS (Phase 7: SELECT/DELETE only ? no client INSERT/UPDATE)
 CREATE POLICY "public select payout_requests" ON public.payout_requests FOR SELECT USING (true);
 CREATE POLICY "admin delete payout_requests" ON public.payout_requests
   FOR DELETE USING (
@@ -1313,7 +1391,7 @@ CREATE POLICY "admin delete system_configs" ON public.system_configs
   );
 
 -- Moderation reports: policies defined after current_profile_id()/is_admin_user() helpers
--- (see MODERATION REPORTS — reporter/admin scoped section near end of this file).
+-- (see MODERATION REPORTS ? reporter/admin scoped section near end of this file).
 -- Do not re-create public SELECT / authenticated UPDATE here.
 
 -- Home CMS: public read; admin-only writes (mutations also go through Express requireAdmin)
@@ -1387,7 +1465,7 @@ CREATE POLICY "admin write home_quick_links" ON public.home_quick_links
   );
 
 -- feed_posts: public read; owner/admin write (mutations preferred via Express service role)
--- (Hardened policies applied after current_profile_id()/is_admin_user() helpers — see end of file.)
+-- (Hardened policies applied after current_profile_id()/is_admin_user() helpers ? see end of file.)
 
 CREATE POLICY "public select coin_packages" ON public.coin_packages FOR SELECT USING (true);
 CREATE POLICY "authenticated insert coin_packages" ON public.coin_packages FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
@@ -1493,7 +1571,7 @@ CREATE POLICY "creator_metrics select admin" ON public.creator_metrics FOR SELEC
   )
 );
 
--- DAILY REWARDS (legacy permissive policies — superseded by owner RLS in section 18)
+-- DAILY REWARDS (legacy permissive policies ? superseded by owner RLS in section 18)
 CREATE POLICY "public select user_daily_rewards" ON public.user_daily_rewards FOR SELECT USING (true);
 CREATE POLICY "authenticated insert user_daily_rewards" ON public.user_daily_rewards FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "authenticated update user_daily_rewards" ON public.user_daily_rewards FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
@@ -1531,7 +1609,7 @@ BEGIN
     v_meta_role := lower(COALESCE(NEW.raw_user_meta_data->>'role', 'male_user'));
     v_meta_gender := lower(COALESCE(NEW.raw_user_meta_data->>'gender', ''));
 
-    -- Normalize role: allow all app roles; unknown → male_user
+    -- Normalize role: allow all app roles; unknown ? male_user
     IF v_meta_role IN (
         'male_user', 'female_user', 'female_creator', 'female_host', 'other_user',
         'admin', 'team_leader', 'agency_manager'
@@ -1726,12 +1804,12 @@ CREATE INDEX IF NOT EXISTS idx_wallet_ledger_call
     ON public.wallet_ledger (call_id, billing_minute);
 
 COMMENT ON TABLE public.wallet_ledger IS
-  'Operational coin movements. HOST_EARN/TL_EARN in [period_start,period_end) feed closePeriod accrual. TARGET_SHARE_TRUEUP = period-end host call share top-up (append-only; TL has no true-up). Gifts/tips: GIFT_DEBIT (sender, negative) + HOST_EARN/TL_EARN with metadata.kind=gift. Platform retained ≈ |CALL_DEBIT|+|GIFT_DEBIT| − HOST − TARGET_SHARE_TRUEUP − TL. PURCHASE = coin funding. Rewards excluded from salary accrual.';
+  'Operational coin movements. HOST_EARN/TL_EARN in [period_start,period_end) feed closePeriod accrual. TARGET_SHARE_TRUEUP = period-end host call share top-up (append-only; TL has no true-up). Gifts/tips: GIFT_DEBIT (sender, negative) + HOST_EARN/TL_EARN with metadata.kind=gift. Platform retained ? |CALL_DEBIT|+|GIFT_DEBIT| ? HOST ? TARGET_SHARE_TRUEUP ? TL. PURCHASE = coin funding. Rewards excluded from salary accrual.';
 
 ALTER TABLE public.wallet_ledger ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================================
--- 16.52 COIN PURCHASES — funding intents (admin manual + gateway-ready)
+-- 16.52 COIN PURCHASES ? funding intents (admin manual + gateway-ready)
 -- Writes via Express + service role only. Same completeCoinPurchase path for both channels.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS public.coin_purchases (
@@ -1741,7 +1819,7 @@ CREATE TABLE IF NOT EXISTS public.coin_purchases (
     status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
     amount_coins NUMERIC NOT NULL CHECK (amount_coins > 0),
     amount_usd NUMERIC,
-    -- Phase 4 Fixed Peg: snapshot at purchase (package price is NOT forced to coins×peg)
+    -- Phase 4 Fixed Peg: snapshot at purchase (package price is NOT forced to coins�peg)
     coin_usd_peg_at_purchase NUMERIC,
     peg_value_usd NUMERIC,
     load_margin_usd NUMERIC,
@@ -1769,7 +1847,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS coin_purchases_gateway_external_ref_idx
     WHERE channel = 'GATEWAY' AND external_ref IS NOT NULL AND status = 'completed';
 
 COMMENT ON TABLE public.coin_purchases IS
-  'Coin funding intents/records. pending → checkout-intent; completed via completeCoinPurchase (ADMIN_MANUAL or GATEWAY). amount_usd = cash paid (retail). peg_value_usd = amount_coins × coin_usd_peg_at_purchase. load_margin_usd = amount_usd − peg_value_usd. Same PURCHASE wallet_ledger type for both channels.';
+  'Coin funding intents/records. pending ? checkout-intent; completed via completeCoinPurchase (ADMIN_MANUAL or GATEWAY). amount_usd = cash paid (retail). peg_value_usd = amount_coins � coin_usd_peg_at_purchase. load_margin_usd = amount_usd ? peg_value_usd. Same PURCHASE wallet_ledger type for both channels.';
 
 ALTER TABLE public.coin_purchases
   ADD COLUMN IF NOT EXISTS coin_usd_peg_at_purchase NUMERIC;
@@ -1779,13 +1857,13 @@ ALTER TABLE public.coin_purchases
   ADD COLUMN IF NOT EXISTS load_margin_usd NUMERIC;
 
 COMMENT ON COLUMN public.coin_purchases.amount_usd IS
-  'Cash paid / retail package pay price (USD). Not forced to coins×peg.';
+  'Cash paid / retail package pay price (USD). Not forced to coins�peg.';
 COMMENT ON COLUMN public.coin_purchases.coin_usd_peg_at_purchase IS
   'Fixed Peg snapshot ($/coin) at purchase time from system_configs.coin_usd_peg.';
 COMMENT ON COLUMN public.coin_purchases.peg_value_usd IS
-  'amount_coins × coin_usd_peg_at_purchase — liability / peg value of coins loaded.';
+  'amount_coins � coin_usd_peg_at_purchase ? liability / peg value of coins loaded.';
 COMMENT ON COLUMN public.coin_purchases.load_margin_usd IS
-  'amount_usd − peg_value_usd when paid USD known; positive = retail above peg.';
+  'amount_usd ? peg_value_usd when paid USD known; positive = retail above peg.';
 
 ALTER TABLE public.coin_purchases ENABLE ROW LEVEL SECURITY;
 
@@ -1797,9 +1875,9 @@ CREATE POLICY "public select wallet_ledger" ON public.wallet_ledger FOR SELECT U
 CREATE POLICY "authenticated insert wallet_ledger" ON public.wallet_ledger FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 
 -- ============================================================================
--- 16.55 FINANCIAL MODULE — settlement periods, immutable journal, batches
--- Weekly: Monday 00:00 UTC → next Monday 00:00 UTC
--- Monthly: calendar month 1st 00:00 UTC → next 1st 00:00 UTC (NOT rolling 30 days)
+-- 16.55 FINANCIAL MODULE ? settlement periods, immutable journal, batches
+-- Weekly: Monday 00:00 UTC ? next Monday 00:00 UTC
+-- Monthly: calendar month 1st 00:00 UTC ? next 1st 00:00 UTC (NOT rolling 30 days)
 -- Close clock: system_configs.period_close_utc_time (UTC HH:mm)
 -- Writes MUST go through Express + service role. Amounts are append-only / immutable.
 -- ============================================================================
@@ -2355,7 +2433,7 @@ BEGIN
         'tl_coins_earned', v_tl_earned
     );
 EXCEPTION WHEN unique_violation THEN
-    -- Concurrent duplicate burn — treat as idempotent success
+    -- Concurrent duplicate burn ? treat as idempotent success
     SELECT coin_balance INTO v_caller_balance FROM public.profiles WHERE id = p_caller_id;
     IF p_receiver_id IS NOT NULL AND p_receiver_id <> '' THEN
         SELECT earnings_coins INTO v_host_earnings FROM public.profiles WHERE id = p_receiver_id;
@@ -2585,121 +2663,121 @@ END $$;
 
 -- 1. Seed All Worldwide Countries
 INSERT INTO public.country_configs (code, name, flag, region, is_tier1, enabled) VALUES
-('US', 'United States', '🇺🇸', 'North America', true, true),
-('CA', 'Canada', '🇨🇦', 'North America', true, true),
-('GB', 'United Kingdom', '🇬🇧', 'Europe', true, true),
-('AU', 'Australia', '🇦🇺', 'Oceania', true, true),
-('DE', 'Germany', '🇩🇪', 'Europe', true, true),
-('FR', 'France', '🇫🇷', 'Europe', true, true),
-('JP', 'Japan', '🇯🇵', 'Asia', true, true),
-('KR', 'South Korea', '🇰🇷', 'Asia', true, true),
-('ES', 'Spain', '🇪🇸', 'Europe', true, true),
-('IT', 'Italy', '🇮🇹', 'Europe', true, true),
-('NL', 'Netherlands', '🇳🇱', 'Europe', true, true),
-('CH', 'Switzerland', '🇨🇭', 'Europe', true, true),
-('SE', 'Sweden', '🇸🇪', 'Europe', true, true),
-('NO', 'Norway', '🇳🇴', 'Europe', true, true),
-('DK', 'Denmark', '🇩🇰', 'Europe', true, true),
-('FI', 'Finland', '🇫🇮', 'Europe', true, true),
-('IE', 'Ireland', '🇮🇪', 'Europe', true, true),
-('NZ', 'New Zealand', '🇳🇿', 'Oceania', true, true),
-('SG', 'Singapore', '🇸🇬', 'Asia', true, true),
-('AE', 'United Arab Emirates', '🇦🇪', 'Middle East', true, true),
-('SA', 'Saudi Arabia', '🇸🇦', 'Middle East', true, true),
-('QA', 'Qatar', '🇶🇦', 'Middle East', true, true),
-('KW', 'Kuwait', '🇰🇼', 'Middle East', true, true),
-('AT', 'Austria', '🇦🇹', 'Europe', true, true),
-('BE', 'Belgium', '🇧🇪', 'Europe', true, true),
-('BR', 'Brazil', '🇧🇷', 'South America', false, true),
-('MX', 'Mexico', '🇲🇽', 'North America', false, true),
-('CO', 'Colombia', '🇨🇴', 'South America', false, true),
-('AR', 'Argentina', '🇦🇷', 'South America', false, true),
-('CL', 'Chile', '🇨🇱', 'South America', false, true),
-('PE', 'Peru', '🇵🇪', 'South America', false, true),
-('EC', 'Ecuador', '🇪🇨', 'South America', false, true),
-('VE', 'Venezuela', '🇻🇪', 'South America', false, true),
-('UY', 'Uruguay', '🇺🇾', 'South America', false, true),
-('PY', 'Paraguay', '🇵🇾', 'South America', false, true),
-('BO', 'Bolivia', '🇧🇴', 'South America', false, true),
-('CR', 'Costa Rica', '🇨🇷', 'North America', false, true),
-('PA', 'Panama', '🇵🇦', 'North America', false, true),
-('DO', 'Dominican Republic', '🇩🇴', 'Caribbean', false, true),
-('GT', 'Guatemala', '🇬🇹', 'North America', false, true),
-('HN', 'Honduras', '🇭🇳', 'North America', false, true),
-('SV', 'El Salvador', '🇸🇻', 'North America', false, true),
-('NI', 'Nicaragua', '🇳🇮', 'North America', false, true),
-('PR', 'Puerto Rico', '🇵🇷', 'Caribbean', false, true),
-('JM', 'Jamaica', '🇯🇲', 'Caribbean', false, true),
-('TT', 'Trinidad and Tobago', '🇹🇹', 'Caribbean', false, true),
-('PL', 'Poland', '🇵🇱', 'Europe', false, true),
-('PT', 'Portugal', '🇵🇹', 'Europe', false, true),
-('GR', 'Greece', '🇬🇷', 'Europe', false, true),
-('CZ', 'Czech Republic', '🇨🇿', 'Europe', false, true),
-('RO', 'Romania', '🇷🇴', 'Europe', false, true),
-('HU', 'Hungary', '🇭🇺', 'Europe', false, true),
-('BG', 'Bulgaria', '🇧🇬', 'Europe', false, true),
-('HR', 'Croatia', '🇭🇷', 'Europe', false, true),
-('RS', 'Serbia', '🇷🇸', 'Europe', false, true),
-('SK', 'Slovakia', '🇸🇰', 'Europe', false, true),
-('SI', 'Slovenia', '🇸🇮', 'Europe', false, true),
-('LT', 'Lithuania', '🇱🇹', 'Europe', false, true),
-('LV', 'Latvia', '🇱🇻', 'Europe', false, true),
-('EE', 'Estonia', '🇪🇪', 'Europe', false, true),
-('UA', 'Ukraine', '🇺🇦', 'Europe', false, true),
-('TR', 'Turkey', '🇹🇷', 'Europe', false, true),
-('CY', 'Cyprus', '🇨🇾', 'Europe', false, true),
-('MT', 'Malta', '🇲🇹', 'Europe', false, true),
-('IS', 'Iceland', '🇮🇸', 'Europe', false, true),
-('LU', 'Luxembourg', '🇱🇺', 'Europe', false, true),
-('AL', 'Albania', '🇦🇱', 'Europe', false, true),
-('BA', 'Bosnia and Herzegovina', '🇧🇦', 'Europe', false, true),
-('MK', 'North Macedonia', '🇲🇰', 'Europe', false, true),
-('ME', 'Montenegro', '🇲🇪', 'Europe', false, true),
-('MD', 'Moldova', '🇲🇩', 'Europe', false, true),
-('GE', 'Georgia', '🇬🇪', 'Europe', false, true),
-('AM', 'Armenia', '🇦🇲', 'Europe', false, true),
-('AZ', 'Azerbaijan', '🇦🇿', 'Europe', false, true),
-('IN', 'India', '🇮🇳', 'Asia', false, true),
-('CN', 'China', '🇨🇳', 'Asia', false, true),
-('PH', 'Philippines', '🇵🇭', 'Asia', false, true),
-('TH', 'Thailand', '🇹🇭', 'Asia', false, true),
-('ID', 'Indonesia', '🇮🇩', 'Asia', false, true),
-('VN', 'Vietnam', '🇻🇳', 'Asia', false, true),
-('MY', 'Malaysia', '🇲🇾', 'Asia', false, true),
-('TW', 'Taiwan', '🇹🇼', 'Asia', false, true),
-('HK', 'Hong Kong', '🇭🇰', 'Asia', false, true),
-('PK', 'Pakistan', '🇵🇰', 'Asia', false, true),
-('BD', 'Bangladesh', '🇧🇩', 'Asia', false, true),
-('LK', 'Sri Lanka', '🇱🇰', 'Asia', false, true),
-('NP', 'Nepal', '🇳🇵', 'Asia', false, true),
-('KZ', 'Kazakhstan', '🇰🇿', 'Asia', false, true),
-('UZ', 'Uzbekistan', '🇺🇿', 'Asia', false, true),
-('KH', 'Cambodia', '🇰🇭', 'Asia', false, true),
-('MN', 'Mongolia', '🇲🇳', 'Asia', false, true),
-('IL', 'Israel', '🇮🇱', 'Middle East', false, true),
-('EG', 'Egypt', '🇪🇬', 'Middle East', false, true),
-('MA', 'Morocco', '🇲🇦', 'Middle East', false, true),
-('JO', 'Jordan', '🇯🇴', 'Middle East', false, true),
-('LB', 'Lebanon', '🇱🇧', 'Middle East', false, true),
-('OM', 'Oman', '🇴🇲', 'Middle East', false, true),
-('BH', 'Bahrain', '🇧🇭', 'Middle East', false, true),
-('TN', 'Tunisia', '🇹🇳', 'Middle East', false, true),
-('DZ', 'Algeria', '🇩🇿', 'Middle East', false, true),
-('IQ', 'Iraq', '🇮🇶', 'Middle East', false, true),
-('ZA', 'South Africa', '🇿🇦', 'Africa', false, true),
-('NG', 'Nigeria', '🇳🇬', 'Africa', false, true),
-('KE', 'Kenya', '🇰🇪', 'Africa', false, true),
-('GH', 'Ghana', '🇬🇭', 'Africa', false, true),
-('ET', 'Ethiopia', '🇪🇹', 'Africa', false, true),
-('TZ', 'Tanzania', '🇹🇿', 'Africa', false, true),
-('UG', 'Uganda', '🇺🇬', 'Africa', false, true),
-('CI', 'Ivory Coast', '🇨🇮', 'Africa', false, true),
-('SN', 'Senegal', '🇸🇳', 'Africa', false, true),
-('CM', 'Cameroon', '🇨🇲', 'Africa', false, true),
-('ZW', 'Zimbabwe', '🇿🇼', 'Africa', false, true),
-('MU', 'Mauritius', '🇲🇺', 'Africa', false, true),
-('FJ', 'Fiji', '🇫🇯', 'Oceania', false, true),
-('PG', 'Papua New Guinea', '🇵🇬', 'Oceania', false, true)
+('US', 'United States', '????', 'North America', true, true),
+('CA', 'Canada', '????', 'North America', true, true),
+('GB', 'United Kingdom', '????', 'Europe', true, true),
+('AU', 'Australia', '????', 'Oceania', true, true),
+('DE', 'Germany', '????', 'Europe', true, true),
+('FR', 'France', '????', 'Europe', true, true),
+('JP', 'Japan', '????', 'Asia', true, true),
+('KR', 'South Korea', '????', 'Asia', true, true),
+('ES', 'Spain', '????', 'Europe', true, true),
+('IT', 'Italy', '????', 'Europe', true, true),
+('NL', 'Netherlands', '????', 'Europe', true, true),
+('CH', 'Switzerland', '????', 'Europe', true, true),
+('SE', 'Sweden', '????', 'Europe', true, true),
+('NO', 'Norway', '????', 'Europe', true, true),
+('DK', 'Denmark', '????', 'Europe', true, true),
+('FI', 'Finland', '????', 'Europe', true, true),
+('IE', 'Ireland', '????', 'Europe', true, true),
+('NZ', 'New Zealand', '????', 'Oceania', true, true),
+('SG', 'Singapore', '????', 'Asia', true, true),
+('AE', 'United Arab Emirates', '????', 'Middle East', true, true),
+('SA', 'Saudi Arabia', '????', 'Middle East', true, true),
+('QA', 'Qatar', '????', 'Middle East', true, true),
+('KW', 'Kuwait', '????', 'Middle East', true, true),
+('AT', 'Austria', '????', 'Europe', true, true),
+('BE', 'Belgium', '????', 'Europe', true, true),
+('BR', 'Brazil', '????', 'South America', false, true),
+('MX', 'Mexico', '????', 'North America', false, true),
+('CO', 'Colombia', '????', 'South America', false, true),
+('AR', 'Argentina', '????', 'South America', false, true),
+('CL', 'Chile', '????', 'South America', false, true),
+('PE', 'Peru', '????', 'South America', false, true),
+('EC', 'Ecuador', '????', 'South America', false, true),
+('VE', 'Venezuela', '????', 'South America', false, true),
+('UY', 'Uruguay', '????', 'South America', false, true),
+('PY', 'Paraguay', '????', 'South America', false, true),
+('BO', 'Bolivia', '????', 'South America', false, true),
+('CR', 'Costa Rica', '????', 'North America', false, true),
+('PA', 'Panama', '????', 'North America', false, true),
+('DO', 'Dominican Republic', '????', 'Caribbean', false, true),
+('GT', 'Guatemala', '????', 'North America', false, true),
+('HN', 'Honduras', '????', 'North America', false, true),
+('SV', 'El Salvador', '????', 'North America', false, true),
+('NI', 'Nicaragua', '????', 'North America', false, true),
+('PR', 'Puerto Rico', '????', 'Caribbean', false, true),
+('JM', 'Jamaica', '????', 'Caribbean', false, true),
+('TT', 'Trinidad and Tobago', '????', 'Caribbean', false, true),
+('PL', 'Poland', '????', 'Europe', false, true),
+('PT', 'Portugal', '????', 'Europe', false, true),
+('GR', 'Greece', '????', 'Europe', false, true),
+('CZ', 'Czech Republic', '????', 'Europe', false, true),
+('RO', 'Romania', '????', 'Europe', false, true),
+('HU', 'Hungary', '????', 'Europe', false, true),
+('BG', 'Bulgaria', '????', 'Europe', false, true),
+('HR', 'Croatia', '????', 'Europe', false, true),
+('RS', 'Serbia', '????', 'Europe', false, true),
+('SK', 'Slovakia', '????', 'Europe', false, true),
+('SI', 'Slovenia', '????', 'Europe', false, true),
+('LT', 'Lithuania', '????', 'Europe', false, true),
+('LV', 'Latvia', '????', 'Europe', false, true),
+('EE', 'Estonia', '????', 'Europe', false, true),
+('UA', 'Ukraine', '????', 'Europe', false, true),
+('TR', 'Turkey', '????', 'Europe', false, true),
+('CY', 'Cyprus', '????', 'Europe', false, true),
+('MT', 'Malta', '????', 'Europe', false, true),
+('IS', 'Iceland', '????', 'Europe', false, true),
+('LU', 'Luxembourg', '????', 'Europe', false, true),
+('AL', 'Albania', '????', 'Europe', false, true),
+('BA', 'Bosnia and Herzegovina', '????', 'Europe', false, true),
+('MK', 'North Macedonia', '????', 'Europe', false, true),
+('ME', 'Montenegro', '????', 'Europe', false, true),
+('MD', 'Moldova', '????', 'Europe', false, true),
+('GE', 'Georgia', '????', 'Europe', false, true),
+('AM', 'Armenia', '????', 'Europe', false, true),
+('AZ', 'Azerbaijan', '????', 'Europe', false, true),
+('IN', 'India', '????', 'Asia', false, true),
+('CN', 'China', '????', 'Asia', false, true),
+('PH', 'Philippines', '????', 'Asia', false, true),
+('TH', 'Thailand', '????', 'Asia', false, true),
+('ID', 'Indonesia', '????', 'Asia', false, true),
+('VN', 'Vietnam', '????', 'Asia', false, true),
+('MY', 'Malaysia', '????', 'Asia', false, true),
+('TW', 'Taiwan', '????', 'Asia', false, true),
+('HK', 'Hong Kong', '????', 'Asia', false, true),
+('PK', 'Pakistan', '????', 'Asia', false, true),
+('BD', 'Bangladesh', '????', 'Asia', false, true),
+('LK', 'Sri Lanka', '????', 'Asia', false, true),
+('NP', 'Nepal', '????', 'Asia', false, true),
+('KZ', 'Kazakhstan', '????', 'Asia', false, true),
+('UZ', 'Uzbekistan', '????', 'Asia', false, true),
+('KH', 'Cambodia', '????', 'Asia', false, true),
+('MN', 'Mongolia', '????', 'Asia', false, true),
+('IL', 'Israel', '????', 'Middle East', false, true),
+('EG', 'Egypt', '????', 'Middle East', false, true),
+('MA', 'Morocco', '????', 'Middle East', false, true),
+('JO', 'Jordan', '????', 'Middle East', false, true),
+('LB', 'Lebanon', '????', 'Middle East', false, true),
+('OM', 'Oman', '????', 'Middle East', false, true),
+('BH', 'Bahrain', '????', 'Middle East', false, true),
+('TN', 'Tunisia', '????', 'Middle East', false, true),
+('DZ', 'Algeria', '????', 'Middle East', false, true),
+('IQ', 'Iraq', '????', 'Middle East', false, true),
+('ZA', 'South Africa', '????', 'Africa', false, true),
+('NG', 'Nigeria', '????', 'Africa', false, true),
+('KE', 'Kenya', '????', 'Africa', false, true),
+('GH', 'Ghana', '????', 'Africa', false, true),
+('ET', 'Ethiopia', '????', 'Africa', false, true),
+('TZ', 'Tanzania', '????', 'Africa', false, true),
+('UG', 'Uganda', '????', 'Africa', false, true),
+('CI', 'Ivory Coast', '????', 'Africa', false, true),
+('SN', 'Senegal', '????', 'Africa', false, true),
+('CM', 'Cameroon', '????', 'Africa', false, true),
+('ZW', 'Zimbabwe', '????', 'Africa', false, true),
+('MU', 'Mauritius', '????', 'Africa', false, true),
+('FJ', 'Fiji', '????', 'Oceania', false, true),
+('PG', 'Papua New Guinea', '????', 'Oceania', false, true)
 ON CONFLICT (code) DO UPDATE SET
     name = EXCLUDED.name,
     flag = EXCLUDED.flag,
@@ -2709,65 +2787,65 @@ ON CONFLICT (code) DO UPDATE SET
 -- 2. Seed All Spoken Languages
 INSERT INTO public.language_configs (code, name, native_name, popular, region, enabled) VALUES
 ('en', 'English', 'English', true, 'Global', true),
-('es', 'Spanish', 'Español', true, 'Europe & Americas', true),
-('fr', 'French', 'Français', true, 'Europe & Africa', true),
+('es', 'Spanish', 'Espa�ol', true, 'Europe & Americas', true),
+('fr', 'French', 'Fran�ais', true, 'Europe & Africa', true),
 ('de', 'German', 'Deutsch', true, 'Europe', true),
 ('it', 'Italian', 'Italiano', true, 'Europe', true),
-('pt', 'Portuguese', 'Português', true, 'Europe & Americas', true),
-('ru', 'Russian', 'Русский', true, 'Eurasia', true),
-('zh', 'Chinese (Mandarin)', '中文 (普通话)', true, 'East Asia', true),
-('zh-yue', 'Chinese (Cantonese)', '粵語', true, 'East Asia', true),
-('ja', 'Japanese', '日本語', true, 'East Asia', true),
-('ko', 'Korean', '한국어', true, 'East Asia', true),
-('ar', 'Arabic', 'العربية', true, 'Middle East & North Africa', true),
-('hi', 'Hindi', 'हिन्दी', true, 'South Asia', true),
-('ur', 'Urdu', 'اردو', true, 'South Asia', true),
-('tr', 'Turkish', 'Türkçe', true, 'Middle East & Europe', true),
-('vi', 'Vietnamese', 'Tiếng Việt', true, 'Southeast Asia', true),
-('th', 'Thai', 'ไทย', true, 'Southeast Asia', true),
+('pt', 'Portuguese', 'Portugu�s', true, 'Europe & Americas', true),
+('ru', 'Russian', '???????', true, 'Eurasia', true),
+('zh', 'Chinese (Mandarin)', '?? (???)', true, 'East Asia', true),
+('zh-yue', 'Chinese (Cantonese)', '??', true, 'East Asia', true),
+('ja', 'Japanese', '???', true, 'East Asia', true),
+('ko', 'Korean', '???', true, 'East Asia', true),
+('ar', 'Arabic', '???????', true, 'Middle East & North Africa', true),
+('hi', 'Hindi', '??????', true, 'South Asia', true),
+('ur', 'Urdu', '????', true, 'South Asia', true),
+('tr', 'Turkish', 'T�rk�e', true, 'Middle East & Europe', true),
+('vi', 'Vietnamese', 'Ti?ng Vi?t', true, 'Southeast Asia', true),
+('th', 'Thai', '???', true, 'Southeast Asia', true),
 ('tl', 'Tagalog (Filipino)', 'Tagalog', true, 'Southeast Asia', true),
 ('id', 'Indonesian', 'Bahasa Indonesia', true, 'Southeast Asia', true),
 ('ms', 'Malay', 'Bahasa Melayu', true, 'Southeast Asia', true),
 ('nl', 'Dutch', 'Nederlands', false, 'Europe', true),
 ('pl', 'Polish', 'Polski', false, 'Europe', true),
-('uk', 'Ukrainian', 'Українська', false, 'Europe', true),
+('uk', 'Ukrainian', '??????????', false, 'Europe', true),
 ('sv', 'Swedish', 'Svenska', false, 'Europe', true),
 ('no', 'Norwegian', 'Norsk', false, 'Europe', true),
 ('da', 'Danish', 'Dansk', false, 'Europe', true),
 ('fi', 'Finnish', 'Suomi', false, 'Europe', true),
-('el', 'Greek', 'Ελληνικά', false, 'Europe', true),
-('cs', 'Czech', 'Čeština', false, 'Europe', true),
-('ro', 'Romanian', 'Română', false, 'Europe', true),
+('el', 'Greek', '????????', false, 'Europe', true),
+('cs', 'Czech', '?e?tina', false, 'Europe', true),
+('ro', 'Romanian', 'Rom�n?', false, 'Europe', true),
 ('hu', 'Hungarian', 'Magyar', false, 'Europe', true),
-('bg', 'Bulgarian', 'Български', false, 'Europe', true),
+('bg', 'Bulgarian', '?????????', false, 'Europe', true),
 ('hr', 'Croatian', 'Hrvatski', false, 'Europe', true),
-('sr', 'Serbian', 'Српски', false, 'Europe', true),
-('sk', 'Slovak', 'Slovenčina', false, 'Europe', true),
-('sl', 'Slovenian', 'Slovenščina', false, 'Europe', true),
-('lt', 'Lithuanian', 'Lietuvių', false, 'Europe', true),
-('lv', 'Latvian', 'Latviešu', false, 'Europe', true),
+('sr', 'Serbian', '??????', false, 'Europe', true),
+('sk', 'Slovak', 'Sloven?ina', false, 'Europe', true),
+('sl', 'Slovenian', 'Sloven??ina', false, 'Europe', true),
+('lt', 'Lithuanian', 'Lietuvi?', false, 'Europe', true),
+('lv', 'Latvian', 'Latvie?u', false, 'Europe', true),
 ('et', 'Estonian', 'Eesti', false, 'Europe', true),
-('bn', 'Bengali', 'বাংলা', false, 'South Asia', true),
-('pa', 'Punjabi', 'ਪੰਜਾਬੀ', false, 'South Asia', true),
-('ta', 'Tamil', 'தமிழ்', false, 'South Asia', true),
-('te', 'Telugu', 'తెలుగు', false, 'South Asia', true),
-('mr', 'Marathi', 'मराठी', false, 'South Asia', true),
-('gu', 'Gujarati', 'ગુજરાતી', false, 'South Asia', true),
-('kn', 'Kannada', 'ಕನ್ನಡ', false, 'South Asia', true),
-('ml', 'Malayalam', 'മലയാളം', false, 'South Asia', true),
-('ne', 'Nepali', 'नेपाली', false, 'South Asia', true),
-('si', 'Sinhala', 'සිංහල', false, 'South Asia', true),
-('fa', 'Persian (Farsi)', 'فارسی', false, 'Middle East', true),
-('he', 'Hebrew', 'עברית', false, 'Middle East', true),
-('az', 'Azerbaijani', 'Azərbaycan', false, 'Central Asia', true),
-('ka', 'Georgian', 'ქართული', false, 'Caucasus', true),
-('hy', 'Armenian', 'Հայերեն', false, 'Caucasus', true),
-('kk', 'Kazakh', 'Қазақша', false, 'Central Asia', true),
-('uz', 'Uzbek', 'Oʻzbek', false, 'Central Asia', true),
+('bn', 'Bengali', '?????', false, 'South Asia', true),
+('pa', 'Punjabi', '??????', false, 'South Asia', true),
+('ta', 'Tamil', '?????', false, 'South Asia', true),
+('te', 'Telugu', '??????', false, 'South Asia', true),
+('mr', 'Marathi', '?????', false, 'South Asia', true),
+('gu', 'Gujarati', '???????', false, 'South Asia', true),
+('kn', 'Kannada', '?????', false, 'South Asia', true),
+('ml', 'Malayalam', '??????', false, 'South Asia', true),
+('ne', 'Nepali', '??????', false, 'South Asia', true),
+('si', 'Sinhala', '?????', false, 'South Asia', true),
+('fa', 'Persian (Farsi)', '?????', false, 'Middle East', true),
+('he', 'Hebrew', '?????', false, 'Middle East', true),
+('az', 'Azerbaijani', 'Az?rbaycan', false, 'Central Asia', true),
+('ka', 'Georgian', '???????', false, 'Caucasus', true),
+('hy', 'Armenian', '???????', false, 'Caucasus', true),
+('kk', 'Kazakh', '???????', false, 'Central Asia', true),
+('uz', 'Uzbek', 'O?zbek', false, 'Central Asia', true),
 ('sw', 'Swahili', 'Kiswahili', false, 'Africa', true),
-('am', 'Amharic', 'አማርኛ', false, 'Africa', true),
-('yo', 'Yoruba', 'Èdè Yorùbá', false, 'Africa', true),
-('ig', 'Igbo', 'Asụsụ Igbo', false, 'Africa', true),
+('am', 'Amharic', '????', false, 'Africa', true),
+('yo', 'Yoruba', '�d� Yor�b�', false, 'Africa', true),
+('ig', 'Igbo', 'As?s? Igbo', false, 'Africa', true),
 ('ha', 'Hausa', 'Harshen Hausa', false, 'Africa', true),
 ('zu', 'Zulu', 'isiZulu', false, 'Africa', true),
 ('af', 'Afrikaans', 'Afrikaans', false, 'Africa', true)
@@ -2779,18 +2857,18 @@ ON CONFLICT (code) DO UPDATE SET
 
 -- 3. Seed All 12 Astrological Zodiac Signs
 INSERT INTO public.zodiac_configs (key, name, symbol, date_range, element, enabled) VALUES
-('aries', 'Aries', '♈', 'Mar 21 - Apr 19', 'fire', true),
-('taurus', 'Taurus', '♉', 'Apr 20 - May 20', 'earth', true),
-('gemini', 'Gemini', '♊', 'May 21 - Jun 20', 'air', true),
-('cancer', 'Cancer', '♋', 'Jun 21 - Jul 22', 'water', true),
-('leo', 'Leo', '♌', 'Jul 23 - Aug 22', 'fire', true),
-('virgo', 'Virgo', '♍', 'Aug 23 - Sep 22', 'earth', true),
-('libra', 'Libra', '♎', 'Sep 23 - Oct 22', 'air', true),
-('scorpio', 'Scorpio', '♏', 'Oct 23 - Nov 21', 'water', true),
-('sagittarius', 'Sagittarius', '♐', 'Nov 22 - Dec 21', 'fire', true),
-('capricorn', 'Capricorn', '♑', 'Dec 22 - Jan 19', 'earth', true),
-('aquarius', 'Aquarius', '♒', 'Jan 20 - Feb 18', 'air', true),
-('pisces', 'Pisces', '♓', 'Feb 19 - Mar 20', 'water', true)
+('aries', 'Aries', '?', 'Mar 21 - Apr 19', 'fire', true),
+('taurus', 'Taurus', '?', 'Apr 20 - May 20', 'earth', true),
+('gemini', 'Gemini', '?', 'May 21 - Jun 20', 'air', true),
+('cancer', 'Cancer', '?', 'Jun 21 - Jul 22', 'water', true),
+('leo', 'Leo', '?', 'Jul 23 - Aug 22', 'fire', true),
+('virgo', 'Virgo', '?', 'Aug 23 - Sep 22', 'earth', true),
+('libra', 'Libra', '?', 'Sep 23 - Oct 22', 'air', true),
+('scorpio', 'Scorpio', '?', 'Oct 23 - Nov 21', 'water', true),
+('sagittarius', 'Sagittarius', '?', 'Nov 22 - Dec 21', 'fire', true),
+('capricorn', 'Capricorn', '?', 'Dec 22 - Jan 19', 'earth', true),
+('aquarius', 'Aquarius', '?', 'Jan 20 - Feb 18', 'air', true),
+('pisces', 'Pisces', '?', 'Feb 19 - Mar 20', 'water', true)
 ON CONFLICT (key) DO UPDATE SET
     name = EXCLUDED.name,
     symbol = EXCLUDED.symbol,
@@ -2850,23 +2928,23 @@ ON CONFLICT (id) DO UPDATE SET
     color = EXCLUDED.color,
     popular = EXCLUDED.popular;
 
--- 4b. Seed store display currencies (placeholder rates — admin-editable)
+-- 4b. Seed store display currencies (placeholder rates ? admin-editable)
 -- rate_from_usd = local currency units per 1 USD
 INSERT INTO public.currency_configs (code, name, symbol, rate_from_usd, enabled, order_num) VALUES
 ('USD', 'US Dollar', '$', 1, true, 0),
-('AED', 'UAE Dirham', 'د.إ', 3.6725, true, 1),
-('EUR', 'Euro', '€', 0.92, true, 2),
-('GBP', 'British Pound', '£', 0.79, true, 3),
-('SAR', 'Saudi Riyal', '﷼', 3.75, true, 4),
+('AED', 'UAE Dirham', '?.?', 3.6725, true, 1),
+('EUR', 'Euro', '?', 0.92, true, 2),
+('GBP', 'British Pound', '�', 0.79, true, 3),
+('SAR', 'Saudi Riyal', '?', 3.75, true, 4),
 ('PKR', 'Pakistani Rupee', 'Rs', 278, true, 5),
-('INR', 'Indian Rupee', '₹', 83, true, 6),
+('INR', 'Indian Rupee', '?', 83, true, 6),
 ('CAD', 'Canadian Dollar', 'C$', 1.36, true, 7),
 ('AUD', 'Australian Dollar', 'A$', 1.52, true, 8),
-('TRY', 'Turkish Lira', '₺', 32, true, 9),
-('EGP', 'Egyptian Pound', 'E£', 48, true, 10),
+('TRY', 'Turkish Lira', '?', 32, true, 9),
+('EGP', 'Egyptian Pound', 'E�', 48, true, 10),
 ('BRL', 'Brazilian Real', 'R$', 5.0, true, 11),
-('JPY', 'Japanese Yen', '¥', 150, true, 12),
-('CNY', 'Chinese Yuan', '¥', 7.2, false, 13)
+('JPY', 'Japanese Yen', '�', 150, true, 12),
+('CNY', 'Chinese Yuan', '�', 7.2, false, 13)
 ON CONFLICT (code) DO UPDATE SET
     name = EXCLUDED.name,
     symbol = EXCLUDED.symbol,
@@ -3024,7 +3102,7 @@ DROP POLICY IF EXISTS "admin update payout_requests" ON public.payout_requests;
 CREATE POLICY "owner select payout_requests" ON public.payout_requests FOR SELECT USING (
   user_id = public.current_profile_id() OR public.is_admin_user()
 );
--- Phase 7: no INSERT/UPDATE via client RLS — settlement_batches is the only cash-out path
+-- Phase 7: no INSERT/UPDATE via client RLS ? settlement_batches is the only cash-out path
 
 DROP POLICY IF EXISTS "public select wallet_ledger" ON public.wallet_ledger;
 DROP POLICY IF EXISTS "authenticated insert wallet_ledger" ON public.wallet_ledger;
@@ -3039,7 +3117,7 @@ DROP POLICY IF EXISTS "admin write system_configs" ON public.system_configs;
 CREATE POLICY "admin write system_configs" ON public.system_configs FOR ALL USING (public.is_admin_user()) WITH CHECK (public.is_admin_user());
 
 -- ============================================================================
--- USER DAILY REWARDS — owner-only RLS (claims/credits go through service-role backend)
+-- USER DAILY REWARDS ? owner-only RLS (claims/credits go through service-role backend)
 -- Clients may SELECT/INSERT own row for bootstrap; claim flags & coin awards are
 -- enforced server-side via /api/rewards/claim-* + claim_daily_reward_atomic.
 -- Re-apply in Supabase SQL editor after deploy: run this block (and claim_daily_reward_atomic).
@@ -3069,10 +3147,10 @@ CREATE POLICY "admin delete user_daily_rewards" ON public.user_daily_rewards
   FOR DELETE USING (public.is_admin_user());
 
 -- Video mission note: task_video_call_seconds stores SECONDS; admin config target is seconds;
--- DailyRewardsModal labels convert seconds → minutes for display (target/60).
+-- DailyRewardsModal labels convert seconds ? minutes for display (target/60).
 
 -- ============================================================================
--- 19. MATCHES / FAVORITES / BLOCKED_USERS — participant/owner RLS
+-- 19. MATCHES / FAVORITES / BLOCKED_USERS ? participant/owner RLS
 -- Mutations for like/pass/favorite MUST go through Express (service role).
 -- Client SELECT is limited to participants/owners for privacy.
 -- Match status semantics (see also policies comment above):
@@ -3159,7 +3237,7 @@ CREATE POLICY "owner delete blocked_users" ON public.blocked_users FOR DELETE US
 );
 
 -- ============================================================================
--- FRIEND REQUESTS — participant RLS (mutations go through Express + service role)
+-- FRIEND REQUESTS ? participant RLS (mutations go through Express + service role)
 -- Drop early permissive public/authenticated policies; participants only.
 -- ============================================================================
 DROP POLICY IF EXISTS "public select friend_requests" ON public.friend_requests;
@@ -3200,7 +3278,7 @@ CREATE POLICY "participants delete friend_requests" ON public.friend_requests FO
 );
 
 -- ============================================================================
--- MODERATION REPORTS — reporter/admin scoped (writes preferred via Express)
+-- MODERATION REPORTS ? reporter/admin scoped (writes preferred via Express)
 -- ============================================================================
 DROP POLICY IF EXISTS "public select moderation_reports" ON public.moderation_reports;
 DROP POLICY IF EXISTS "authenticated insert moderation_reports" ON public.moderation_reports;
@@ -3225,7 +3303,7 @@ CREATE POLICY "admin delete moderation_reports hardened" ON public.moderation_re
   FOR DELETE USING (public.is_admin_user());
 
 -- ============================================================================
--- CREATOR REVIEWS — caller/creator scoped (writes preferred via Express)
+-- CREATOR REVIEWS ? caller/creator scoped (writes preferred via Express)
 -- ============================================================================
 DROP POLICY IF EXISTS "public select creator_reviews" ON public.creator_reviews;
 DROP POLICY IF EXISTS "authenticated insert creator_reviews" ON public.creator_reviews;
@@ -3251,7 +3329,7 @@ CREATE POLICY "admin delete creator_reviews hardened" ON public.creator_reviews
   FOR DELETE USING (public.is_admin_user());
 
 -- ============================================================================
--- FEED POSTS + LIKES — public read; owner/admin write (Express preferred)
+-- FEED POSTS + LIKES ? public read; owner/admin write (Express preferred)
 -- ============================================================================
 DROP POLICY IF EXISTS "public select feed_posts" ON public.feed_posts;
 DROP POLICY IF EXISTS "authenticated insert feed_posts" ON public.feed_posts;
@@ -3405,7 +3483,7 @@ CREATE POLICY "agency select creator_period_snapshots" ON public.creator_period_
   agency_leader_id = public.current_profile_id()
 );
 
--- coin_purchases — owner read own rows; admin read all; mutations via Express service role only
+-- coin_purchases ? owner read own rows; admin read all; mutations via Express service role only
 DROP POLICY IF EXISTS "owner select coin_purchases" ON public.coin_purchases;
 DROP POLICY IF EXISTS "admin select coin_purchases" ON public.coin_purchases;
 CREATE POLICY "owner select coin_purchases" ON public.coin_purchases FOR SELECT USING (
@@ -3420,7 +3498,7 @@ CREATE POLICY "admin select coin_purchases" ON public.coin_purchases FOR SELECT 
 
 
 -- =============================================================================
--- Auth OTPs (Vercel / multi-instance safe � replaces in-memory otpStore)
+-- Auth OTPs (Vercel / multi-instance safe ? replaces in-memory otpStore)
 -- Service role only; no client policies.
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS public.auth_otps (
@@ -3436,7 +3514,7 @@ CREATE TABLE IF NOT EXISTS public.auth_otps (
 CREATE INDEX IF NOT EXISTS idx_auth_otps_expires ON public.auth_otps(expires_at);
 ALTER TABLE public.auth_otps ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "deny all auth_otps" ON public.auth_otps;
--- No policies for authenticated/anon � only service_role bypasses RLS.
+-- No policies for authenticated/anon ? only service_role bypasses RLS.
 
 CREATE TABLE IF NOT EXISTS public.auth_pending_signups (
   email TEXT PRIMARY KEY,

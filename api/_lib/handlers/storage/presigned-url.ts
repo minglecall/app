@@ -1,5 +1,6 @@
 /**
  * R2 presigned upload URL — uses R2_* from server env.
+ * Dynamically imports server/r2Storage so the catch-all cold-start never loads AWS SDK.
  */
 import {
   sendJson,
@@ -8,12 +9,6 @@ import {
   type VercelReq,
   type VercelRes,
 } from '../../vercelAuth';
-import {
-  generateR2PresignedUploadUrl,
-  isR2Configured,
-  StorageNotConfiguredError,
-  StorageValidationError,
-} from '../../../../server/r2Storage';
 
 export default async function handler(req: VercelReq, res: VercelRes) {
   try {
@@ -30,6 +25,13 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     if (auth.ok === false) {
       return sendJson(res, auth.status, { success: false, error: auth.error?.message || 'Unauthorized', ...auth.error });
     }
+
+    const {
+      generateR2PresignedUploadUrl,
+      isR2Configured,
+      StorageNotConfiguredError,
+      StorageValidationError,
+    } = await import('../../../../server/r2Storage');
 
     if (!isR2Configured()) {
       return sendJson(res, 503, {
@@ -57,19 +59,21 @@ export default async function handler(req: VercelReq, res: VercelRes) {
 
     return sendJson(res, 200, { ...data, source: 'environment' });
   } catch (err: any) {
-    if (err instanceof StorageNotConfiguredError) {
+    const name = String(err?.name || err?.constructor?.name || '');
+    const code = String(err?.code || '');
+    if (name === 'StorageNotConfiguredError' || code === 'STORAGE_NOT_CONFIGURED') {
       return sendJson(res, 503, {
         success: false,
         configured: false,
         error: err.message,
-        code: err.code,
+        code: err.code || 'STORAGE_NOT_CONFIGURED',
       });
     }
-    if (err instanceof StorageValidationError) {
-      return sendJson(res, err.status, {
+    if (name === 'StorageValidationError' || code === 'STORAGE_VALIDATION_ERROR') {
+      return sendJson(res, err.status || 400, {
         success: false,
         error: err.message,
-        code: err.code,
+        code: err.code || 'STORAGE_VALIDATION_ERROR',
         ...(err.details || {}),
       });
     }

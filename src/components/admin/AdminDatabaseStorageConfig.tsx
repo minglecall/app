@@ -423,17 +423,36 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
         ) ||
         /page could not be found/i.test(String(data.message || ''));
 
+      const cleanedSupabaseUrl = String(config.supabaseUrl || '')
+        .trim()
+        .replace(/^["']|["']$/g, '');
+      const cleanedAnonKey = String(config.supabaseAnonKey || '')
+        .trim()
+        .replace(/^["']|["']$/g, '');
+      let supabaseUrlLooksValid = false;
+      try {
+        const u = new URL(cleanedSupabaseUrl);
+        supabaseUrlLooksValid = u.protocol === 'http:' || u.protocol === 'https:';
+      } catch {
+        supabaseUrlLooksValid = false;
+      }
       const canReconfigureClient =
-        Boolean(config.supabaseUrl?.trim()) &&
-        Boolean(config.supabaseAnonKey?.trim()) &&
-        !String(config.supabaseAnonKey).startsWith('••••');
+        supabaseUrlLooksValid &&
+        Boolean(cleanedAnonKey) &&
+        !cleanedAnonKey.startsWith('••••');
 
       if (canReconfigureClient) {
-        const clientRes = reconfigureSupabaseClient(config.supabaseUrl, config.supabaseAnonKey);
+        const clientRes = reconfigureSupabaseClient(cleanedSupabaseUrl, cleanedAnonKey);
         if (!clientRes.success) {
           showToast('Client Config Failed', clientRes.error || 'Could not apply Supabase client settings.', 'error');
           return;
         }
+      } else if (cleanedSupabaseUrl && !supabaseUrlLooksValid) {
+        showToast(
+          'Client Config Skipped',
+          'Supabase URL must be a full https://… URL (e.g. https://xxxx.supabase.co). Set VITE_SUPABASE_URL in Vercel env and Redeploy.',
+          'warning'
+        );
       }
 
       if (res.ok && data.success !== false) {
