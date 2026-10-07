@@ -309,9 +309,14 @@ export async function sendOtpEmail(params: {
   
   // 1. Try Resend API first if explicit API key is configured
   if (resendKey) {
-    let resendSender = runtimeSmtpConfig.from || process.env.SMTP_FROM || 'LiveCall <onboarding@resend.dev>';
-    if (resendSender.includes('livecallvip.com') || resendSender.includes('livecall-app.com')) {
-      resendSender = 'LiveCall <onboarding@resend.dev>';
+    let resendSender = runtimeSmtpConfig.from || process.env.SMTP_FROM || 'MingleCall <noreply@minglecall.com>';
+    const lowerFrom = resendSender.toLowerCase();
+    if (
+      lowerFrom.includes('livecallvip.com') ||
+      lowerFrom.includes('livecall-app.com') ||
+      lowerFrom.includes('livecall.app')
+    ) {
+      resendSender = 'MingleCall <noreply@minglecall.com>';
     }
 
     try {

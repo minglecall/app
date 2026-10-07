@@ -33,6 +33,7 @@ type EmailEnv = {
   smtpPort?: string;
   smtpUser?: string;
   smtpFrom?: string;
+  smtpFromResolved?: string;
   smtpPassConfigured?: boolean;
   configured?: boolean;
   vercel?: boolean;
@@ -260,11 +261,19 @@ export function AdminEmailPanel() {
               </span>
             </div>
             <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-400">From</span>
+              <span className="text-slate-400">From (env)</span>
               <span className="text-slate-200 font-mono text-xs truncate max-w-[60%]">
                 {env.smtpFrom || '—'}
               </span>
             </div>
+            {env.smtpFromResolved && env.smtpFromResolved !== env.smtpFrom ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-400">From (used)</span>
+                <span className="text-emerald-300 font-mono text-xs truncate max-w-[60%]">
+                  {env.smtpFromResolved}
+                </span>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between gap-2">
               <span className="text-slate-400">Runtime</span>
               <span className="text-slate-300">{env.vercel ? 'Vercel' : 'Local / Express'}</span>

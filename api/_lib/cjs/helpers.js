@@ -356,7 +356,8 @@ function getEmailEnvStatus() {
   const smtpHost = clean(process.env.SMTP_HOST);
   const smtpUser = clean(process.env.SMTP_USER);
   const smtpPass = clean(process.env.SMTP_PASS);
-  const smtpFrom = clean(process.env.SMTP_FROM || process.env.RESEND_FROM);
+  const smtpFromRaw = clean(process.env.SMTP_FROM || process.env.RESEND_FROM);
+  const smtpFromResolved = resolveResendFromAddress();
   const smtpPort = clean(process.env.SMTP_PORT) || '465';
   const smtpSecure = clean(process.env.SMTP_SECURE) || 'true';
   return {
@@ -367,13 +368,14 @@ function getEmailEnvStatus() {
     smtpHost: smtpHost || '',
     smtpPort,
     smtpUser: smtpUser ? smtpUser.replace(/(.{2})(.*)(@.*)/, '$1***$3') : '',
-    smtpFrom: smtpFrom || '',
+    smtpFrom: smtpFromRaw || '',
+    smtpFromResolved,
     smtpSecure: smtpSecure === 'true' || smtpPort === '465',
     smtpPassConfigured: Boolean(smtpPass),
     configured: isSmtpConfigured(),
     vercel: Boolean(process.env.VERCEL),
     message:
-      'Email credentials are loaded from Vercel Environment Variables (RESEND_API_KEY and/or SMTP_*). They cannot be edited in the Admin UI.',
+      'Email credentials are loaded from Vercel Environment Variables (RESEND_API_KEY and/or SMTP_*). Set SMTP_FROM to an address on a Resend-verified domain (e.g. noreply@minglecall.com).',
   };
 }
 
@@ -493,27 +495,70 @@ async function logEmailDispatch(client, entry) {
   }
 }
 
+const RESEND_SAFE_FROM = 'MingleCall <onboarding@resend.dev>';
+const UNVERIFIED_FROM_DOMAINS = [
+  'livecallvip.com',
+  'livecall-app.com',
+  'livecall.app',
+  'minglecall.local',
+];
+
+/** Prefer verified product domain; never send Resend mail from known-unverified legacy domains. */
+function resolveResendFromAddress() {
+  const raw = clean(process.env.SMTP_FROM || process.env.RESEND_FROM);
+  if (!raw) return 'MingleCall <noreply@minglecall.com>';
+  const lower = raw.toLowerCase();
+  if (UNVERIFIED_FROM_DOMAINS.some((d) => lower.includes(d))) {
+    // Product domain — must be verified in Resend; code retries to onboarding@resend.dev on 403
+    return 'MingleCall <noreply@minglecall.com>';
+  }
+  if (lower.includes('<') && lower.includes('>')) return raw;
+  if (lower.includes('@')) return `MingleCall <${raw}>`;
+  return RESEND_SAFE_FROM;
+}
+
+function isResendDomainError(text) {
+  const t = String(text || '').toLowerCase();
+  return (
+    t.includes('domain is not verified') ||
+    t.includes('not verified') ||
+    t.includes('validation_error') ||
+    t.includes('verify a domain')
+  );
+}
+
 async function dispatchEmailViaEnv({ to, name, subject, html, purpose, meta }) {
   const dest = String(to || '')
     .trim()
     .toLowerCase();
   const display = name || 'User';
-  const from = clean(process.env.SMTP_FROM || process.env.RESEND_FROM) || 'LiveCall <onboarding@resend.dev>';
   const client = createServiceClient();
   const resendKey = clean(process.env.RESEND_API_KEY);
+  let from = resolveResendFromAddress();
 
   if (resendKey) {
     try {
-      const res = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ from, to: [dest], subject, html }),
-      });
-      if (!res.ok) {
-        const t = (await res.text().catch(() => '')).slice(0, 200);
+      const sendOnce = async (fromAddr) => {
+        const res = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ from: fromAddr, to: [dest], subject, html }),
+        });
+        const t = (await res.text().catch(() => '')).slice(0, 280);
+        return { ok: res.ok, status: res.status, body: t };
+      };
+
+      let result = await sendOnce(from);
+      // Unverified minglecall.com / wrong From → retry with Resend sandbox sender
+      if (!result.ok && isResendDomainError(result.body) && !from.includes('onboarding@resend.dev')) {
+        from = RESEND_SAFE_FROM;
+        result = await sendOnce(from);
+      }
+
+      if (!result.ok) {
         await logEmailDispatch(client, {
           purpose,
           recipientEmail: dest,
@@ -521,14 +566,19 @@ async function dispatchEmailViaEnv({ to, name, subject, html, purpose, meta }) {
           subject,
           provider: 'resend',
           status: 'failed',
-          errorMessage: t,
-          meta,
+          errorMessage: result.body,
+          meta: { ...(meta || {}), from },
         });
+        let hint = '';
+        if (isResendDomainError(result.body)) {
+          hint =
+            ' Add and verify minglecall.com at https://resend.com/domains, then set SMTP_FROM=noreply@minglecall.com in Vercel.';
+        }
         return {
           success: true,
           delivered: false,
           provider: 'resend',
-          message: `Email provider error (${res.status}). ${t}`,
+          message: `Email provider error (${result.status}). ${result.body}${hint}`,
         };
       }
       await logEmailDispatch(client, {
@@ -538,9 +588,17 @@ async function dispatchEmailViaEnv({ to, name, subject, html, purpose, meta }) {
         subject,
         provider: 'resend',
         status: 'sent',
-        meta,
+        meta: { ...(meta || {}), from },
       });
-      return { success: true, delivered: true, provider: 'resend', message: 'Email sent via Resend.' };
+      return {
+        success: true,
+        delivered: true,
+        provider: 'resend',
+        message:
+          from.includes('onboarding@resend.dev')
+            ? 'Email sent via Resend (sandbox sender). Verify minglecall.com on Resend for production From addresses.'
+            : 'Email sent via Resend.',
+      };
     } catch (e) {
       await logEmailDispatch(client, {
         purpose,
@@ -579,10 +637,15 @@ async function dispatchEmailViaEnv({ to, name, subject, html, purpose, meta }) {
         message: 'Email not configured in Vercel env; message not delivered.',
       };
     }
+    // When SMTP is Resend's relay, use same From resolution rules
+    let smtpFrom = from;
+    if (host.includes('resend.com') && UNVERIFIED_FROM_DOMAINS.some((d) => smtpFrom.toLowerCase().includes(d))) {
+      smtpFrom = RESEND_SAFE_FROM;
+    }
     const port = parseInt(process.env.SMTP_PORT || '465', 10);
     const secure = String(process.env.SMTP_SECURE || 'true') === 'true' || port === 465;
     const transporter = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
-    await transporter.sendMail({ from, to: dest, subject, html });
+    await transporter.sendMail({ from: smtpFrom, to: dest, subject, html });
     await logEmailDispatch(client, {
       purpose,
       recipientEmail: dest,
@@ -590,7 +653,7 @@ async function dispatchEmailViaEnv({ to, name, subject, html, purpose, meta }) {
       subject,
       provider: 'smtp',
       status: 'sent',
-      meta,
+      meta: { ...(meta || {}), from: smtpFrom },
     });
     return { success: true, delivered: true, provider: 'smtp', message: 'Email sent via SMTP.' };
   } catch (e) {
