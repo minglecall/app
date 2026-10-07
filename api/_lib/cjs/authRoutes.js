@@ -21,8 +21,35 @@ const {
   generateSixDigitOtp,
   isSmtpConfigured,
   sendOtpEmailVercel,
+  getEmailPolicy,
+  logEmailDispatch,
   hashPasswordSync,
 } = require('./helpers');
+
+async function emailPolicy(req, res) {
+  if (req.method !== 'GET') return send(res, 405, { success: false, error: 'Method not allowed' });
+  try {
+    const client = createServiceClient();
+    const policy = await getEmailPolicy(client);
+    return send(res, 200, {
+      success: true,
+      data: {
+        emailRegisterEnabled: policy.emailRegisterEnabled,
+        allowCreateWithoutOtp: policy.allowCreateWithoutOtp,
+        smtpConfigured: isSmtpConfigured(),
+      },
+    });
+  } catch (err) {
+    return send(res, 200, {
+      success: true,
+      data: {
+        emailRegisterEnabled: true,
+        allowCreateWithoutOtp: false,
+        smtpConfigured: isSmtpConfigured(),
+      },
+    });
+  }
+}
 
 async function sendOtp(req, res) {
   if (req.method !== 'POST') return send(res, 405, { success: false, error: 'Method not allowed' });
@@ -40,6 +67,8 @@ async function sendOtp(req, res) {
         error: 'Supabase is not configured on this deployment.',
       });
     }
+
+    const policy = await getEmailPolicy(client);
 
     const { data: existing } = await client
       .from('profiles')
@@ -63,6 +92,38 @@ async function sendOtp(req, res) {
       if (policyError) return send(res, 400, { success: false, error: policyError });
     }
 
+    // Admin enabled password-only signup (no OTP email required)
+    if (policy.allowCreateWithoutOtp || !policy.emailRegisterEnabled) {
+      if (password && !existing) {
+        await savePendingSignupDb(client, cleanEmail, hashPasswordSync(password), {
+          name: name || undefined,
+          role: sanitizePublicSignupRole(role),
+        });
+      }
+      await logEmailDispatch(client, {
+        purpose: 'otp_register',
+        recipientEmail: cleanEmail,
+        recipientName: name || 'User',
+        subject: 'OTP skipped by admin policy',
+        provider: 'none',
+        status: 'skipped',
+        meta: {
+          reason: policy.allowCreateWithoutOtp ? 'allow_create_without_otp' : 'email_register_disabled',
+        },
+      });
+      return send(res, 200, {
+        success: true,
+        delivered: false,
+        skipOtp: true,
+        message: policy.allowCreateWithoutOtp
+          ? 'OTP skipped — admin allows account creation without email verification.'
+          : 'Registration emails are disabled by admin. Completing signup without OTP.',
+        showOtpInForm: false,
+        smtpConfigured: isSmtpConfigured(),
+        confirmationUrl: confirmationUrl || undefined,
+      });
+    }
+
     const otpCode = generateSixDigitOtp();
     await saveOtpDb(client, cleanEmail, otpCode, {
       name: name || undefined,
@@ -81,10 +142,14 @@ async function sendOtp(req, res) {
       name: name || 'User',
       otpCode,
     });
-    const showOtpInForm = process.env.OTP_DEBUG === 'true' || !sendResult.delivered;
+    const showOtpInForm =
+      process.env.OTP_DEBUG === 'true' ||
+      policy.emailShowOtpFallback ||
+      !sendResult.delivered;
     return send(res, 200, {
       success: true,
       delivered: sendResult.delivered,
+      skipOtp: false,
       message: sendResult.message,
       showOtpInForm,
       otpCode: showOtpInForm ? otpCode : undefined,
@@ -216,6 +281,9 @@ async function registerBootstrap(req, res) {
     const client = createServiceClient();
     if (!client) return send(res, 503, { success: false, error: 'Supabase not configured' });
 
+    const policy = await getEmailPolicy(client);
+    const skipOtp = Boolean(policy.allowCreateWithoutOtp || !policy.emailRegisterEnabled);
+
     const gender =
       role === 'female_user' || role === 'female_creator' || role === 'female_host'
         ? 'female'
@@ -226,19 +294,28 @@ async function registerBootstrap(req, res) {
     const { data: created, error } = await client.auth.admin.createUser({
       email,
       password,
-      email_confirm: false,
+      email_confirm: skipOtp,
       user_metadata: { name, role, gender },
     });
     if (error && !/already/i.test(error.message)) {
       return send(res, 400, { success: false, error: error.message });
     }
+
+    if (skipOtp && created && created.user) {
+      await client.auth.admin.updateUserById(created.user.id, { email_confirm: true }).catch(() => {});
+    }
+
     return send(res, 200, {
       success: true,
       authId: (created && created.user && created.user.id) || null,
       email,
       role,
       gender,
-      message: 'Auth account ready for OTP verification.',
+      skipOtp,
+      emailConfirmed: skipOtp,
+      message: skipOtp
+        ? 'Account created without email OTP (admin policy).'
+        : 'Auth account ready for OTP verification.',
     });
   } catch (err) {
     console.error('[api/auth/register-bootstrap]', err);
@@ -394,6 +471,7 @@ async function updatePassword(req, res) {
 }
 
 async function handleAuth(path, req, res) {
+  if (path === 'auth/email-policy') return emailPolicy(req, res);
   if (path === 'auth/send-otp') return sendOtp(req, res);
   if (path === 'auth/verify-otp') return verifyOtp(req, res);
   if (path === 'auth/register-bootstrap') return registerBootstrap(req, res);

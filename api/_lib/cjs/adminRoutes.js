@@ -9,6 +9,13 @@ const {
   isAdminRole,
   mapProfileRow,
   getSupabaseEnv,
+  createServiceClient,
+  getEmailEnvStatus,
+  getEmailPolicy,
+  saveEmailPolicy,
+  testEmailConnection,
+  sendTransactionalEmail,
+  isSmtpConfigured,
 } = require('./helpers');
 
 function livekitEnv() {
@@ -111,6 +118,160 @@ async function handleAdmin(path, req, res) {
     });
   }
 
+  if (path === 'admin/email' && req.method === 'GET') {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const client = auth.client || createServiceClient();
+    const env = getEmailEnvStatus();
+    const policy = await getEmailPolicy(client);
+    let logs = [];
+    try {
+      const { data } = await client
+        .from('email_dispatch_log')
+        .select(
+          'id, purpose, recipient_email, recipient_name, subject, provider, status, error_message, meta, created_at'
+        )
+        .order('created_at', { ascending: false })
+        .limit(100);
+      logs = data || [];
+    } catch (e) {
+      console.warn('[admin/email] logs notice:', e && e.message);
+    }
+    return send(res, 200, {
+      success: true,
+      data: {
+        env,
+        policy,
+        logs,
+        configured: isSmtpConfigured(),
+      },
+    });
+  }
+
+  if (path === 'admin/email/settings' && req.method === 'POST') {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const body = await readJsonBody(req);
+    // Never accept API keys / SMTP secrets from the browser
+    if (
+      body &&
+      (body.resendApiKey ||
+        body.smtpPass ||
+        body.pass ||
+        body.SMTP_PASS ||
+        body.RESEND_API_KEY)
+    ) {
+      return send(res, 400, {
+        success: false,
+        error: {
+          message:
+            'Email secrets cannot be saved from the Admin UI. Set RESEND_API_KEY / SMTP_* in Vercel → Environment Variables.',
+          code: 'ENV_ONLY',
+        },
+      });
+    }
+    try {
+      const policy = await saveEmailPolicy(auth.client, {
+        emailRegisterEnabled: body.emailRegisterEnabled,
+        emailAccountCreateEnabled: body.emailAccountCreateEnabled,
+        emailAccountDeleteEnabled: body.emailAccountDeleteEnabled,
+        allowCreateWithoutOtp: body.allowCreateWithoutOtp,
+        emailShowOtpFallback: body.emailShowOtpFallback,
+      });
+      return send(res, 200, {
+        success: true,
+        data: { policy },
+        message: 'Email notification policy saved.',
+      });
+    } catch (e) {
+      return send(res, 500, {
+        success: false,
+        error: { message: (e && e.message) || 'Failed to save email policy', code: 'SAVE_FAILED' },
+      });
+    }
+  }
+
+  if (path === 'admin/email/test' && req.method === 'POST') {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const body = await readJsonBody(req);
+    const result = await testEmailConnection({
+      to: body && body.to,
+      name: (body && body.name) || 'Admin',
+    });
+    return send(res, result.ok ? 200 : 502, { success: true, data: result });
+  }
+
+  if (path === 'admin/email/logs' && req.method === 'GET') {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const { data, error } = await auth.client
+      .from('email_dispatch_log')
+      .select(
+        'id, purpose, recipient_email, recipient_name, subject, provider, status, error_message, meta, created_at'
+      )
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error) {
+      return send(res, 500, { success: false, error: { message: error.message } });
+    }
+    return send(res, 200, { success: true, data: { logs: data || [] } });
+  }
+
+  // Env-only status (replaces secret-pasting email-config for Vercel)
+  if (path === 'admin/email-config' && req.method === 'GET') {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const env = getEmailEnvStatus();
+    const policy = await getEmailPolicy(auth.client);
+    return send(res, 200, {
+      success: true,
+      config: {
+        ...env,
+        showOtpInForm: policy.emailShowOtpFallback,
+        host: env.smtpHost,
+        port: Number(env.smtpPort) || 465,
+        user: env.smtpUser,
+        from: env.smtpFrom,
+        secure: env.smtpSecure,
+        resendApiKey: env.resendApiKeyPreview,
+        configured: env.configured,
+      },
+    });
+  }
+
+  if (path === 'admin/email-config' && req.method === 'POST') {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const body = await readJsonBody(req);
+    if (body && (body.pass || body.resendApiKey || body.host || body.user)) {
+      // Allow only showOtpInForm / policy toggles — ignore secret fields
+    }
+    try {
+      const policy = await saveEmailPolicy(auth.client, {
+        emailShowOtpFallback:
+          typeof body.showOtpInForm === 'boolean' ? body.showOtpInForm : body.emailShowOtpFallback,
+        emailRegisterEnabled: body.emailRegisterEnabled,
+        emailAccountCreateEnabled: body.emailAccountCreateEnabled,
+        emailAccountDeleteEnabled: body.emailAccountDeleteEnabled,
+        allowCreateWithoutOtp: body.allowCreateWithoutOtp,
+      });
+      const env = getEmailEnvStatus();
+      return send(res, 200, {
+        success: true,
+        message:
+          'Email policy updated. SMTP/Resend credentials are read from Vercel environment variables only.',
+        config: { ...env, showOtpInForm: policy.emailShowOtpFallback },
+        policy,
+      });
+    } catch (e) {
+      return send(res, 500, {
+        success: false,
+        error: { message: (e && e.message) || 'Failed to update email policy' },
+      });
+    }
+  }
+
   if (path === 'admin/delete-user' && req.method === 'POST') {
     const auth = await requireAdmin(req);
     if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
@@ -122,6 +283,23 @@ async function handleAdmin(path, req, res) {
     const warnings = [];
     let authDeleted = false;
     const authId = row.auth_id || null;
+
+    try {
+      const policy = await getEmailPolicy(auth.client);
+      if (policy.emailAccountDeleteEnabled && row.email) {
+        await sendTransactionalEmail({
+          to: row.email,
+          name: row.name || 'User',
+          purpose: 'account_delete',
+          subject: 'Your LiveCall account was deleted',
+          html: `<p>Hello <strong>${row.name || 'User'}</strong>,</p><p>Your LiveCall account associated with <strong>${row.email}</strong> has been permanently deleted by an administrator.</p>`,
+          meta: { userId },
+        });
+      }
+    } catch (e) {
+      warnings.push((e && e.message) || 'Delete notification email failed');
+    }
+
     if (authId) {
       const { error } = await auth.client.auth.admin.deleteUser(authId);
       if (error) warnings.push(error.message);

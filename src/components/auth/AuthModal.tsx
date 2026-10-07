@@ -170,6 +170,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         return;
       }
 
+      if (res.skipOtp) {
+        setSuccessMessage(
+          res.message ||
+            'Account created without email verification (admin policy). Signing you in…'
+        );
+        // Password-only path: switch to login with same credentials
+        setMode('login');
+        setShowOtpScreen(false);
+        setIsLoading(false);
+        return;
+      }
+
       if (res.otpCode) {
         setReceivedOtpCode(res.otpCode);
       }

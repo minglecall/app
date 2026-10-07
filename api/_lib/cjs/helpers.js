@@ -346,20 +346,162 @@ function generateSixDigitOtp() {
 
 function isSmtpConfigured() {
   return Boolean(
-    process.env.RESEND_API_KEY ||
-      (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)
+    clean(process.env.RESEND_API_KEY) ||
+      (clean(process.env.SMTP_HOST) && clean(process.env.SMTP_USER) && clean(process.env.SMTP_PASS))
   );
 }
 
-async function sendOtpEmailVercel({ to, name, otpCode }) {
+function getEmailEnvStatus() {
+  const resendKey = clean(process.env.RESEND_API_KEY);
+  const smtpHost = clean(process.env.SMTP_HOST);
+  const smtpUser = clean(process.env.SMTP_USER);
+  const smtpPass = clean(process.env.SMTP_PASS);
+  const smtpFrom = clean(process.env.SMTP_FROM || process.env.RESEND_FROM);
+  const smtpPort = clean(process.env.SMTP_PORT) || '465';
+  const smtpSecure = clean(process.env.SMTP_SECURE) || 'true';
+  return {
+    source: 'environment',
+    resendConfigured: Boolean(resendKey),
+    resendApiKeyPreview: resendKey ? `${resendKey.slice(0, 5)}…` : '',
+    smtpConfigured: Boolean(smtpHost && smtpUser && smtpPass),
+    smtpHost: smtpHost || '',
+    smtpPort,
+    smtpUser: smtpUser ? smtpUser.replace(/(.{2})(.*)(@.*)/, '$1***$3') : '',
+    smtpFrom: smtpFrom || '',
+    smtpSecure: smtpSecure === 'true' || smtpPort === '465',
+    smtpPassConfigured: Boolean(smtpPass),
+    configured: isSmtpConfigured(),
+    vercel: Boolean(process.env.VERCEL),
+    message:
+      'Email credentials are loaded from Vercel Environment Variables (RESEND_API_KEY and/or SMTP_*). They cannot be edited in the Admin UI.',
+  };
+}
+
+const DEFAULT_EMAIL_POLICY = {
+  emailRegisterEnabled: true,
+  emailAccountCreateEnabled: true,
+  emailAccountDeleteEnabled: false,
+  allowCreateWithoutOtp: false,
+  emailShowOtpFallback: false,
+};
+
+async function getEmailPolicy(client) {
+  const out = { ...DEFAULT_EMAIL_POLICY };
+  if (!client) return out;
+  try {
+    const { data } = await client
+      .from('system_configs')
+      .select(
+        'email_register_enabled, email_account_create_enabled, email_account_delete_enabled, allow_create_without_otp, email_show_otp_fallback, smtp_show_otp'
+      )
+      .eq('id', 'default')
+      .maybeSingle();
+    if (!data) return out;
+    if (data.email_register_enabled != null) out.emailRegisterEnabled = Boolean(data.email_register_enabled);
+    if (data.email_account_create_enabled != null) {
+      out.emailAccountCreateEnabled = Boolean(data.email_account_create_enabled);
+    }
+    if (data.email_account_delete_enabled != null) {
+      out.emailAccountDeleteEnabled = Boolean(data.email_account_delete_enabled);
+    }
+    if (data.allow_create_without_otp != null) {
+      out.allowCreateWithoutOtp = Boolean(data.allow_create_without_otp);
+    }
+    if (data.email_show_otp_fallback != null) {
+      out.emailShowOtpFallback = Boolean(data.email_show_otp_fallback);
+    } else if (data.smtp_show_otp != null) {
+      out.emailShowOtpFallback = Boolean(data.smtp_show_otp);
+    }
+  } catch (e) {
+    console.warn('[email] getEmailPolicy notice:', e && e.message);
+  }
+  return out;
+}
+
+async function saveEmailPolicy(client, policy) {
+  if (!client) throw new Error('Supabase not configured');
+  const payload = {
+    id: 'default',
+    email_register_enabled:
+      policy.emailRegisterEnabled != null
+        ? Boolean(policy.emailRegisterEnabled)
+        : DEFAULT_EMAIL_POLICY.emailRegisterEnabled,
+    email_account_create_enabled:
+      policy.emailAccountCreateEnabled != null
+        ? Boolean(policy.emailAccountCreateEnabled)
+        : DEFAULT_EMAIL_POLICY.emailAccountCreateEnabled,
+    email_account_delete_enabled:
+      policy.emailAccountDeleteEnabled != null
+        ? Boolean(policy.emailAccountDeleteEnabled)
+        : DEFAULT_EMAIL_POLICY.emailAccountDeleteEnabled,
+    allow_create_without_otp:
+      policy.allowCreateWithoutOtp != null
+        ? Boolean(policy.allowCreateWithoutOtp)
+        : DEFAULT_EMAIL_POLICY.allowCreateWithoutOtp,
+    email_show_otp_fallback:
+      policy.emailShowOtpFallback != null
+        ? Boolean(policy.emailShowOtpFallback)
+        : DEFAULT_EMAIL_POLICY.emailShowOtpFallback,
+    smtp_show_otp:
+      policy.emailShowOtpFallback != null
+        ? Boolean(policy.emailShowOtpFallback)
+        : DEFAULT_EMAIL_POLICY.emailShowOtpFallback,
+    updated_at: new Date().toISOString(),
+  };
+  const { data, error } = await client
+    .from('system_configs')
+    .upsert(payload, { onConflict: 'id' })
+    .select(
+      'email_register_enabled, email_account_create_enabled, email_account_delete_enabled, allow_create_without_otp, email_show_otp_fallback'
+    )
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return {
+    emailRegisterEnabled: Boolean(
+      data?.email_register_enabled ?? payload.email_register_enabled
+    ),
+    emailAccountCreateEnabled: Boolean(
+      data?.email_account_create_enabled ?? payload.email_account_create_enabled
+    ),
+    emailAccountDeleteEnabled: Boolean(
+      data?.email_account_delete_enabled ?? payload.email_account_delete_enabled
+    ),
+    allowCreateWithoutOtp: Boolean(
+      data?.allow_create_without_otp ?? payload.allow_create_without_otp
+    ),
+    emailShowOtpFallback: Boolean(
+      data?.email_show_otp_fallback ?? payload.email_show_otp_fallback
+    ),
+  };
+}
+
+async function logEmailDispatch(client, entry) {
+  if (!client) return;
+  try {
+    await client.from('email_dispatch_log').insert({
+      purpose: entry.purpose || 'other',
+      recipient_email: String(entry.recipientEmail || '').toLowerCase().trim(),
+      recipient_name: entry.recipientName || null,
+      subject: entry.subject || null,
+      provider: entry.provider || null,
+      status: entry.status || 'sent',
+      error_message: entry.errorMessage || null,
+      meta: entry.meta || {},
+    });
+  } catch (e) {
+    console.warn('[email] logEmailDispatch notice:', e && e.message);
+  }
+}
+
+async function dispatchEmailViaEnv({ to, name, subject, html, purpose, meta }) {
   const dest = String(to || '')
     .trim()
     .toLowerCase();
   const display = name || 'User';
-  const from = clean(process.env.SMTP_FROM || process.env.RESEND_FROM) || 'noreply@minglecall.com';
-  const subject = 'Your LiveCall verification code';
-  const html = `<p>Hello <strong>${display}</strong>,</p><p>Your 6-digit OTP is:</p><p style="font-size:28px;letter-spacing:6px;font-weight:800">${otpCode}</p><p>Valid for 10 minutes.</p>`;
+  const from = clean(process.env.SMTP_FROM || process.env.RESEND_FROM) || 'LiveCall <onboarding@resend.dev>';
+  const client = createServiceClient();
   const resendKey = clean(process.env.RESEND_API_KEY);
+
   if (resendKey) {
     try {
       const res = await fetch('https://api.resend.com/emails', {
@@ -371,38 +513,190 @@ async function sendOtpEmailVercel({ to, name, otpCode }) {
         body: JSON.stringify({ from, to: [dest], subject, html }),
       });
       if (!res.ok) {
-        const t = (await res.text().catch(() => '')).slice(0, 120);
+        const t = (await res.text().catch(() => '')).slice(0, 200);
+        await logEmailDispatch(client, {
+          purpose,
+          recipientEmail: dest,
+          recipientName: display,
+          subject,
+          provider: 'resend',
+          status: 'failed',
+          errorMessage: t,
+          meta,
+        });
         return {
           success: true,
           delivered: false,
+          provider: 'resend',
           message: `Email provider error (${res.status}). ${t}`,
         };
       }
-      return { success: true, delivered: true, message: 'Verification code sent.' };
+      await logEmailDispatch(client, {
+        purpose,
+        recipientEmail: dest,
+        recipientName: display,
+        subject,
+        provider: 'resend',
+        status: 'sent',
+        meta,
+      });
+      return { success: true, delivered: true, provider: 'resend', message: 'Email sent via Resend.' };
     } catch (e) {
-      return { success: true, delivered: false, message: (e && e.message) || 'Email send failed' };
+      await logEmailDispatch(client, {
+        purpose,
+        recipientEmail: dest,
+        recipientName: display,
+        subject,
+        provider: 'resend',
+        status: 'failed',
+        errorMessage: (e && e.message) || 'Resend failed',
+        meta,
+      });
+      return { success: true, delivered: false, provider: 'resend', message: (e && e.message) || 'Email send failed' };
     }
   }
+
   try {
     const nodemailer = require('nodemailer');
-    const host = process.env.SMTP_HOST || '';
-    const user = process.env.SMTP_USER || '';
-    const pass = process.env.SMTP_PASS || '';
+    const host = clean(process.env.SMTP_HOST);
+    const user = clean(process.env.SMTP_USER);
+    const pass = clean(process.env.SMTP_PASS);
     if (!host || !user || !pass) {
+      await logEmailDispatch(client, {
+        purpose,
+        recipientEmail: dest,
+        recipientName: display,
+        subject,
+        provider: 'none',
+        status: 'skipped',
+        errorMessage: 'RESEND_API_KEY / SMTP_* not configured in environment',
+        meta,
+      });
       return {
         success: true,
         delivered: false,
-        message: 'SMTP not configured; OTP stored server-side only.',
+        provider: 'none',
+        message: 'Email not configured in Vercel env; message not delivered.',
       };
     }
     const port = parseInt(process.env.SMTP_PORT || '465', 10);
     const secure = String(process.env.SMTP_SECURE || 'true') === 'true' || port === 465;
     const transporter = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
     await transporter.sendMail({ from, to: dest, subject, html });
-    return { success: true, delivered: true, message: 'Verification code sent.' };
+    await logEmailDispatch(client, {
+      purpose,
+      recipientEmail: dest,
+      recipientName: display,
+      subject,
+      provider: 'smtp',
+      status: 'sent',
+      meta,
+    });
+    return { success: true, delivered: true, provider: 'smtp', message: 'Email sent via SMTP.' };
   } catch (e) {
-    return { success: true, delivered: false, message: (e && e.message) || 'Email send failed' };
+    await logEmailDispatch(client, {
+      purpose,
+      recipientEmail: dest,
+      recipientName: display,
+      subject,
+      provider: 'smtp',
+      status: 'failed',
+      errorMessage: (e && e.message) || 'SMTP failed',
+      meta,
+    });
+    return { success: true, delivered: false, provider: 'smtp', message: (e && e.message) || 'Email send failed' };
   }
+}
+
+async function sendOtpEmailVercel({ to, name, otpCode }) {
+  const display = name || 'User';
+  const subject = 'Your LiveCall verification code';
+  const html = `<p>Hello <strong>${display}</strong>,</p><p>Your 6-digit OTP is:</p><p style="font-size:28px;letter-spacing:6px;font-weight:800">${otpCode}</p><p>Valid for 10 minutes.</p>`;
+  return dispatchEmailViaEnv({
+    to,
+    name: display,
+    subject,
+    html,
+    purpose: 'otp_register',
+    meta: { kind: 'otp' },
+  });
+}
+
+async function sendTransactionalEmail({ to, name, purpose, subject, html, meta }) {
+  return dispatchEmailViaEnv({ to, name, subject, html, purpose: purpose || 'other', meta });
+}
+
+async function testEmailConnection({ to, name } = {}) {
+  const dest =
+    String(to || '')
+      .trim()
+      .toLowerCase() || clean(process.env.SMTP_USER) || '';
+  if (!dest || !dest.includes('@')) {
+    // Probe Resend API keys without sending if no recipient
+    const resendKey = clean(process.env.RESEND_API_KEY);
+    if (resendKey) {
+      try {
+        const res = await fetch('https://api.resend.com/domains', {
+          headers: { Authorization: `Bearer ${resendKey}` },
+        });
+        if (res.ok || res.status === 200) {
+          return {
+            success: true,
+            ok: true,
+            provider: 'resend',
+            message: 'Resend API key accepted (domains endpoint reachable). Provide a recipient to send a live test email.',
+          };
+        }
+        const t = (await res.text().catch(() => '')).slice(0, 160);
+        return {
+          success: true,
+          ok: false,
+          provider: 'resend',
+          message: `Resend key rejected (${res.status}): ${t}`,
+        };
+      } catch (e) {
+        return {
+          success: true,
+          ok: false,
+          provider: 'resend',
+          message: (e && e.message) || 'Resend connection failed',
+        };
+      }
+    }
+    if (isSmtpConfigured()) {
+      return {
+        success: true,
+        ok: true,
+        provider: 'smtp',
+        message: 'SMTP env vars present. Provide a recipient email to send a live test message.',
+      };
+    }
+    return {
+      success: true,
+      ok: false,
+      provider: 'none',
+      message: 'Set RESEND_API_KEY or SMTP_HOST/SMTP_USER/SMTP_PASS in Vercel Environment Variables.',
+    };
+  }
+
+  const display = name || 'Admin';
+  const otp = generateSixDigitOtp();
+  const result = await dispatchEmailViaEnv({
+    to: dest,
+    name: display,
+    subject: `LiveCall email connection test (${otp})`,
+    html: `<p>Hello <strong>${display}</strong>,</p><p>This is a connection test from the Admin Email tab.</p><p>Test code: <strong>${otp}</strong></p><p>Credentials were loaded from server environment variables.</p>`,
+    purpose: 'test',
+    meta: { kind: 'connection_test' },
+  });
+  return {
+    success: true,
+    ok: Boolean(result.delivered),
+    provider: result.provider,
+    message: result.message,
+    delivered: result.delivered,
+    recipient: dest,
+  };
 }
 
 function hashPasswordSync(password) {
@@ -438,5 +732,12 @@ module.exports = {
   generateSixDigitOtp,
   isSmtpConfigured,
   sendOtpEmailVercel,
+  sendTransactionalEmail,
+  getEmailEnvStatus,
+  getEmailPolicy,
+  saveEmailPolicy,
+  logEmailDispatch,
+  testEmailConnection,
+  DEFAULT_EMAIL_POLICY,
   hashPasswordSync,
 };

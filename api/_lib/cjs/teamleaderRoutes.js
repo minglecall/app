@@ -11,6 +11,8 @@ const {
   requireAuth,
   isTeamLeaderRole,
   isAdminRole,
+  getEmailPolicy,
+  sendTransactionalEmail,
 } = require('./helpers');
 
 const DISPOSABLE = ['@livecall.app', '@minglecall.local', '@example.com', '@test.local'];
@@ -213,6 +215,22 @@ async function handleTeamleader(path, req, res) {
         .eq('id', authUserId);
 
       const { data: finalRow } = await client.from('profiles').select('*').eq('id', authUserId).maybeSingle();
+
+      try {
+        const policy = await getEmailPolicy(client);
+        if (policy.emailAccountCreateEnabled && email) {
+          await sendTransactionalEmail({
+            to: email,
+            name,
+            purpose: 'account_create',
+            subject: 'Your LiveCall creator account is ready',
+            html: `<p>Hello <strong>${name}</strong>,</p><p>Your female creator account on LiveCall was created by your team leader. Sign in with <strong>${email}</strong> and the password you were given.</p>`,
+            meta: { creatorId: authUserId, leaderId },
+          });
+        }
+      } catch (e) {
+        console.warn('[teamleader/creators] welcome email notice:', e && e.message);
+      }
 
       return send(res, 200, {
         success: true,

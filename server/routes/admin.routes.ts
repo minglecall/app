@@ -639,38 +639,256 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  // GET Full Unmasked SMTP Configuration for Admin Dashboard
+  // GET SMTP/Resend status from environment (secrets never returned in full)
   router.get('/email-config', requireAdmin, (req, res) => {
     const rawConfig = getRawSmtpConfigForAdmin();
     res.json({
       success: true,
-      config: rawConfig,
+      config: {
+        ...rawConfig,
+        pass: rawConfig.pass ? '••••••••' : '',
+        resendApiKey: rawConfig.resendApiKey ? `${String(rawConfig.resendApiKey).slice(0, 5)}…` : '',
+        source: 'environment',
+        message:
+          'Email credentials are loaded from server environment variables. Set RESEND_API_KEY / SMTP_* in Vercel or .env.',
+      },
     });
   });
 
-  // POST Save SMTP Configuration dynamically
-  router.post('/email-config', requireAdmin, (req, res) => {
+  // POST: policy toggles only — do not accept SMTP/Resend secrets from the browser
+  router.post('/email-config', requireAdmin, async (req, res) => {
     try {
-      const { host, port, user, pass, from, secure, resendApiKey, showOtpInForm } = req.body;
-      updateSmtpRuntimeConfig({
-        host: host !== undefined ? String(host).trim() : undefined,
-        port: port ? parseInt(String(port), 10) : undefined,
-        user: user !== undefined ? String(user).trim() : undefined,
-        pass: pass !== undefined ? String(pass).trim() : undefined,
-        from: from !== undefined ? String(from).trim() : undefined,
-        secure: typeof secure === 'boolean' ? secure : undefined,
-        resendApiKey: resendApiKey !== undefined ? String(resendApiKey).trim() : undefined,
-        showOtpInForm: typeof showOtpInForm === 'boolean' ? showOtpInForm : undefined,
-      });
-
+      const { showOtpInForm } = req.body || {};
+      if (typeof showOtpInForm === 'boolean') {
+        updateSmtpRuntimeConfig({ showOtpInForm });
+      }
+      const client = getSupabaseAdmin();
+      if (client && req.body) {
+        const payload: Record<string, unknown> = {
+          id: 'default',
+          updated_at: new Date().toISOString(),
+        };
+        if (typeof req.body.emailRegisterEnabled === 'boolean') {
+          payload.email_register_enabled = req.body.emailRegisterEnabled;
+        }
+        if (typeof req.body.emailAccountCreateEnabled === 'boolean') {
+          payload.email_account_create_enabled = req.body.emailAccountCreateEnabled;
+        }
+        if (typeof req.body.emailAccountDeleteEnabled === 'boolean') {
+          payload.email_account_delete_enabled = req.body.emailAccountDeleteEnabled;
+        }
+        if (typeof req.body.allowCreateWithoutOtp === 'boolean') {
+          payload.allow_create_without_otp = req.body.allowCreateWithoutOtp;
+        }
+        if (typeof req.body.emailShowOtpFallback === 'boolean' || typeof showOtpInForm === 'boolean') {
+          const v =
+            typeof req.body.emailShowOtpFallback === 'boolean'
+              ? req.body.emailShowOtpFallback
+              : showOtpInForm;
+          payload.email_show_otp_fallback = v;
+          payload.smtp_show_otp = v;
+        }
+        if (Object.keys(payload).length > 2) {
+          await client.from('system_configs').upsert(payload as any, { onConflict: 'id' });
+        }
+      }
       const updatedRaw = getRawSmtpConfigForAdmin();
       return res.json({
         success: true,
-        message: 'SMTP Email configuration saved and persisted successfully!',
-        config: updatedRaw,
+        message:
+          'Email policy updated. SMTP/Resend API keys are read from environment variables only — not saved from this UI.',
+        config: {
+          ...updatedRaw,
+          pass: updatedRaw.pass ? '••••••••' : '',
+          resendApiKey: updatedRaw.resendApiKey ? `${String(updatedRaw.resendApiKey).slice(0, 5)}…` : '',
+          source: 'environment',
+        },
       });
     } catch (err: any) {
-      return res.status(500).json({ error: err.message || 'Failed to update SMTP config' });
+      return res.status(500).json({ error: err.message || 'Failed to update email policy' });
+    }
+  });
+
+  router.get('/email', requireAdmin, async (_req, res) => {
+    try {
+      const raw = getRawSmtpConfigForAdmin();
+      const client = getSupabaseAdmin();
+      let policy = {
+        emailRegisterEnabled: true,
+        emailAccountCreateEnabled: true,
+        emailAccountDeleteEnabled: false,
+        allowCreateWithoutOtp: false,
+        emailShowOtpFallback: Boolean(raw.showOtpInForm),
+      };
+      let logs: any[] = [];
+      if (client) {
+        const { data: cfg } = await client
+          .from('system_configs')
+          .select(
+            'email_register_enabled, email_account_create_enabled, email_account_delete_enabled, allow_create_without_otp, email_show_otp_fallback, smtp_show_otp'
+          )
+          .eq('id', 'default')
+          .maybeSingle();
+        if (cfg) {
+          policy = {
+            emailRegisterEnabled: cfg.email_register_enabled ?? true,
+            emailAccountCreateEnabled: cfg.email_account_create_enabled ?? true,
+            emailAccountDeleteEnabled: cfg.email_account_delete_enabled ?? false,
+            allowCreateWithoutOtp: cfg.allow_create_without_otp ?? false,
+            emailShowOtpFallback: cfg.email_show_otp_fallback ?? cfg.smtp_show_otp ?? false,
+          };
+        }
+        const { data: logRows } = await client
+          .from('email_dispatch_log')
+          .select(
+            'id, purpose, recipient_email, recipient_name, subject, provider, status, error_message, meta, created_at'
+          )
+          .order('created_at', { ascending: false })
+          .limit(100);
+        logs = logRows || [];
+      }
+      return res.json({
+        success: true,
+        data: {
+          env: {
+            source: 'environment',
+            resendConfigured: Boolean(raw.resendApiKey || process.env.RESEND_API_KEY),
+            resendApiKeyPreview: raw.resendApiKey
+              ? `${String(raw.resendApiKey).slice(0, 5)}…`
+              : process.env.RESEND_API_KEY
+                ? `${String(process.env.RESEND_API_KEY).slice(0, 5)}…`
+                : '',
+            smtpConfigured: Boolean(raw.host && raw.user && raw.pass),
+            smtpHost: raw.host || '',
+            smtpPort: String(raw.port || ''),
+            smtpUser: raw.user ? String(raw.user).replace(/(.{2})(.*)(@.*)/, '$1***$3') : '',
+            smtpFrom: raw.from || '',
+            smtpPassConfigured: Boolean(raw.pass),
+            configured: Boolean(raw.configured),
+            vercel: Boolean(process.env.VERCEL),
+            message:
+              'Email credentials are loaded from environment variables (RESEND_API_KEY / SMTP_*).',
+          },
+          policy,
+          logs,
+          configured: Boolean(raw.configured),
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  router.post('/email/settings', requireAdmin, async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (body.resendApiKey || body.pass || body.smtpPass) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            message:
+              'Email secrets cannot be saved from the Admin UI. Set them in Vercel / .env.',
+            code: 'ENV_ONLY',
+          },
+        });
+      }
+      const client = getSupabaseAdmin();
+      if (!client) {
+        return res.status(503).json({ success: false, error: 'Supabase not configured' });
+      }
+      const payload = {
+        id: 'default',
+        email_register_enabled: Boolean(body.emailRegisterEnabled),
+        email_account_create_enabled: Boolean(body.emailAccountCreateEnabled),
+        email_account_delete_enabled: Boolean(body.emailAccountDeleteEnabled),
+        allow_create_without_otp: Boolean(body.allowCreateWithoutOtp),
+        email_show_otp_fallback: Boolean(body.emailShowOtpFallback),
+        smtp_show_otp: Boolean(body.emailShowOtpFallback),
+        updated_at: new Date().toISOString(),
+      };
+      if (typeof body.emailShowOtpFallback === 'boolean') {
+        updateSmtpRuntimeConfig({ showOtpInForm: body.emailShowOtpFallback });
+      }
+      const { error } = await client.from('system_configs').upsert(payload as any, { onConflict: 'id' });
+      if (error) throw new Error(error.message);
+      return res.json({
+        success: true,
+        data: {
+          policy: {
+            emailRegisterEnabled: payload.email_register_enabled,
+            emailAccountCreateEnabled: payload.email_account_create_enabled,
+            emailAccountDeleteEnabled: payload.email_account_delete_enabled,
+            allowCreateWithoutOtp: payload.allow_create_without_otp,
+            emailShowOtpFallback: payload.email_show_otp_fallback,
+          },
+        },
+        message: 'Email notification policy saved.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  router.post('/email/test', requireAdmin, async (req, res) => {
+    try {
+      const { generateSixDigitOtp, sendOtpEmail, isSmtpConfigured } = await import('../emailService');
+      if (!isSmtpConfigured()) {
+        return res.status(502).json({
+          success: true,
+          data: {
+            ok: false,
+            message: 'Set RESEND_API_KEY or SMTP_* in environment variables first.',
+          },
+        });
+      }
+      const to = String(req.body?.to || '').trim().toLowerCase();
+      if (!to || !to.includes('@')) {
+        return res.json({
+          success: true,
+          data: {
+            ok: true,
+            message: 'Email provider env looks configured. Provide a recipient to send a live test.',
+          },
+        });
+      }
+      const otp = generateSixDigitOtp();
+      const result = await sendOtpEmail({
+        to,
+        name: String(req.body?.name || 'Admin'),
+        otpCode: otp,
+      });
+      return res.status(result.delivered ? 200 : 502).json({
+        success: true,
+        data: {
+          ok: Boolean(result.delivered),
+          delivered: result.delivered,
+          message: result.message,
+          recipient: to,
+          provider: process.env.RESEND_API_KEY ? 'resend' : 'smtp',
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  router.get('/email/logs', requireAdmin, async (_req, res) => {
+    try {
+      const client = getSupabaseAdmin();
+      if (!client) {
+        return res.json({ success: true, data: { logs: [] } });
+      }
+      const { data, error } = await client
+        .from('email_dispatch_log')
+        .select(
+          'id, purpose, recipient_email, recipient_name, subject, provider, status, error_message, meta, created_at'
+        )
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (error) throw new Error(error.message);
+      return res.json({ success: true, data: { logs: data || [] } });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
     }
   });
 

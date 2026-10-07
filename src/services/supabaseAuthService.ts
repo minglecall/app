@@ -13,6 +13,8 @@ export interface SupabaseAuthResult {
   session?: any;
   otpCode?: string;
   showOtpInForm?: boolean;
+  /** Admin policy: create accounts without email OTP */
+  skipOtp?: boolean;
 }
 
 const PUBLIC_SIGNUP_ROLES: UserRole[] = [
@@ -78,6 +80,7 @@ export async function signUpWithEmailOtp(params: {
   let createdUserId: string | null = null;
   let capturedOtpCode: string | undefined;
   let capturedShowOtpInForm: boolean | undefined;
+  let skipOtp = false;
   let clientSignUpFailedForBootstrap = false;
 
   if (isSupabaseConfigured()) {
@@ -198,8 +201,10 @@ export async function signUpWithEmailOtp(params: {
           }),
         });
         const bootData = await bootRes.json().catch(() => ({}));
-        if (bootRes.ok && bootData?.success && bootData?.userId && isValidUuid(bootData.userId)) {
-          createdUserId = bootData.userId;
+        const bootId = bootData?.authId || bootData?.userId;
+        if (bootRes.ok && bootData?.success && bootId && isValidUuid(bootId)) {
+          createdUserId = bootId;
+          if (bootData.skipOtp) skipOtp = true;
         } else if (bootData?.code === 'ALREADY_REGISTERED' || /already registered/i.test(String(bootData?.error || ''))) {
           return {
             success: false,
@@ -254,6 +259,7 @@ export async function signUpWithEmailOtp(params: {
     }
     capturedOtpCode = sData.otpCode;
     capturedShowOtpInForm = sData.showOtpInForm;
+    if (sData.skipOtp) skipOtp = true;
   } catch (err) {
     console.warn('Server OTP dispatch error:', err);
     return { success: false, error: 'Could not send verification email. Please try again.' };
@@ -306,7 +312,7 @@ export async function signUpWithEmailOtp(params: {
     hourlyCoinRate: safeRole === 'female_creator' ? 10 : 0,
     earningsCoins: 0,
     totalLifetimeEarnedUSD: 0,
-    emailVerified: false,
+    emailVerified: skipOtp,
     agencyName: undefined,
     commissionPercent: undefined,
   };
@@ -319,11 +325,14 @@ export async function signUpWithEmailOtp(params: {
 
   return {
     success: true,
-    message: `A 6-digit verification code has been dispatched to ${cleanEmail}. Please check your email inbox.`,
+    message: skipOtp
+      ? 'Account created without email OTP (admin policy). You can sign in now.'
+      : `A 6-digit verification code has been dispatched to ${cleanEmail}. Please check your email inbox.`,
     needsOnboarding: true,
     user: initialProfile,
     otpCode: capturedOtpCode,
     showOtpInForm: capturedShowOtpInForm,
+    skipOtp,
   };
 }
 
