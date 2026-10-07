@@ -23,6 +23,9 @@
 | `api/users.js` | `/api/users` |
 | `api/router.js` | catch-all via rewrite |
 
+`vercel-build` also runs esbuild to produce `api/_lib/cjs/financeLib.cjs` from `api/_lib/financeBundleEntry.ts`.
+`api/router.js` includes `supabase_schema.sql` via `vercel.json` `includeFiles`.
+
 ## Router modules (`api/_lib/cjs/`)
 
 | Module | Coverage |
@@ -31,21 +34,23 @@
 | `teamleaderRoutes.js` | creators, stats, ban/unban/delete-creator |
 | `coreRoutes.js` | presence, messages, calls, gifts, users/sync-all, users/me/delete, supabase/* |
 | `v1Routes.js` | matches, favorites, friends, blocks, feed, reviews, reports |
-| `storageRoutes.js` | storage/config, storage/presigned-url (SigV4, no AWS SDK) |
-| `adminRoutes.js` | infra-config, delete-user, CMS, overrides, active-calls, terminate |
-| `appExtrasRoutes.js` | creator/*, rewards/* (rewards claims limited without full Express helpers) |
+| `financeRoutes.js` | `/api/v1/finance/*` via `financeLib.cjs` (periods, ledger, batches, funding, jobs, host/TL) |
+| `storageRoutes.js` | storage/config, media proxy GET, presigned-url, upload (SigV4, no AWS SDK) |
+| `adminRoutes.js` | infra-config, delete-user, CMS CRUD/active/DELETE, schema GET, granular-reset (gated), spectator-token, issue-warning |
+| `appExtrasRoutes.js` | setup status/auth/tests (save blocked), livekit/status, creator/*, rewards/* |
+| `granularResetDb.js` | DB-only wipe helpers for admin granular-reset |
 | `helpers.js` | shared auth, OTP, mail, password policy |
+
+## Intentionally limited on Vercel
+
+- **Setup save** (`POST /api/setup/save-all`) — cannot write `.env`; configure Vercel Environment Variables + redeploy. Connectivity **tests** work.
+- **Granular reset** — DB-only; requires `ALLOW_FACTORY_RESET=true`. No in-memory/WebSocket/R2 wipe.
+- **Issue-warning / terminate-call** — no custom WebSocket bus; warning may persist a moderation note only.
+- **Signaling** — Supabase Realtime only (no `/ws`).
 
 ## Orphaned TypeScript drafts
 
 `api/_lib/handlers/**/*.ts` are **not** mounted on Vercel. They are references for future ports. Do not point rewrites at them.
-
-## Not on Vercel (local Express only / 501)
-
-- Full finance (`/api/v1/finance/*`)
-- Setup wizard (`/api/setup/*`)
-- Factory / granular reset (admin destructive ops)
-- Full rewards claim ledger logic (soft-fail / limited)
 
 ## Signaling
 

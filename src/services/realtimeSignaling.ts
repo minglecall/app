@@ -9,6 +9,28 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 
 export type SignalHandler = (payload: any) => void;
 
+function waitForSubscribe(
+  channel: RealtimeChannel,
+  timeoutMs = 8000
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') done(true);
+      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        done(false);
+      }
+    });
+  });
+}
+
 export class RealtimeSignaling {
   private userChannel: RealtimeChannel | null = null;
   private presenceChannel: RealtimeChannel | null = null;
@@ -39,13 +61,9 @@ export class RealtimeSignaling {
     this.userChannel = supabase.channel(`user:${profileId}`, {
       config: { broadcast: { self: false } },
     });
-    this.userChannel
-      .on('broadcast', { event: 'signal' }, ({ payload }) => {
-        if (payload && this.handler) this.handler(payload);
-      })
-      .subscribe((status) => {
-        this.connected = status === 'SUBSCRIBED';
-      });
+    this.userChannel.on('broadcast', { event: 'signal' }, ({ payload }) => {
+      if (payload && this.handler) this.handler(payload);
+    });
 
     this.presenceChannel = supabase.channel('app-presence', {
       config: { presence: { key: profileId } },
@@ -59,23 +77,32 @@ export class RealtimeSignaling {
       })
       .on('broadcast', { event: 'signal' }, ({ payload }) => {
         if (payload && this.handler) this.handler(payload);
-      })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await this.presenceChannel?.track({
-            userId: profileId,
-            online_at: new Date().toISOString(),
-            status: 'online',
-          });
-        }
       });
 
-    // Confirm auth to mirror WS auth success path
-    if (this.handler) {
+    const [userOk, presenceOk] = await Promise.all([
+      waitForSubscribe(this.userChannel),
+      waitForSubscribe(this.presenceChannel),
+    ]);
+
+    if (presenceOk && this.presenceChannel) {
+      try {
+        await this.presenceChannel.track({
+          userId: profileId,
+          online_at: new Date().toISOString(),
+          status: 'online',
+        });
+      } catch (e) {
+        console.warn('[RealtimeSignaling] presence track failed', e);
+      }
+    }
+
+    this.connected = Boolean(userOk && presenceOk);
+
+    // Confirm auth only after channels are actually subscribed
+    if (this.connected && this.handler) {
       this.handler({ type: 'auth:ok', userId: profileId });
     }
-    this.connected = true;
-    return true;
+    return this.connected;
   }
 
   async send(payload: Record<string, any>): Promise<boolean> {

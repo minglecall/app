@@ -500,7 +500,9 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                       ) : isUserBusy ? (
                         <Badge tone="warning" className="backdrop-blur-md">Busy</Badge>
                       ) : (
-                        <span />
+                        <Badge tone="neutral" className="backdrop-blur-md bg-black/40 text-white/80 border-white/20">
+                          Offline
+                        </Badge>
                       )}
                       <button
                         onClick={(e) => {

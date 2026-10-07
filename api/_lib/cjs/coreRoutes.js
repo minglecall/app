@@ -12,9 +12,26 @@ const {
   mapProfileRow,
 } = require('./helpers');
 
+async function buildPresenceMap(client) {
+  const presence = {};
+  const { data } = await client.from('profiles').select('id, online_status').limit(2000);
+  for (const row of data || []) {
+    const s = String(row.online_status || 'offline').toLowerCase();
+    presence[row.id] =
+      s === 'online' || s === 'busy' || s === 'in_call' ? (s === 'in_call' ? 'busy' : s) : 'offline';
+  }
+  return presence;
+}
+
 async function handlePresence(path, req, res) {
   if (path !== 'presence' && path !== 'presence/index' && path !== 'presence/heartbeat') {
     return null;
+  }
+  if (req.method === 'GET') {
+    const auth = await requireAuth(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const presence = await buildPresenceMap(auth.client);
+    return send(res, 200, { success: true, presence });
   }
   if (req.method !== 'POST' && req.method !== 'PUT') {
     return send(res, 405, { success: false, error: 'Method not allowed' });
@@ -23,17 +40,42 @@ async function handlePresence(path, req, res) {
   if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
   const body = await readJsonBody(req);
   const status = String((body && body.status) || 'online').toLowerCase();
-  const onlineStatus =
-    status === 'online' || status === 'busy' || status === 'offline' ? status : 'online';
+  // Client may only set online|offline; busy is call-derived / DB-owned
+  if (status === 'busy' || status === 'in_call') {
+    const presence = await buildPresenceMap(auth.client);
+    return send(res, 400, {
+      success: false,
+      error: 'Client cannot set busy; busy is derived from active calls.',
+      status: presence[auth.profileId] || 'offline',
+      presence,
+    });
+  }
+  const onlineStatus = status === 'offline' ? 'offline' : 'online';
+  // Preserve busy if already in a call (heartbeat must not clear it)
+  const { data: current } = await auth.client
+    .from('profiles')
+    .select('online_status')
+    .eq('id', auth.profileId)
+    .maybeSingle();
+  const prev = String((current && current.online_status) || '').toLowerCase();
+  const writeStatus =
+    onlineStatus === 'online' && (prev === 'busy' || prev === 'in_call') ? 'busy' : onlineStatus;
   await auth.client
     .from('profiles')
     .update({
-      online_status: onlineStatus,
+      online_status: writeStatus,
       last_seen_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
     .eq('id', auth.profileId);
-  return send(res, 200, { success: true, userId: auth.profileId, status: onlineStatus });
+  const presence = await buildPresenceMap(auth.client);
+  presence[auth.profileId] = writeStatus === 'in_call' ? 'busy' : writeStatus;
+  return send(res, 200, {
+    success: true,
+    userId: auth.profileId,
+    status: writeStatus === 'in_call' ? 'busy' : writeStatus,
+    presence,
+  });
 }
 
 async function handleMessages(path, req, res) {
@@ -77,20 +119,22 @@ async function handleMessages(path, req, res) {
     };
     const { data, error } = await client.from('messages').insert(row).select('*').maybeSingle();
     if (error) return send(res, 500, { success: false, error: { message: error.message } });
-    return send(res, 200, {
+    const mapped = {
+      id: data.id,
+      senderId: data.sender_id,
+      receiverId: data.receiver_id,
+      text: data.text || '',
+      mediaUrl: data.media_url || undefined,
+      type: data.type,
+      isRead: Boolean(data.is_read),
+      createdAt: data.created_at,
+      timestamp: data.created_at,
+      clientTempId: clientTempId || undefined,
+    };
+    // Match Express contract: { success, data: { message } }
+    return send(res, 201, {
       success: true,
-      message: {
-        id: data.id,
-        senderId: data.sender_id,
-        receiverId: data.receiver_id,
-        text: data.text || '',
-        mediaUrl: data.media_url || undefined,
-        type: data.type,
-        isRead: Boolean(data.is_read),
-        createdAt: data.created_at,
-        timestamp: data.created_at,
-        clientTempId: clientTempId || undefined,
-      },
+      data: { message: mapped },
     });
   }
 
@@ -162,7 +206,8 @@ async function handleCalls(path, req, res) {
       .order('created_at', { ascending: false })
       .limit(200);
     if (error) return send(res, 500, { success: false, error: error.message });
-    return send(res, 200, { success: true, ledger: data || [] });
+    // Express contract: { success, data: row[] }
+    return send(res, 200, { success: true, data: data || [] });
   }
 
   if (path === 'calls/sync' && req.method === 'POST') {
@@ -388,15 +433,33 @@ async function handleCalls(path, req, res) {
         });
       }
 
+      const burned = Number(result.coins_burned ?? coinsBurned) || coinsBurned;
+      const hostEarned = Number(result.host_coins_earned ?? hostCoinsEarned) || 0;
+      const tlEarned = Number(result.tl_coins_earned ?? tlCoinsEarned) || 0;
+      const newCallerBalance = Number(result.new_caller_balance) || 0;
+      const newHostEarnings = Number(result.new_host_earnings) || 0;
+      const newTlEarnings = Number(result.new_tl_earnings) || 0;
+      // Match Express: { success, data: { newCallerBalance, ... } }
       return send(res, 200, {
         success: true,
-        duplicate: Boolean(result.duplicate),
-        coinBalance: Number(result.new_caller_balance) || 0,
-        hostEarn: Number(result.host_coins_earned ?? hostCoinsEarned) || 0,
-        tlEarn: Number(result.tl_coins_earned ?? tlCoinsEarned) || 0,
-        coinsBurned,
-        billingMinute,
-        callId,
+        data: {
+          callId,
+          billingMinute,
+          coinsBurned: burned,
+          hostCoinsEarned: hostEarned,
+          tlCoinsEarned: tlEarned,
+          platformRetained: Math.max(0, burned - hostEarned - tlEarned),
+          newCallerBalance,
+          newHostEarnings,
+          newTlEarnings,
+          callCoinsSpent: burned,
+          callCoinsEarned: hostEarned,
+          billedMinutes: billingMinute,
+          duplicate: Boolean(result.duplicate),
+          isFriendRate: isFriendPair,
+          isFemaleCreator: isCreator,
+          tlId,
+        },
       });
     } catch (err) {
       console.error('[api/calls/burn]', err);
@@ -521,9 +584,12 @@ async function handleGifts(path, req, res) {
       console.warn('[api/gifts/send] ledger write skipped', ledgerErr && ledgerErr.message);
     }
 
+    const senderBalance = Number(debited.coin_balance);
     return send(res, 200, {
       success: true,
-      senderCoinBalance: Number(debited.coin_balance),
+      // Client Quick Match reads top-level senderBalance
+      senderBalance,
+      senderCoinBalance: senderBalance,
       receiverEarningsDelta: hostShare,
       giftId,
       cost,
@@ -652,8 +718,17 @@ async function handleSupabase(path, req, res) {
   if (path === 'supabase/update-status' && (req.method === 'POST' || req.method === 'PUT')) {
     const body = await readJsonBody(req);
     const status = String((body && body.status) || 'online').toLowerCase();
-    const onlineStatus =
-      status === 'online' || status === 'busy' || status === 'offline' ? status : 'online';
+    // Client sets online|offline only; preserve busy when already in a call
+    let onlineStatus = status === 'offline' ? 'offline' : status === 'busy' ? 'busy' : 'online';
+    if (onlineStatus === 'online') {
+      const { data: current } = await auth.client
+        .from('profiles')
+        .select('online_status')
+        .eq('id', auth.profileId)
+        .maybeSingle();
+      const prev = String((current && current.online_status) || '').toLowerCase();
+      if (prev === 'busy' || prev === 'in_call') onlineStatus = 'busy';
+    }
     await auth.client
       .from('profiles')
       .update({
@@ -689,13 +764,12 @@ async function handleSupabase(path, req, res) {
       .select('id, online_status, last_seen_at')
       .limit(1000);
     if (error) return send(res, 500, { success: false, error: error.message });
-    const statuses = {};
-    for (const row of data || []) {
-      statuses[row.id] = {
-        status: row.online_status || 'offline',
-        lastSeenAt: row.last_seen_at,
-      };
-    }
+    // Client expects statuses[] with { id, online_status }
+    const statuses = (data || []).map((row) => ({
+      id: row.id,
+      online_status: row.online_status || 'offline',
+      last_seen_at: row.last_seen_at,
+    }));
     return send(res, 200, { success: true, statuses });
   }
 

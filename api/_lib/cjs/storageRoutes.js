@@ -187,9 +187,192 @@ function decodeBase64Payload(base64Data) {
   };
 }
 
+const PUBLIC_MEDIA_CATEGORIES = new Set([
+  'avatar',
+  'gallery',
+  'moment',
+  'intro_video',
+  'chat_media',
+  'media',
+]);
+const PRIVATE_MEDIA_CATEGORIES = new Set(['verification']);
+const MEDIA_KEY_RE = /^uploads\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+\/.+/;
+
+function sanitizeMediaObjectKey(rawKey) {
+  const key = String(rawKey || '').trim();
+  if (!key) {
+    const err = new Error('Missing media key');
+    err.status = 400;
+    err.code = 'MISSING_KEY';
+    throw err;
+  }
+  if (
+    key.includes('..') ||
+    key.includes('\\') ||
+    key.includes('\0') ||
+    key.startsWith('/') ||
+    /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(key) ||
+    key.includes('://')
+  ) {
+    const err = new Error('Invalid media key');
+    err.status = 400;
+    err.code = 'INVALID_KEY';
+    throw err;
+  }
+  if (!key.startsWith('uploads/') || !MEDIA_KEY_RE.test(key)) {
+    const err = new Error('Media key outside allowlisted uploads prefix');
+    err.status = 400;
+    err.code = 'KEY_NOT_ALLOWED';
+    throw err;
+  }
+  return key;
+}
+
+function parseMediaKeyParts(key) {
+  const safe = sanitizeMediaObjectKey(key);
+  const parts = safe.split('/');
+  return { category: parts[1] || '', ownerUserId: parts[2] || '' };
+}
+
+/** SigV4 GetObject — returns Buffer + metadata or null. */
+async function getObjectFromR2({ r2, key }) {
+  const host = `${r2.accountId}.r2.cloudflarestorage.com`;
+  const region = 'auto';
+  const service = 's3';
+  const method = 'GET';
+  const keyPath = key
+    .split('/')
+    .map((p) => encodeURIComponent(p))
+    .join('/');
+  const canonicalUri = `/${r2.bucketName}/${keyPath}`;
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const payloadHash = 'UNSIGNED-PAYLOAD';
+  const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+  const canonicalRequest = [
+    method,
+    canonicalUri,
+    '',
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join('\n');
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    credentialScope,
+    sha256Hex(canonicalRequest),
+  ].join('\n');
+  const kDate = hmac('AWS4' + r2.secretAccessKey, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, service);
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  const authorization =
+    `AWS4-HMAC-SHA256 Credential=${r2.accessKeyId}/${credentialScope}, ` +
+    `SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  const url = `https://${host}${canonicalUri}`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'x-amz-content-sha256': payloadHash,
+      'x-amz-date': amzDate,
+      Authorization: authorization,
+    },
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => '')).slice(0, 200);
+    throw new Error(`R2 GET failed (${response.status}): ${detail || response.statusText}`);
+  }
+  const ab = await response.arrayBuffer();
+  return {
+    body: Buffer.from(ab),
+    contentType: response.headers.get('content-type') || 'application/octet-stream',
+    contentLength: Number(response.headers.get('content-length')) || ab.byteLength,
+  };
+}
+
+function sendBinary(res, status, buffer, headers) {
+  res.statusCode = status;
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (v != null) res.setHeader(k, String(v));
+  }
+  res.end(buffer);
+}
+
 async function handleStorage(path, req, res) {
   if (!String(path || '').startsWith('storage/')) return null;
   if (path === 'storage/test-connection') return null; // standalone
+
+  if (path === 'storage/media' && req.method === 'GET') {
+    try {
+      let key;
+      try {
+        const q = req.query || {};
+        key = sanitizeMediaObjectKey(q.key);
+      } catch (err) {
+        res.statusCode = err.status || 400;
+        res.setHeader('Content-Type', 'text/plain');
+        res.end(err.message || 'Invalid media key');
+        return true;
+      }
+      const { category, ownerUserId } = parseMediaKeyParts(key);
+      if (PRIVATE_MEDIA_CATEGORIES.has(category)) {
+        const auth = await requireAuth(req);
+        if (auth.ok === false) {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'text/plain');
+          res.end('Authentication required for private media.');
+          return true;
+        }
+        const admin = isAdminRole(auth.role, auth.email);
+        if (!admin && String(auth.profileId) !== String(ownerUserId)) {
+          res.statusCode = 403;
+          res.setHeader('Content-Type', 'text/plain');
+          res.end('Not authorized to access this media object.');
+          return true;
+        }
+      } else if (!PUBLIC_MEDIA_CATEGORIES.has(category)) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain');
+        res.end('Media category not allowed');
+        return true;
+      }
+
+      const r2 = r2Env();
+      if (!r2.accountId || !r2.accessKeyId || !r2.secretAccessKey) {
+        res.statusCode = 503;
+        res.setHeader('Content-Type', 'text/plain');
+        res.end('R2 storage is not configured');
+        return true;
+      }
+      const streamData = await getObjectFromR2({ r2, key });
+      if (!streamData) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'text/plain');
+        res.end('Media object not found in storage');
+        return true;
+      }
+      sendBinary(res, 200, streamData.body, {
+        'Content-Type': streamData.contentType || 'image/jpeg',
+        'Content-Length': String(streamData.contentLength || streamData.body.length),
+        'Cache-Control': PRIVATE_MEDIA_CATEGORIES.has(category)
+          ? 'private, max-age=3600'
+          : 'public, max-age=31536000, immutable',
+      });
+      return true;
+    } catch (err) {
+      console.error('[Storage Media Proxy] Error streaming key:', err && err.message);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'text/plain');
+      res.end('Internal media streaming error');
+      return true;
+    }
+  }
 
   if (path === 'storage/config' && req.method === 'GET') {
     const auth = await requireAuth(req);

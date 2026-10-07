@@ -41,6 +41,10 @@
     "api/livekit/token.js": { "maxDuration": 15, "memory": 512 },
     "api/admin/create-team-leader.js": { "maxDuration": 30, "memory": 512 },
     "api/users.js": { "maxDuration": 30, "memory": 512 },
-    "api/router.js": { "maxDuration": 30, "memory": 1024 }
+    "api/router.js": {
+      "maxDuration": 30,
+      "memory": 1024,
+      "includeFiles": "supabase_schema.sql"
+    }
   }
 }

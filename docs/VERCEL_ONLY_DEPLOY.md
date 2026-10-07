@@ -4,8 +4,9 @@
 
 - **Vercel** serves the Vite SPA + a small set of serverless functions (Hobby-safe; ≤12).
 - Isolated probes (plain CommonJS, crash-isolated): `api/health.js`, `api/ping.js`, `api/r2-test.js`, `api/livekit/config.js`, `api/livekit/token.js`, `api/admin/create-team-leader.js`, `api/users.js`.
-- Other `/api/*` routes: rewrite → `api/router.js` (CommonJS modules in `api/_lib/cjs/` — auth, teamleader, presence, messages, calls, gifts, v1 social, storage, admin, creator, rewards).
-- See `docs/VERCEL_API_AUDIT.md` for full coverage and orphaned TS handlers.
+- Other `/api/*` routes: rewrite → `api/router.js` (CommonJS modules in `api/_lib/cjs/` — auth, teamleader, presence, messages, calls, gifts, v1 social, **finance**, storage/media, admin/CMS/reset, setup tests, creator, rewards).
+- `vercel-build` bundles `financeLib.cjs` and includes `supabase_schema.sql` for `GET /api/admin/schema`.
+- See `docs/VERCEL_API_AUDIT.md` for full coverage, intentional limits, and orphaned TS handlers.
 - Public URLs stay `/api/...` (same-origin). Local `npm run dev` still uses Express + `/ws`.
 - **Supabase** is Auth + DB + Realtime (call/presence signaling).
 - **Do not** run a separate Express/WebSocket host for production.
@@ -21,6 +22,9 @@
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL` | Media |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Calls |
 | `SMTP_*` and/or `RESEND_API_KEY` | OTP email |
+| `FINANCE_JOB_SECRET` or `CRON_SECRET` | Finance period-close jobs (required in production) |
+| `ALLOW_FACTORY_RESET` | Optional; `true` enables DB-only granular reset (non-prod only) |
+| `SETUP_MASTER_KEY` | Optional; unlocks setup wizard auth without admin password |
 
 **Leave unset:** `VITE_API_BASE_URL`, `VITE_WS_URL` (same-origin `/api`).
 

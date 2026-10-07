@@ -46,6 +46,9 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
   // Diagnostic State
   const [diagInfo, setDiagInfo] = useState<ServerDiagnosticInfo | null>(null);
   const [loadingDiag, setLoadingDiag] = useState<boolean>(true);
+  const isVercelReadOnly = Boolean(
+    diagInfo && ((diagInfo as any).readOnly || diagInfo.isEnvWritable === false)
+  );
 
   // Active Step Tab: 0 = Overview, 1 = Database, 2 = LiveKit, 3 = Storage, 4 = SMTP, 5 = Admin, 6 = Finalize
   const [activeStep, setActiveStep] = useState<number>(0);
@@ -296,6 +299,18 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
 
   // Save All Configuration & Launch
   const handleSaveAllAndLaunch = async () => {
+    if (isVercelReadOnly) {
+      setTestStates((prev) => ({
+        ...prev,
+        save: {
+          loading: false,
+          success: false,
+          message:
+            'Vercel cannot write .env at runtime. Set Environment Variables in the Vercel dashboard, redeploy, then open the app.',
+        },
+      }));
+      return;
+    }
     if (formData.adminPassword) {
       const pwError = getPasswordPolicyError(formData.adminPassword);
       if (pwError) {
@@ -329,9 +344,14 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
           }
         }, 1500);
       } else {
+        const errMsg =
+          (typeof data.error === 'object' && data.error?.message) ||
+          data.error ||
+          data.errorMessage ||
+          'Failed to save configuration.';
         setTestStates((prev) => ({
           ...prev,
-          save: { loading: false, success: false, message: data.error || 'Failed to save configuration.' },
+          save: { loading: false, success: false, message: errMsg },
         }));
       }
     } catch (err: any) {
@@ -678,6 +698,20 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                     You can configure each service step-by-step or skip any service to keep default mock fallbacks active. Clicking <strong>"Test Connection"</strong> verifies your credentials live before saving.
                   </p>
                 </div>
+
+                {isVercelReadOnly && (
+                  <div className="p-4 bg-amber-950/40 border border-amber-500/40 rounded-2xl space-y-2">
+                    <div className="flex items-center space-x-2 text-amber-200 font-bold text-xs">
+                      <AlertCircle className="w-4 h-4 text-amber-400" />
+                      <span>Vercel read-only environment</span>
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      This deployment cannot write a local <code className="text-amber-200 font-mono">.env</code> file.
+                      Use <strong>Vercel → Settings → Environment Variables</strong>, then redeploy.
+                      Connection tests still work; Save &amp; Launch is disabled.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1137,22 +1171,42 @@ export const ServerSetupWizard: React.FC<ServerSetupWizardProps> = ({ onComplete
                   />
                 </div>
 
-                <div className="pt-2">
-                  <button
-                    type="button"
-                    onClick={handleSaveAllAndLaunch}
-                    disabled={testStates.save.loading}
-                    className="w-full py-4 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:to-pink-500 text-white font-black text-sm rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center space-x-2 transition-all cursor-pointer"
-                  >
-                    {testStates.save.loading ? (
-                      <RefreshCw className="w-5 h-5 animate-spin" />
-                    ) : (
-                      <>
+                <div className="pt-2 space-y-3">
+                  {isVercelReadOnly ? (
+                    <>
+                      <div className="p-4 bg-amber-950/40 border border-amber-500/40 rounded-2xl text-xs text-amber-100 leading-relaxed">
+                        Credentials must be set in the Vercel dashboard (not saved from this wizard). After env vars
+                        are configured and redeployed, open the live app.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onComplete) onComplete();
+                          else window.location.href = '/';
+                        }}
+                        className="w-full py-4 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:to-pink-500 text-white font-black text-sm rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center space-x-2 transition-all cursor-pointer"
+                      >
                         <Rocket className="w-5 h-5" />
-                        <span>Save All Credentials & Launch Live App 🚀</span>
-                      </>
-                    )}
-                  </button>
+                        <span>Open Live App</span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleSaveAllAndLaunch}
+                      disabled={testStates.save.loading}
+                      className="w-full py-4 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:to-pink-500 text-white font-black text-sm rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center space-x-2 transition-all cursor-pointer"
+                    >
+                      {testStates.save.loading ? (
+                        <RefreshCw className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <>
+                          <Rocket className="w-5 h-5" />
+                          <span>Save All Credentials & Launch Live App 🚀</span>
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             )}

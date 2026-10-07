@@ -16,21 +16,25 @@ const { handleV1 } = require('./_lib/cjs/v1Routes');
 const { handleStorage } = require('./_lib/cjs/storageRoutes');
 const { handleAdmin } = require('./_lib/cjs/adminRoutes');
 const { handleAppExtras } = require('./_lib/cjs/appExtrasRoutes');
+const { handleFinance } = require('./_lib/cjs/financeRoutes');
 
 const AVAILABLE = [
   'POST /api/auth/*',
   'GET|POST /api/teamleader/*',
-  'POST /api/presence, /api/presence/heartbeat',
-  'POST /api/messages, /api/messages/read',
-  'POST /api/calls/sync, /api/calls/burn',
+  'GET|POST /api/presence, POST /api/presence/heartbeat',
+  'POST /api/messages, /api/messages/read; GET|DELETE /api/messages/conversation/:id',
+  'POST /api/calls/sync, /api/calls/burn; GET /api/calls/wallet-ledger',
   'POST /api/gifts/send',
   'POST /api/users/sync-all, /api/users/me/delete',
-  'POST /api/supabase/*',
-  'ALL /api/v1/*',
-  'GET /api/storage/config, POST /api/storage/presigned-url, POST /api/storage/upload',
-  'GET|POST /api/admin/* (subset)',
-  'GET|POST /api/creator/*, /api/rewards/* (subset)',
-  'standalone: health, ping, r2-test, livekit/*, users, create-team-leader',
+  'POST /api/supabase/* (update-status|profile|upsert|user-statuses|bulk)',
+  'ALL /api/v1/matches|favorites|friends|blocks|feed|reviews|reports|admin/reports',
+  'GET|POST|PATCH /api/v1/finance/* (periods, ledger, batches, funding, jobs, host/TL)',
+  'GET /api/storage/config|media; POST /api/storage/presigned-url|upload',
+  'GET|POST|PATCH|DELETE /api/admin/* (schema bundled; granular-reset if ALLOW_FACTORY_RESET; CMS; spectator-token)',
+  'GET|POST /api/creator/* (incl. first-call-bonus), /api/rewards/* (claims live)',
+  'GET /api/setup/status; POST setup auth + connectivity tests; save-all blocked on Vercel',
+  'GET /api/livekit/status; standalone livekit/config|token',
+  'standalone: health, ping, r2-test, users, create-team-leader',
 ];
 
 function pathAfterApi(req) {
@@ -94,6 +98,7 @@ module.exports = async function handler(req, res) {
       handleTeamleader,
       handleCore,
       handleV1,
+      handleFinance,
       handleStorage,
       handleAdmin,
       handleAppExtras,

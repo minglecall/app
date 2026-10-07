@@ -2353,15 +2353,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
                 const sUser = serverUsersMap.get(u.id);
                 if (sUser) {
-                  // Preserve live presence status tracked authoritatively by the server
-                  return { ...u, ...sUser, onlineStatus: getUserCallStatus(u.id, u.onlineStatus) };
+                  // Prefer server onlineStatus (DB/heartbeat); getUserCallStatus may elevate to in_call
+                  return {
+                    ...u,
+                    ...sUser,
+                    onlineStatus: getUserCallStatus(u.id, sUser.onlineStatus || u.onlineStatus || 'offline'),
+                  };
                 }
                 return u;
               });
               data.users.forEach((su: UserProfile) => {
                 if (!su?.id || deletedUserIdsRef.current.has(su.id)) return;
                 if (!updated.some((u) => u.id === su.id)) {
-                  updated.push({ ...su, onlineStatus: getUserCallStatus(su.id, 'offline') });
+                  updated.push({
+                    ...su,
+                    onlineStatus: getUserCallStatus(su.id, su.onlineStatus || 'offline'),
+                  });
                 }
               });
               return updated;
@@ -2425,7 +2432,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   });
                   const next = prev.map((u) => {
                     if (u.id === currentUserIdRef.current) return u;
-                    const live = getUserCallStatus(u.id, onlineIds.has(u.id) ? 'online' : 'offline');
+                    // Presence channel only knows online membership; do not demote busy/in_call
+                    let base: 'online' | 'busy' | 'offline' | 'in_call' = onlineIds.has(u.id)
+                      ? 'online'
+                      : 'offline';
+                    if (
+                      !onlineIds.has(u.id) &&
+                      (u.onlineStatus === 'busy' || u.onlineStatus === 'in_call')
+                    ) {
+                      base = u.onlineStatus;
+                    }
+                    const live = getUserCallStatus(u.id, base);
                     if (u.onlineStatus !== live) {
                       changed = true;
                       return { ...u, onlineStatus: live };
@@ -3147,10 +3164,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     }, 5000);
 
-    // 2. HTTP presence fallback only when signaling is down
+    // 2. HTTP presence — always on Realtime/Vercel (DB map is source of truth for busy + peers);
+    //    native WS only falls back when the socket is down (WS broadcasts presence otherwise).
     presenceSyncTimer = setInterval(() => {
       if (isResettingRef.current) return;
-      if (!isSignalOpen()) {
+      if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
         syncPresenceDirect();
       }
     }, 15000);
@@ -3174,7 +3192,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         broadcastChannel = new BroadcastChannel('livecall_presence_sync_channel');
         broadcastChannel.onmessage = (event) => {
           if (event.data?.type === 'presence_updated' || event.data?.type === 'user_switched') {
-            if (!isSignalOpen()) {
+            if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
               syncPresenceDirect();
             }
             syncSupabaseStatusCycle();
@@ -3186,7 +3204,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'livecall_presence_trigger' || e.key === 'livecall_current_user_id') {
-        if (!isSignalOpen()) {
+        if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
           syncPresenceDirect();
         }
         syncSupabaseStatusCycle();
@@ -3198,7 +3216,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (document.visibilityState === 'visible') {
         if (isSignalOpen()) {
           signalSend({ type: 'heartbeat', userId: currentUserIdRef.current });
-        } else {
+        }
+        if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
           syncPresenceDirect();
         }
         syncSupabaseStatusCycle();
@@ -4733,14 +4752,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
 
       const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.success || !json?.data?.message) {
-        const msg = json?.error?.message || 'Failed to send message';
+      // Express: data.message; legacy CJS: top-level message
+      const serverMsg = (json?.data?.message || json?.message) as ChatMessage | undefined;
+      if (!res.ok || !json?.success || !serverMsg?.id) {
+        const msg =
+          (typeof json?.error === 'object' && json?.error?.message) ||
+          (typeof json?.error === 'string' && json.error) ||
+          'Failed to send message';
         setChatMessages((prev) => prev.filter((m) => m.id !== clientTempId && m.clientTempId !== clientTempId));
         showToast('Message failed', msg, 'error');
         return { ok: false, clientTempId };
       }
-
-      const serverMsg = json.data.message as ChatMessage;
       setChatMessages((prev) => {
         const withoutTemp = prev.filter((m) => m.id !== clientTempId && m.id !== serverMsg.id);
         return [
@@ -5990,22 +6012,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const res = await authFetch('/api/v1/feed?limit=50');
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.success) return;
-      const posts = Array.isArray(json.data?.posts) ? json.data.posts : [];
+      const posts = Array.isArray(json.data?.posts)
+        ? json.data.posts
+        : Array.isArray(json.posts)
+          ? json.posts
+          : [];
       setFeedPosts(
         posts.map((p: any) => ({
           id: String(p.id),
-          creatorId: String(p.creatorId),
-          creatorName: p.creatorName || 'Creator',
-          creatorAvatar: p.creatorAvatar || '',
-          creatorCountry: p.creatorCountry || '',
-          mediaUrl: p.mediaUrl,
-          mediaType: p.mediaType === 'video' ? 'video' : 'image',
+          creatorId: String(p.creatorId || p.creator_id || ''),
+          creatorName: p.creatorName || p.creator_name || 'Creator',
+          creatorAvatar: p.creatorAvatar || p.creator_avatar || '',
+          creatorCountry: p.creatorCountry || p.creator_country || '',
+          mediaUrl: p.mediaUrl || p.media_url,
+          mediaType: (p.mediaType || p.media_type) === 'video' ? 'video' : 'image',
           caption: p.caption || '',
           likes: Number(p.likes || 0),
-          commentsCount: Number(p.commentsCount || 0),
+          commentsCount: Number(p.commentsCount || p.comments_count || 0),
           isLiked: Boolean(p.isLiked),
-          createdAt: p.createdAt
-            ? new Date(p.createdAt).toLocaleDateString()
+          createdAt: p.createdAt || p.created_at
+            ? new Date(p.createdAt || p.created_at).toLocaleDateString()
             : 'Just now',
         }))
       );
@@ -6020,21 +6046,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const res = await authFetch(`/api/v1/feed/user/${encodeURIComponent(userId)}?limit=50`);
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.success) return [];
-      const posts = Array.isArray(json.data?.posts) ? json.data.posts : [];
+      const posts = Array.isArray(json.data?.posts)
+        ? json.data.posts
+        : Array.isArray(json.posts)
+          ? json.posts
+          : [];
       return posts.map((p: any) => ({
         id: String(p.id),
-        creatorId: String(p.creatorId),
-        creatorName: p.creatorName || 'Creator',
-        creatorAvatar: p.creatorAvatar || '',
-        creatorCountry: p.creatorCountry || '',
-        mediaUrl: p.mediaUrl,
-        mediaType: (p.mediaType === 'video' ? 'video' : 'image') as 'image' | 'video',
+        creatorId: String(p.creatorId || p.creator_id || ''),
+        creatorName: p.creatorName || p.creator_name || 'Creator',
+        creatorAvatar: p.creatorAvatar || p.creator_avatar || '',
+        creatorCountry: p.creatorCountry || p.creator_country || '',
+        mediaUrl: p.mediaUrl || p.media_url,
+        mediaType: ((p.mediaType || p.media_type) === 'video' ? 'video' : 'image') as 'image' | 'video',
         caption: p.caption || '',
         likes: Number(p.likes || 0),
-        commentsCount: Number(p.commentsCount || 0),
+        commentsCount: Number(p.commentsCount || p.comments_count || 0),
         isLiked: Boolean(p.isLiked),
-        createdAt: p.createdAt
-          ? new Date(p.createdAt).toLocaleDateString()
+        createdAt: p.createdAt || p.created_at
+          ? new Date(p.createdAt || p.created_at).toLocaleDateString()
           : 'Just now',
       }));
     } catch (err) {
@@ -7491,10 +7521,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           );
           return false;
         }
-        if (typeof json.senderBalance === 'number') {
+        const bal =
+          typeof json.senderBalance === 'number'
+            ? json.senderBalance
+            : typeof json.senderCoinBalance === 'number'
+              ? json.senderCoinBalance
+              : null;
+        if (typeof bal === 'number') {
           setUsers((prev) =>
             prev.map((u) =>
-              u.id === currentUser.id ? { ...u, coinBalance: json.senderBalance } : u
+              u.id === currentUser.id ? { ...u, coinBalance: bal } : u
             )
           );
         } else {
