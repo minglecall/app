@@ -1187,23 +1187,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         (selfStatus as 'online' | 'busy' | 'offline' | undefined) ||
         (selfId ? presence[selfId] : undefined);
 
-      // Server says self is not busy → drop stale local call lock (was sticking Busy on profile)
+      // Never clear a live ringing/active CallSession from presence alone.
+      // Heartbeat often races ahead of /api/calls/sync and briefly reports "online",
+      // which was auto-closing the calling popup after ~1–2s before the peer rang.
+      const localCall = activeCallRef.current;
+      const hasLiveLocalCall =
+        Boolean(localCall) &&
+        localCall!.status !== 'ended' &&
+        (localCall!.status === 'ringing' || localCall!.status === 'active');
       if (
         resolvedSelf &&
         resolvedSelf !== 'busy' &&
-        activeCallRef.current &&
-        activeCallRef.current.status !== 'ended'
+        localCall &&
+        localCall.status !== 'ended' &&
+        !hasLiveLocalCall
       ) {
         activeCallRef.current = null;
         setActiveCall(null);
       }
-      if (resolvedSelf && resolvedSelf !== 'busy') {
+      if (resolvedSelf && resolvedSelf !== 'busy' && !hasLiveLocalCall) {
         setAdminActiveCalls((prev) =>
           prev.filter((ac) => ac.hostId !== selfId && ac.callerId !== selfId)
         );
       }
-      if (resolvedSelf === 'online' || resolvedSelf === 'offline' || resolvedSelf === 'busy') {
+      // Do not overwrite preferred availability with call-derived busy from the server map.
+      if (
+        (resolvedSelf === 'online' || resolvedSelf === 'offline') &&
+        !hasLiveLocalCall
+      ) {
         preferredStatusRef.current = resolvedSelf;
+      } else if (resolvedSelf === 'busy' && preferredStatusRef.current === 'offline') {
+        // keep offline preference; busy is call-derived
       }
 
       setUsers((prev) => {
@@ -1296,10 +1310,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         startTime: new Date(activeCall.startTime || Date.now()).toISOString(),
       }),
     }).catch(() => {});
+    // While in a call UI, heartbeat as busy so presence cannot race back to "online"
+    // and clear the ringing popup (or hide the callee as available).
     authFetch('/api/presence/heartbeat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'online' }),
+      body: JSON.stringify({ status: 'busy' }),
     })
       .then(async (res) => {
         if (!res.ok) return;
@@ -1316,6 +1332,86 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       })
       .catch(() => {});
   }, [activeCall?.id, activeCall?.status]);
+
+  // DB fallback for incoming rings when Realtime broadcast is dropped (Vercel).
+  // Caller persists call_logs status=ringing via /api/calls/sync; callee watches that row.
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !isLoggedIn || !currentUserId) return;
+    const meId = String(currentUserId);
+    const channel = supabase
+      .channel(`call_logs_inbox_${meId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'call_logs',
+          filter: `receiver_id=eq.${meId}`,
+        },
+        (payload: any) => {
+          try {
+            const row = (payload.new || payload.old || {}) as Record<string, any>;
+            const callId = String(row.id || '').trim();
+            const callerId = String(row.caller_id || '').trim();
+            const receiverId = String(row.receiver_id || meId).trim();
+            const st = String(row.status || '').toLowerCase();
+            if (!callId || !callerId) return;
+
+            const cur = activeCallRef.current;
+            if (st === 'ringing') {
+              if (cur && cur.status === 'active') return;
+              if (cur && cur.id === callId && cur.status === 'ringing') return;
+              setActiveCall({
+                id: callId,
+                callerId,
+                receiverId,
+                startTime: Date.now(),
+                durationSeconds: 0,
+                coinsSpent: 0,
+                coinsEarned: 0,
+                giftsSent: [],
+                status: 'ringing',
+              });
+              setUsers((prev) =>
+                prev.map((u) =>
+                  u.id === callerId || u.id === receiverId
+                    ? { ...u, onlineStatus: 'busy' as const }
+                    : u
+                )
+              );
+              showToastRef.current?.(
+                'Incoming Video Call 📹',
+                'Incoming call ringing on your device!',
+                'info'
+              );
+              return;
+            }
+
+            if (
+              cur &&
+              cur.id === callId &&
+              (st === 'missed' ||
+                st === 'declined' ||
+                st === 'cancelled' ||
+                st === 'canceled' ||
+                st === 'rejected' ||
+                st === 'failed')
+            ) {
+              clearRingTimeout();
+              activeCallRef.current = null;
+              setActiveCall(null);
+            }
+          } catch (e) {
+            console.warn('[call_logs] inbox handler error', e);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [isLoggedIn, currentUserId]);
 
   // Unified helper to calculate effective coin burn rate per minute for any host/caller pair
   const getEffectiveCallRate = (hostId?: string, callerId?: string): number => {
@@ -2544,10 +2640,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!token) return;
       accessTokenRef.current = token;
       try {
-        // Send preferred availability (not call-derived busy). Server forces busy when in open call.
+        // Prefer busy while this client has a live call UI so heartbeat cannot
+        // race ahead of call_logs sync and report "online" mid-ring.
+        const liveCall = activeCallRef.current;
+        const inLiveCall =
+          Boolean(liveCall) &&
+          (liveCall!.status === 'ringing' || liveCall!.status === 'active');
         const myStatus: 'online' | 'busy' | 'offline' = !isLoggedInRef.current
           ? 'offline'
-          : preferredStatusRef.current;
+          : inLiveCall
+            ? 'busy'
+            : preferredStatusRef.current;
 
         const res = await authFetch('/api/presence/heartbeat', {
           method: 'POST',
@@ -3050,9 +3153,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             } else if (meId && meId !== callerId && meId !== receiverId) {
               return;
             }
-            // Don't clobber an already-active call
+            // Don't clobber an already-active call / duplicate ring from DB+broadcast
             const cur = activeCallRef.current;
             if (cur && cur.status === 'active') return;
+            if (cur && cur.id === callId && cur.status === 'ringing') return;
             setActiveCall({
               id: callId,
               callerId,
@@ -4331,26 +4435,38 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
     };
 
-    const persistBusy = () => {
-      authFetch('/api/calls/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          callId,
-          callerId: currentUser.id,
-          receiverId,
-          status: 'ringing',
-          startTime: new Date().toISOString(),
-        }),
-      }).catch(() => {});
+    const persistBusy = async (): Promise<boolean> => {
+      try {
+        const res = await authFetch('/api/calls/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            callId,
+            callerId: currentUser.id,
+            receiverId,
+            status: 'ringing',
+            startTime: new Date().toISOString(),
+          }),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
     };
 
     if (isSignalOpen()) {
       void (async () => {
+        // Persist ringing FIRST so callee postgres_changes / ring poll can recover
+        // even when Realtime broadcast is dropped.
+        markBusyLocal();
+        const synced = await persistBusy();
         const sent = realtimeRef.current?.isConnected()
           ? await realtimeRef.current.send(initiatePayload)
           : (signalSend(initiatePayload), true);
-        if (sent === false) {
+        if (sent === false && !synced) {
+          clearRingTimeout();
+          activeCallRef.current = null;
+          setActiveCall(null);
           showToast(
             'Call Failed',
             'Could not reach the other user. Ask them to open the app and try again.',
@@ -4358,9 +4474,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           );
           return;
         }
-        // Caller ringing UX is local (Realtime has no Express echo of call:ringing)
-        markBusyLocal();
-        persistBusy();
         showToast(
           'Calling... 📞',
           `Ringing ${receiver.name}. Waiting for call acceptance...`,
@@ -4413,14 +4526,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     'success'
                   );
                 } else if (
+                  // Only peer/explicit ring outcomes — not "completed"/"ended"
+                  // (those can race from presence cleanup and falsely hang up at ~2s).
                   st === 'missed' ||
                   st === 'declined' ||
                   st === 'cancelled' ||
                   st === 'canceled' ||
                   st === 'rejected' ||
-                  st === 'failed' ||
-                  st === 'ended' ||
-                  st === 'completed'
+                  st === 'failed'
                 ) {
                   clearRingTimeout();
                   endCallRef.current();

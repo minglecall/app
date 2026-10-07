@@ -1413,8 +1413,11 @@ async function startServer(): Promise<express.Express> {
               return;
             }
 
-            // Create call state
-            const callId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+            // Prefer client callId so call_logs sync + ring poll share one id
+            const clientCallId =
+              typeof msg.callId === 'string' && msg.callId.trim() ? String(msg.callId).trim() : '';
+            const callId =
+              clientCallId || `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
             const newCall: CallState = {
               id: callId,
               callerId,
@@ -2366,7 +2369,7 @@ async function startServer(): Promise<express.Express> {
 
   // POST /api/calls/burn is handled by createCallRouter (requireAuth, server-computed amounts)
 
-  // POST /api/calls/sync - Sync call end status + persist call log for platform analytics
+  // POST /api/calls/sync — ringing/active persist + end (parity with Vercel coreRoutes)
   app.post('/api/calls/sync', requireAuth, async (req, res) => {
     try {
       const {
@@ -2390,9 +2393,24 @@ async function startServer(): Promise<express.Express> {
         endTime,
       } = req.body || {};
 
-      if (!callId || status !== 'ended') {
-        return res.status(400).json({ success: false, error: 'callId and status=ended are required' });
+      const callStatus = String(status || outcome || '')
+        .trim()
+        .toLowerCase();
+      if (!callId || !callStatus) {
+        return res.status(400).json({ success: false, error: 'callId and status are required' });
       }
+
+      const busyStatuses = new Set(['ringing', 'active', 'accepted', 'in_call', 'connecting']);
+      const endStatuses = new Set([
+        'ended',
+        'completed',
+        'missed',
+        'declined',
+        'cancelled',
+        'canceled',
+        'failed',
+        'rejected',
+      ]);
 
       const profileId = String((req as any).profileId || (req as any).profile?.id || '');
       const memCall = activeCalls.get(String(callId));
@@ -2412,12 +2430,88 @@ async function startServer(): Promise<express.Express> {
         }
       }
 
-      const explicitOutcome = String(outcome || '').trim().toLowerCase();
+      // Ringing / active — keep call open in DB (do not stamp ended_at)
+      if (busyStatuses.has(callStatus)) {
+        const startedAt =
+          typeof startTime === 'string'
+            ? startTime
+            : new Date(typeof startTime === 'number' ? startTime : Date.now()).toISOString();
+        if (isSupabaseAdminConfigured() && resolvedCallerId && resolvedReceiverId) {
+          const client = getSupabaseAdmin();
+          if (client) {
+            const { error } = await client.from('call_logs').upsert(
+              {
+                id: String(callId),
+                caller_id: resolvedCallerId,
+                receiver_id: resolvedReceiverId,
+                host_id: resolvedReceiverId,
+                status: callStatus === 'accepted' || callStatus === 'in_call' || callStatus === 'connecting'
+                  ? 'active'
+                  : callStatus,
+                started_at: startedAt,
+                start_time: startedAt,
+                ended_at: null,
+                end_time: null,
+                duration_seconds: Math.max(0, Number(durationSeconds) || 0),
+                coins_spent: Math.max(0, Number(coinsSpent) || 0),
+                coins_earned: Math.max(0, Number(coinsEarned) || 0),
+                updated_at: new Date().toISOString(),
+              } as any,
+              { onConflict: 'id' }
+            );
+            if (error) {
+              console.warn('[api/calls/sync] busy upsert', error.message);
+            }
+          }
+        }
+
+        // Mirror busy in memory presence when a live call exists or is being offered
+        if (!memCall && callStatus === 'ringing' && resolvedCallerId && resolvedReceiverId) {
+          activeCalls.set(String(callId), {
+            id: String(callId),
+            callerId: resolvedCallerId,
+            receiverId: resolvedReceiverId,
+            status: 'ringing',
+            ringingAt: Date.now(),
+          });
+        } else if (memCall && (callStatus === 'active' || callStatus === 'accepted')) {
+          memCall.status = 'active';
+          memCall.startTime = memCall.startTime || Date.now();
+        }
+
+        if (resolvedCallerId) {
+          presenceMap.set(resolvedCallerId, 'busy');
+          presenceLastKnownStatus.set(resolvedCallerId, 'busy');
+          const cu = serverUsers.get(resolvedCallerId);
+          if (cu) cu.onlineStatus = 'busy';
+          if (isSupabaseAdminConfigured()) updateUserStatusAdmin(resolvedCallerId, 'busy').catch(() => {});
+        }
+        if (resolvedReceiverId) {
+          presenceMap.set(resolvedReceiverId, 'busy');
+          presenceLastKnownStatus.set(resolvedReceiverId, 'busy');
+          const ru = serverUsers.get(resolvedReceiverId);
+          if (ru) ru.onlineStatus = 'busy';
+          if (isSupabaseAdminConfigured()) updateUserStatusAdmin(resolvedReceiverId, 'busy').catch(() => {});
+        }
+        broadcastPresence();
+        broadcastActiveCalls();
+        return res.json({ success: true, callId: String(callId), status: callStatus });
+      }
+
+      if (!endStatuses.has(callStatus)) {
+        return res.status(400).json({
+          success: false,
+          error: 'status must be ringing, active, or an end outcome',
+        });
+      }
+
+      const explicitOutcome = String(outcome || callStatus || '').trim().toLowerCase();
       const wasRinging = memCall
         ? memCall.status === 'ringing'
         : explicitOutcome === 'missed' ||
           explicitOutcome === 'declined' ||
           explicitOutcome === 'cancelled' ||
+          explicitOutcome === 'canceled' ||
           String(reason || '') === 'Ring timeout';
 
       const result = await finalizeCallEnd({
@@ -2429,7 +2523,7 @@ async function startServer(): Promise<express.Express> {
         endedBy: endedBy || profileId || null,
         reason: reason || null,
         code: code || null,
-        outcome: outcome || null,
+        outcome: outcome || (callStatus === 'ended' ? null : callStatus),
         durationSeconds: Number(durationSeconds) || 0,
         coinsSpent: Number(coinsSpent) || 0,
         coinsEarned: Number(coinsEarned) || 0,

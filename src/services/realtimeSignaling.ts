@@ -140,7 +140,7 @@ export class RealtimeSignaling {
       ) {
         // Must use the same topic the peer subscribed to in connect(): user:{profileId}
         const targetChannel = supabase.channel(`user:${targetId}`, {
-          config: { broadcast: { self: false } },
+          config: { broadcast: { self: false, ack: true } },
         });
         // CRITICAL: wait until SUBSCRIBED before broadcast — otherwise initiate/accept are dropped
         const ok = await waitForSubscribe(targetChannel, 5000);
@@ -151,14 +151,31 @@ export class RealtimeSignaling {
           } catch {
             /* ignore */
           }
-          return false;
+          // Still try presence fanout so call:initiate is not lost entirely
+          try {
+            await this.presenceChannel?.send({
+              type: 'broadcast',
+              event: 'signal',
+              payload,
+            });
+            return true;
+          } catch {
+            return false;
+          }
         }
-        await targetChannel.send({
+        const sendStatus = await targetChannel.send({
           type: 'broadcast',
           event: 'signal',
           payload,
         });
-        await supabase.removeChannel(targetChannel);
+        // Keep the ephemeral channel briefly so the broadcast can flush to peers.
+        // Immediate removeChannel was dropping call:initiate before delivery.
+        await new Promise((r) => setTimeout(r, 400));
+        try {
+          await supabase.removeChannel(targetChannel);
+        } catch {
+          /* ignore */
+        }
         // Presence fanout backup — peer filters by callId / callerId / receiverId
         try {
           await this.presenceChannel?.send({
@@ -168,6 +185,10 @@ export class RealtimeSignaling {
           });
         } catch {
           /* best-effort */
+        }
+        if (sendStatus === 'error') {
+          console.warn('[RealtimeSignaling] target broadcast error', targetId, type);
+          // Presence backup may still have delivered
         }
         return true;
       }
