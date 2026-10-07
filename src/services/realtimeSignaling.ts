@@ -109,28 +109,38 @@ export class RealtimeSignaling {
     if (!this.connected || !this.userChannel) return false;
     const type = String(payload.type || '');
 
-    // Route directed events to recipient user channel (prefer explicit toUserId)
-    const targetId =
-      payload.toUserId ||
-      payload.targetUserId ||
-      payload.calleeId ||
-      (type === 'call:accept' ||
+    // Route directed events to recipient user channel(s).
+    // Include profile id + auth id aliases — peers may subscribe under either.
+    const targetIds = new Set<string>();
+    const pushTarget = (v: unknown) => {
+      const id = String(v || '').trim();
+      if (id) targetIds.add(id);
+    };
+    pushTarget(payload.toUserId);
+    pushTarget(payload.targetUserId);
+    pushTarget(payload.calleeId);
+    pushTarget(payload.toAuthId);
+    pushTarget(payload.receiverAuthId);
+    pushTarget(payload.callerAuthId);
+    if (
+      type === 'call:accept' ||
       type === 'call:accepted' ||
       type === 'call:reject' ||
       type === 'call:cancel' ||
       type === 'call:end' ||
       type === 'call:ended'
-        ? payload.callerId
-        : null) ||
-      (type === 'call:initiate' || type === 'call:incoming' || type === 'call:ringing'
-        ? payload.receiverId
-        : null) ||
-      payload.receiverId ||
-      payload.userId;
+    ) {
+      pushTarget(payload.callerId);
+    }
+    if (type === 'call:initiate' || type === 'call:incoming' || type === 'call:ringing') {
+      pushTarget(payload.receiverId);
+    }
+    pushTarget(payload.receiverId);
+    pushTarget(payload.userId);
 
     try {
       if (
-        targetId &&
+        targetIds.size > 0 &&
         (type.startsWith('call:') ||
           type.startsWith('friend_request:') ||
           type === 'chat:message' ||
@@ -138,45 +148,7 @@ export class RealtimeSignaling {
           type.startsWith('quick_match:') ||
           type === 'match:created')
       ) {
-        // Must use the same topic the peer subscribed to in connect(): user:{profileId}
-        const targetChannel = supabase.channel(`user:${targetId}`, {
-          config: { broadcast: { self: false, ack: true } },
-        });
-        // CRITICAL: wait until SUBSCRIBED before broadcast — otherwise initiate/accept are dropped
-        const ok = await waitForSubscribe(targetChannel, 5000);
-        if (!ok) {
-          console.warn('[RealtimeSignaling] target channel subscribe failed', targetId, type);
-          try {
-            await supabase.removeChannel(targetChannel);
-          } catch {
-            /* ignore */
-          }
-          // Still try presence fanout so call:initiate is not lost entirely
-          try {
-            await this.presenceChannel?.send({
-              type: 'broadcast',
-              event: 'signal',
-              payload,
-            });
-            return true;
-          } catch {
-            return false;
-          }
-        }
-        const sendStatus = await targetChannel.send({
-          type: 'broadcast',
-          event: 'signal',
-          payload,
-        });
-        // Keep the ephemeral channel briefly so the broadcast can flush to peers.
-        // Immediate removeChannel was dropping call:initiate before delivery.
-        await new Promise((r) => setTimeout(r, 400));
-        try {
-          await supabase.removeChannel(targetChannel);
-        } catch {
-          /* ignore */
-        }
-        // Presence fanout backup — peer filters by callId / callerId / receiverId
+        // Presence first — both peers already subscribe to app-presence
         try {
           await this.presenceChannel?.send({
             type: 'broadcast',
@@ -186,11 +158,42 @@ export class RealtimeSignaling {
         } catch {
           /* best-effort */
         }
-        if (sendStatus === 'error') {
-          console.warn('[RealtimeSignaling] target broadcast error', targetId, type);
-          // Presence backup may still have delivered
+
+        let delivered = false;
+        for (const targetId of targetIds) {
+          // Must use the same topic the peer subscribed to in connect(): user:{profileId}
+          const targetChannel = supabase.channel(`user:${targetId}`, {
+            config: { broadcast: { self: false, ack: true } },
+          });
+          // CRITICAL: wait until SUBSCRIBED before broadcast — otherwise initiate/accept are dropped
+          const ok = await waitForSubscribe(targetChannel, 4000);
+          if (!ok) {
+            console.warn('[RealtimeSignaling] target channel subscribe failed', targetId, type);
+            try {
+              await supabase.removeChannel(targetChannel);
+            } catch {
+              /* ignore */
+            }
+            continue;
+          }
+          const sendStatus = await targetChannel.send({
+            type: 'broadcast',
+            event: 'signal',
+            payload,
+          });
+          // Keep the ephemeral channel briefly so the broadcast can flush to peers.
+          await new Promise((r) => setTimeout(r, 350));
+          try {
+            await supabase.removeChannel(targetChannel);
+          } catch {
+            /* ignore */
+          }
+          if (sendStatus !== 'error') delivered = true;
+          else console.warn('[RealtimeSignaling] target broadcast error', targetId, type);
         }
-        return true;
+        // Presence fanout already attempted — treat as success so caller UX continues;
+        // callee also polls GET /api/calls/incoming as hard fallback.
+        return delivered || Boolean(this.presenceChannel);
       }
 
       if (type === 'presence:update' || type === 'heartbeat' || type === 'user:update') {

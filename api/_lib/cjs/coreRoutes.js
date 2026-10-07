@@ -454,9 +454,77 @@ async function handleMessages(path, req, res) {
 }
 
 async function handleCalls(path, req, res) {
-  if (path !== 'calls/sync' && path !== 'calls/burn' && path !== 'calls/wallet-ledger') return null;
+  if (
+    path !== 'calls/sync' &&
+    path !== 'calls/burn' &&
+    path !== 'calls/wallet-ledger' &&
+    path !== 'calls/incoming'
+  ) {
+    return null;
+  }
   const auth = await requireAuth(req);
   if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+
+  // GET /api/calls/incoming — open ringing rows for the authenticated callee (service role).
+  // Reliable fallback when Realtime broadcast / postgres_changes miss the peer.
+  if (path === 'calls/incoming' && req.method === 'GET') {
+    const profileId = String(auth.profileId || '').trim();
+    const authUserId = String(auth.userId || '').trim();
+    const ids = Array.from(new Set([profileId, authUserId].filter(Boolean)));
+    if (!ids.length) {
+      return send(res, 401, {
+        success: false,
+        error: { message: 'Unable to resolve profile', code: 'UNAUTHORIZED' },
+      });
+    }
+    try {
+      const orFilter = ids
+        .flatMap((id) => [`receiver_id.eq.${id}`, `host_id.eq.${id}`])
+        .join(',');
+      const { data, error } = await auth.client
+        .from('call_logs')
+        .select(
+          'id, caller_id, receiver_id, host_id, status, started_at, start_time, updated_at, caller_name, host_name'
+        )
+        .eq('status', 'ringing')
+        .or(orFilter)
+        .order('started_at', { ascending: false })
+        .limit(10);
+      if (error) {
+        console.warn('[api/calls/incoming]', error.message);
+        return send(res, 500, {
+          success: false,
+          error: { message: 'Incoming lookup failed', code: 'INCOMING_LOOKUP_FAILED' },
+        });
+      }
+      const now = Date.now();
+      const ringing = (data || [])
+        .map((row) => {
+          const startedMs =
+            Date.parse(row.started_at || row.start_time || row.updated_at || '') || 0;
+          const ageMs = startedMs ? now - startedMs : 0;
+          return { row, ageMs };
+        })
+        // Ignore stale rings (>75s) — ring timeout is typically 15–30s
+        .filter(({ ageMs }) => ageMs >= 0 && ageMs < 75_000)
+        .map(({ row }) => ({
+          callId: String(row.id),
+          callerId: String(row.caller_id || ''),
+          receiverId: String(row.receiver_id || row.host_id || profileId),
+          status: 'ringing',
+          startedAt: row.started_at || row.start_time || null,
+          callerName: row.caller_name || null,
+        }))
+        .filter((c) => c.callId && c.callerId);
+      return send(res, 200, { success: true, data: ringing });
+    } catch (e) {
+      console.warn('[api/calls/incoming]', e && e.message);
+      return send(res, 500, {
+        success: false,
+        error: { message: 'Incoming lookup failed', code: 'INCOMING_LOOKUP_FAILED' },
+      });
+    }
+  }
 
   if (path === 'calls/wallet-ledger' && req.method === 'GET') {
     const { data, error } = await auth.client
@@ -493,11 +561,19 @@ async function handleCalls(path, req, res) {
     const endedAt = endStatuses.has(callStatus)
       ? toIsoTimestamp(body && (body.endedAt || body.endTime)) || new Date().toISOString()
       : null;
+    const callerName =
+      body && body.callerName ? String(body.callerName).trim().slice(0, 120) : undefined;
+    const receiverName =
+      body && (body.receiverName || body.hostName)
+        ? String(body.receiverName || body.hostName).trim().slice(0, 120)
+        : undefined;
     const payload = {
       id: callId,
       caller_id: callerId || auth.profileId,
       receiver_id: receiverId || undefined,
       host_id: receiverId || undefined,
+      caller_name: callerName,
+      host_name: receiverName,
       status: callStatus,
       duration_seconds: Number((body && (body.durationSeconds || body.duration)) || 0),
       coins_spent: Number((body && body.coinsSpent) || 0),
@@ -510,6 +586,7 @@ async function handleCalls(path, req, res) {
     if (endStatuses.has(callStatus)) {
       payload.ended_at = endedAt;
       payload.end_time = endedAt;
+      if (!payload.end_reason) payload.end_reason = callStatus;
     } else if (busyStatuses.has(callStatus)) {
       // Keep call open — never stamp ended_at while ringing/active
       payload.ended_at = null;
@@ -536,7 +613,7 @@ async function handleCalls(path, req, res) {
       console.warn('[api/calls/sync] presence update failed', e && e.message);
     }
 
-    return send(res, 200, { success: true, callId, presenceUpdated: true });
+    return send(res, 200, { success: true, callId, presenceUpdated: true, status: callStatus });
   }
 
   if (path === 'calls/burn' && req.method === 'POST') {

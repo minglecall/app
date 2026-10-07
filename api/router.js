@@ -23,7 +23,7 @@ const AVAILABLE = [
   'GET|POST /api/teamleader/*',
   'GET|POST /api/presence, POST /api/presence/heartbeat',
   'POST /api/messages, /api/messages/read; GET|DELETE /api/messages/conversation/:id',
-  'POST /api/calls/sync, /api/calls/burn; GET /api/calls/wallet-ledger',
+  'POST /api/calls/sync, /api/calls/burn; GET /api/calls/wallet-ledger, /api/calls/incoming',
   'POST /api/gifts/send',
   'POST /api/users/sync-all, /api/users/me/delete',
   'POST /api/supabase/* (update-status|profile|upsert|user-statuses|bulk)',

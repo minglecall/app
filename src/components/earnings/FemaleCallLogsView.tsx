@@ -48,16 +48,25 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s) || s.startsWith('user_');
   };
 
-  const isFemaleCreator = currentUser.role === 'female_creator';
+  const isFemaleCreator =
+    currentUser.role === 'female_creator' || currentUser.role === 'female_host';
   const isAdmin = currentUser.role === 'admin';
   const isCreatorOrAdmin = isFemaleCreator || isAdmin;
+  const selfIds = new Set(
+    [currentUser.id, currentUser.authId].map((id) => String(id || '').trim()).filter(Boolean)
+  );
+  const isSelfLogId = (id?: string) => Boolean(id && selfIds.has(String(id)));
 
-  // Filter logs: Creator/Admin sees received host calls; regular users see their own caller activity
+  // Filter logs: Creator/Admin/host sees received host calls; regular users see their own activity
   const myLogs = callLogs.filter((log) => {
     if (isCreatorOrAdmin) {
-      return log.receiverId === currentUser.id || isAdmin;
+      return (
+        isSelfLogId(log.receiverId) ||
+        isSelfLogId((log as any).hostId) ||
+        isAdmin
+      );
     }
-    return log.callerId === currentUser.id || log.receiverId === currentUser.id;
+    return isSelfLogId(log.callerId) || isSelfLogId(log.receiverId) || isSelfLogId((log as any).hostId);
   });
 
   const missedLogsCount = myLogs.filter((l) => l.status === 'missed' || l.status === 'declined' || l.status === 'unanswered').length;

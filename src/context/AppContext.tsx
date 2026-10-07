@@ -1256,6 +1256,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       } catch {
         /* best effort */
       }
+      // Host + caller call-log UIs must refresh after missed/declined/completed
+      if (isSupabaseConfigured()) {
+        fetchCallLogsFromSupabase()
+          .then((logs) => {
+            if (Array.isArray(logs)) setCallLogs(logs);
+          })
+          .catch(() => {});
+      }
       // After a call, return to online (unless user chose offline). Clears sticky busy.
       if (preferredStatusRef.current !== 'offline') {
         preferredStatusRef.current = 'online';
@@ -1299,6 +1307,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
       return changed ? next : prev;
     });
+    const callerProfile = usersRef.current.find((u) => u.id === callerId);
+    const receiverProfile = usersRef.current.find((u) => u.id === receiverId);
     authFetch('/api/calls/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1308,6 +1318,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         receiverId,
         status: status === 'active' ? 'active' : 'ringing',
         startTime: new Date(activeCall.startTime || Date.now()).toISOString(),
+        callerName: callerProfile?.name,
+        receiverName: receiverProfile?.name,
+        hostName: receiverProfile?.name,
       }),
     }).catch(() => {});
     // While in a call UI, heartbeat as busy so presence cannot race back to "online"
@@ -1333,84 +1346,176 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       .catch(() => {});
   }, [activeCall?.id, activeCall?.status]);
 
-  // DB fallback for incoming rings when Realtime broadcast is dropped (Vercel).
-  // Caller persists call_logs status=ringing via /api/calls/sync; callee watches that row.
+  /** True if id matches this session's profile id or auth id. */
+  const isSelfId = useCallback((id?: string | null) => {
+    const sid = String(id || '').trim();
+    if (!sid) return false;
+    const me = String(currentUserIdRef.current || '').trim();
+    const meAuth = String(
+      supabaseAuthUserIdRef.current ||
+        usersRef.current.find((u) => u.id === me)?.authId ||
+        ''
+    ).trim();
+    return sid === me || (Boolean(meAuth) && sid === meAuth);
+  }, []);
+
+  const applyIncomingRing = useCallback(
+    (opts: { callId: string; callerId: string; receiverId: string }) => {
+      const callId = String(opts.callId || '').trim();
+      const callerId = String(opts.callerId || '').trim();
+      const receiverId = String(opts.receiverId || currentUserIdRef.current || '').trim();
+      if (!callId || !callerId) return;
+      // Never show incoming UI for a call we placed ourselves
+      if (isSelfId(callerId) && !isSelfId(receiverId)) return;
+      if (!isSelfId(receiverId)) return;
+
+      const cur = activeCallRef.current;
+      if (cur && cur.status === 'active') return;
+      if (cur && cur.id === callId && cur.status === 'ringing') return;
+
+      setActiveCall({
+        id: callId,
+        callerId,
+        receiverId,
+        startTime: Date.now(),
+        durationSeconds: 0,
+        coinsSpent: 0,
+        coinsEarned: 0,
+        giftsSent: [],
+        status: 'ringing',
+      });
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === callerId || u.id === receiverId || u.authId === callerId || u.authId === receiverId
+            ? { ...u, onlineStatus: 'busy' as const }
+            : u
+        )
+      );
+      showToastRef.current?.(
+        'Incoming Video Call 📹',
+        'Incoming call ringing on your device!',
+        'info'
+      );
+    },
+    [isSelfId]
+  );
+  const applyIncomingRingRef = useRef(applyIncomingRing);
   useEffect(() => {
-    if (!isSupabaseConfigured() || !isLoggedIn || !currentUserId) return;
+    applyIncomingRingRef.current = applyIncomingRing;
+  }, [applyIncomingRing]);
+  const isSelfIdRef = useRef(isSelfId);
+  useEffect(() => {
+    isSelfIdRef.current = isSelfId;
+  }, [isSelfId]);
+
+  // DB + HTTP fallback for incoming rings when Realtime broadcast is dropped (Vercel).
+  useEffect(() => {
+    if (!isLoggedIn || !currentUserId) return;
     const meId = String(currentUserId);
-    const channel = supabase
-      .channel(`call_logs_inbox_${meId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'call_logs',
-          filter: `receiver_id=eq.${meId}`,
-        },
-        (payload: any) => {
-          try {
-            const row = (payload.new || payload.old || {}) as Record<string, any>;
-            const callId = String(row.id || '').trim();
-            const callerId = String(row.caller_id || '').trim();
-            const receiverId = String(row.receiver_id || meId).trim();
-            const st = String(row.status || '').toLowerCase();
-            if (!callId || !callerId) return;
+    let cancelled = false;
 
-            const cur = activeCallRef.current;
-            if (st === 'ringing') {
-              if (cur && cur.status === 'active') return;
-              if (cur && cur.id === callId && cur.status === 'ringing') return;
-              setActiveCall({
-                id: callId,
-                callerId,
-                receiverId,
-                startTime: Date.now(),
-                durationSeconds: 0,
-                coinsSpent: 0,
-                coinsEarned: 0,
-                giftsSent: [],
-                status: 'ringing',
-              });
-              setUsers((prev) =>
-                prev.map((u) =>
-                  u.id === callerId || u.id === receiverId
-                    ? { ...u, onlineStatus: 'busy' as const }
-                    : u
-                )
-              );
-              showToastRef.current?.(
-                'Incoming Video Call 📹',
-                'Incoming call ringing on your device!',
-                'info'
-              );
-              return;
-            }
+    const pollIncoming = async () => {
+      if (cancelled || isResettingRef.current) return;
+      const cur = activeCallRef.current;
+      if (cur && cur.status === 'active') return;
+      // Already ringing as callee — keep UI; still allow status clear via later poll
+      try {
+        const res = await authFetch('/api/calls/incoming');
+        if (!res.ok || cancelled) return;
+        const json = await res.json().catch(() => null);
+        const rows = Array.isArray(json?.data) ? json.data : [];
+        if (!rows.length) return;
+        const top = rows[0];
+        applyIncomingRing({
+          callId: String(top.callId || top.id || ''),
+          callerId: String(top.callerId || ''),
+          receiverId: String(top.receiverId || meId),
+        });
+      } catch (e) {
+        console.warn('[calls/incoming] poll failed', e);
+      }
+    };
 
-            if (
-              cur &&
-              cur.id === callId &&
-              (st === 'missed' ||
-                st === 'declined' ||
-                st === 'cancelled' ||
-                st === 'canceled' ||
-                st === 'rejected' ||
-                st === 'failed')
-            ) {
-              clearRingTimeout();
-              activeCallRef.current = null;
-              setActiveCall(null);
+    // Immediate + frequent poll — primary reliability path for callee popup
+    void pollIncoming();
+    const pollTimer = setInterval(() => void pollIncoming(), 1500);
+
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    if (isSupabaseConfigured()) {
+      channel = supabase
+        .channel(`call_logs_inbox_${meId}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'call_logs',
+            filter: `receiver_id=eq.${meId}`,
+          },
+          (payload: any) => {
+            try {
+              const row = (payload.new || payload.old || {}) as Record<string, any>;
+              const callId = String(row.id || '').trim();
+              const callerId = String(row.caller_id || '').trim();
+              const receiverId = String(row.receiver_id || row.host_id || meId).trim();
+              const st = String(row.status || '').toLowerCase();
+              if (!callId || !callerId) return;
+
+              if (st === 'ringing') {
+                applyIncomingRing({ callId, callerId, receiverId });
+                return;
+              }
+
+              const cur = activeCallRef.current;
+              if (
+                cur &&
+                cur.id === callId &&
+                (st === 'missed' ||
+                  st === 'declined' ||
+                  st === 'cancelled' ||
+                  st === 'canceled' ||
+                  st === 'rejected' ||
+                  st === 'failed' ||
+                  st === 'completed' ||
+                  st === 'ended')
+              ) {
+                clearRingTimeout();
+                activeCallRef.current = null;
+                setActiveCall(null);
+                // Refresh host call logs after ring outcome lands in DB
+                fetchCallLogsFromSupabase()
+                  .then((logs) => {
+                    if (Array.isArray(logs)) setCallLogs(logs);
+                  })
+                  .catch(() => {});
+              }
+            } catch (e) {
+              console.warn('[call_logs] inbox handler error', e);
             }
-          } catch (e) {
-            console.warn('[call_logs] inbox handler error', e);
           }
-        }
-      )
-      .subscribe();
+        )
+        .subscribe();
+    }
 
     return () => {
-      void supabase.removeChannel(channel);
+      cancelled = true;
+      clearInterval(pollTimer);
+      if (channel) void supabase.removeChannel(channel);
     };
+  }, [isLoggedIn, currentUserId, applyIncomingRing]);
+
+  // Keep host/user call logs fresh (missed / completed) without relying on WS fanout
+  useEffect(() => {
+    if (!isLoggedIn || !currentUserId || !isSupabaseConfigured()) return;
+    const tick = () => {
+      fetchCallLogsFromSupabase()
+        .then((logs) => {
+          if (Array.isArray(logs)) setCallLogs(logs);
+        })
+        .catch(() => {});
+    };
+    const timer = setInterval(tick, 12000);
+    return () => clearInterval(timer);
   }, [isLoggedIn, currentUserId]);
 
   // Unified helper to calculate effective coin burn rate per minute for any host/caller pair
@@ -3145,18 +3250,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const callerId = String(data.callerId || '').trim();
             const receiverId = String(data.receiverId || '').trim();
             if (!callerId || !receiverId) return;
-            const meId = String(currentUserIdRef.current || '');
+            const selfCheck = isSelfIdRef.current;
             // Only the callee should enter incoming ringing from initiate/incoming.
-            // call:ringing may echo to caller (Express); ignore if we're neither party.
+            // Match profile id OR auth id (discovery vs session can disagree).
             if (data.type === 'call:initiate' || data.type === 'call:incoming') {
-              if (!meId || receiverId !== meId) return;
-            } else if (meId && meId !== callerId && meId !== receiverId) {
+              if (!selfCheck(receiverId)) return;
+              applyIncomingRingRef.current({ callId, callerId, receiverId });
               return;
             }
-            // Don't clobber an already-active call / duplicate ring from DB+broadcast
+            // call:ringing — caller echo (Express) or party update
+            if (!selfCheck(callerId) && !selfCheck(receiverId)) return;
             const cur = activeCallRef.current;
             if (cur && cur.status === 'active') return;
             if (cur && cur.id === callId && cur.status === 'ringing') return;
+            if (selfCheck(receiverId) && !selfCheck(callerId)) {
+              applyIncomingRingRef.current({ callId, callerId, receiverId });
+              return;
+            }
+            // Caller keeps/aligns local ringing session id from server echo
             setActiveCall({
               id: callId,
               callerId,
@@ -3175,9 +3286,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   : u
               )
             );
-            if (data.type === 'call:incoming' || data.type === 'call:initiate') {
-              showToast('Incoming Video Call 📹', 'Incoming call ringing on your device!', 'info');
-            }
           } else if (data.type === 'call:accepted') {
             clearRingTimeout();
             const { startTime } = data;
@@ -4412,6 +4520,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       callerId: currentUser.id,
       receiverId,
       toUserId: receiverId,
+      // Alias targets so Realtime hits whichever id the peer subscribed with
+      receiverAuthId: receiver.authId || undefined,
+      toAuthId: receiver.authId || undefined,
+      callerAuthId: currentUser.authId || supabaseAuthUserIdRef.current || undefined,
+      callerName: currentUser.name,
+      receiverName: receiver.name,
     };
 
     const markBusyLocal = () => {
@@ -4446,6 +4560,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             receiverId,
             status: 'ringing',
             startTime: new Date().toISOString(),
+            callerName: currentUser.name,
+            receiverName: receiver.name,
+            hostName: receiver.name,
           }),
         });
         return res.ok;

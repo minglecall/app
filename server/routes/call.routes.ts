@@ -83,6 +83,93 @@ export function createCallRouter(ctx: ServerRuntime): Router {
     recordCreatorEarnCoins,
   } = ctx;
 
+  /**
+   * GET /api/calls/incoming
+   * Open ringing calls for the authenticated callee (in-memory + call_logs).
+   */
+  router.get('/incoming', requireAuth, async (req, res) => {
+    try {
+      const authUser = (req as any).user as { id: string; email?: string | null };
+      const profileId =
+        (await resolveProfileIdFromAuth(authUser)) ||
+        String((req as any).profileId || '') ||
+        Array.from(serverUsers.values()).find(
+          (u) => u.authId === authUser.id || u.id === authUser.id
+        )?.id;
+      if (!profileId) {
+        return res.status(401).json({
+          success: false,
+          error: { message: 'Unable to resolve profile', code: 'UNAUTHORIZED' },
+        });
+      }
+      const authUserId = String(authUser.id || '');
+      const selfIds = new Set(
+        [profileId, authUserId].map((id) => String(id || '').trim()).filter(Boolean)
+      );
+
+      const fromMemory = Array.from(activeCalls.values())
+        .filter((c) => c.status === 'ringing' && selfIds.has(String(c.receiverId)))
+        .map((c) => ({
+          callId: c.id,
+          callerId: c.callerId,
+          receiverId: c.receiverId,
+          status: 'ringing' as const,
+          startedAt: c.ringingAt ? new Date(c.ringingAt).toISOString() : null,
+          callerName: serverUsers.get(c.callerId)?.name || null,
+        }));
+
+      let fromDb: typeof fromMemory = [];
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        const ids = Array.from(selfIds);
+        const orFilter = ids
+          .flatMap((id) => [`receiver_id.eq.${id}`, `host_id.eq.${id}`])
+          .join(',');
+        const { data, error } = await supabase
+          .from('call_logs')
+          .select(
+            'id, caller_id, receiver_id, host_id, status, started_at, start_time, caller_name'
+          )
+          .eq('status', 'ringing')
+          .or(orFilter)
+          .order('started_at', { ascending: false })
+          .limit(10);
+        if (error) {
+          console.warn('[calls/incoming] db', error.message);
+        } else {
+          const now = Date.now();
+          fromDb = (data || [])
+            .filter((row: any) => {
+              const startedMs =
+                Date.parse(row.started_at || row.start_time || '') || 0;
+              return !startedMs || now - startedMs < 75_000;
+            })
+            .map((row: any) => ({
+              callId: String(row.id),
+              callerId: String(row.caller_id || ''),
+              receiverId: String(row.receiver_id || row.host_id || profileId),
+              status: 'ringing' as const,
+              startedAt: row.started_at || row.start_time || null,
+              callerName: row.caller_name || null,
+            }))
+            .filter((c) => c.callId && c.callerId);
+        }
+      }
+
+      const byId = new Map<string, (typeof fromMemory)[0]>();
+      for (const c of [...fromMemory, ...fromDb]) {
+        if (!byId.has(c.callId)) byId.set(c.callId, c);
+      }
+      return res.json({ success: true, data: Array.from(byId.values()) });
+    } catch (e: any) {
+      console.error('Error in GET /api/calls/incoming:', e);
+      return res.status(500).json({
+        success: false,
+        error: { message: e.message || 'Incoming lookup failed', code: 'INTERNAL_ERROR' },
+      });
+    }
+  });
+
   const terminateCallInsufficientBalance = (callId: string) => {
     const call = activeCalls.get(callId);
     if (!call) {

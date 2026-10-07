@@ -1571,7 +1571,12 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
   // RINGING SCREEN (INCOMING / OUTGOING CALL)
   // ==========================================
   if (activeCall.status === 'ringing') {
-    const isReceiver = activeCall.receiverId === currentUser.id;
+    const selfIds = new Set(
+      [currentUser.id, currentUser.authId].map((id) => String(id || '').trim()).filter(Boolean)
+    );
+    const isReceiver =
+      selfIds.has(String(activeCall.receiverId || '')) &&
+      !selfIds.has(String(activeCall.callerId || ''));
 
     return (
       <div
