@@ -11,13 +11,31 @@ import { saveOtpDb, savePendingSignupDb } from '../../otpDb';
 import { createHash } from 'crypto';
 
 function hashPasswordSync(password: string): string {
-  // Prefer bcrypt when available; fallback sha256 marker for pending only (Auth create uses plaintext path)
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const bcrypt = require('bcryptjs');
     return bcrypt.hashSync(password, 10);
   } catch {
     return `sha256:${createHash('sha256').update(password).digest('hex')}`;
+  }
+}
+
+async function getAllowSkipOtp(
+  client: NonNullable<ReturnType<typeof createServiceClient>>
+): Promise<{ allowCreateWithoutOtp: boolean; emailRegisterEnabled: boolean; emailShowOtpFallback: boolean }> {
+  try {
+    const { data } = await client
+      .from('system_configs')
+      .select('email_register_enabled, allow_create_without_otp, email_show_otp_fallback')
+      .limit(1)
+      .maybeSingle();
+    return {
+      emailRegisterEnabled: data?.email_register_enabled != null ? Boolean(data.email_register_enabled) : true,
+      allowCreateWithoutOtp: Boolean(data?.allow_create_without_otp),
+      emailShowOtpFallback: Boolean(data?.email_show_otp_fallback),
+    };
+  } catch {
+    return { emailRegisterEnabled: true, allowCreateWithoutOtp: false, emailShowOtpFallback: false };
   }
 }
 
@@ -44,6 +62,8 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       return sendJson(res, 503, { success: false, error: 'Supabase is not configured on this deployment.' });
     }
 
+    const policy = await getAllowSkipOtp(client);
+
     const { data: existing } = await client
       .from('profiles')
       .select('id, is_banned, banned_until, ban_reason')
@@ -68,12 +88,8 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       }
     }
 
-    const otpCode = generateSixDigitOtp();
-    await saveOtpDb(client, cleanEmail, otpCode, {
-      name: name || undefined,
-      role: sanitizePublicSignupRole(role),
-    });
-
+    // Store pending signup credentials only — Auth/profile are created after OTP verify
+    // (or immediately via register-bootstrap when skipOtp is true on the client).
     if (password && !existing) {
       await savePendingSignupDb(client, cleanEmail, hashPasswordSync(password), {
         name: name || undefined,
@@ -81,16 +97,38 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       });
     }
 
+    if (policy.allowCreateWithoutOtp || !policy.emailRegisterEnabled) {
+      return sendJson(res, 200, {
+        success: true,
+        delivered: false,
+        skipOtp: true,
+        message: policy.allowCreateWithoutOtp
+          ? 'OTP skipped — admin allows account creation without email verification.'
+          : 'Registration emails are disabled by admin. Completing signup without OTP.',
+        showOtpInForm: false,
+        smtpConfigured: isSmtpConfigured(),
+        confirmationUrl: confirmationUrl || undefined,
+      });
+    }
+
+    const otpCode = generateSixDigitOtp();
+    await saveOtpDb(client, cleanEmail, otpCode, {
+      name: name || undefined,
+      role: sanitizePublicSignupRole(role),
+    });
+
     const sendResult = await sendOtpEmailVercel({
       to: cleanEmail,
       name: name || 'User',
       otpCode,
     });
 
-    const showOtpInForm = process.env.OTP_DEBUG === 'true' || !sendResult.delivered;
+    const showOtpInForm =
+      process.env.OTP_DEBUG === 'true' || policy.emailShowOtpFallback || !sendResult.delivered;
     return sendJson(res, 200, {
       success: true,
       delivered: sendResult.delivered,
+      skipOtp: false,
       message: sendResult.message,
       showOtpInForm,
       otpCode: showOtpInForm ? otpCode : undefined,

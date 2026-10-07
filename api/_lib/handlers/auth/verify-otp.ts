@@ -7,7 +7,7 @@ import {
   findProfileByEmail,
   findAuthUserByEmail,
 } from '../../authHelpers';
-import { verifyOtpDb, takePendingSignupDb } from '../../otpDb';
+import { verifyOtpDb, peekPendingSignupDb, deletePendingSignupDb } from '../../otpDb';
 
 async function resolveAuthUserId(
   client: NonNullable<ReturnType<typeof createServiceClient>>,
@@ -27,6 +27,12 @@ async function resolveAuthUserId(
     page += 1;
     if (page > 50) return null;
   }
+}
+
+function genderFromRole(role: string): 'male' | 'female' | 'other' {
+  if (role === 'female_user' || role === 'female_creator' || role === 'female_host') return 'female';
+  if (role === 'other_user') return 'other';
+  return 'male';
 }
 
 export default async function handler(req: VercelReq, res: VercelRes) {
@@ -72,7 +78,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       });
     }
 
-    const pending = await takePendingSignupDb(client, cleanEmail);
+    const pending = await peekPendingSignupDb(client, cleanEmail);
     const hasPassword = typeof password === 'string' && password.length > 0;
     let resolvedAuthId: string | null =
       (typeof existing?.auth_id === 'string' && existing.auth_id) ||
@@ -84,17 +90,28 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       if (policyError) {
         return sendJson(res, 400, { success: false, error: policyError });
       }
+      const safeRole = sanitizePublicSignupRole(pending.role || verifyResult.metadata?.role);
+      const displayName =
+        pending.name || verifyResult.metadata?.name || cleanEmail.split('@')[0] || 'User';
+      const gender = genderFromRole(safeRole);
+      const userMetadata = {
+        full_name: displayName,
+        display_name: displayName,
+        name: displayName,
+        role: safeRole,
+        gender,
+        is_onboarded: false,
+      };
+
       const { data: created, error: createErr } = await client.auth.admin.createUser({
         email: cleanEmail,
         password,
         email_confirm: true,
-        user_metadata: {
-          name: pending.name || verifyResult.metadata?.name,
-          role: sanitizePublicSignupRole(pending.role || verifyResult.metadata?.role),
-        },
+        user_metadata: userMetadata,
       });
       if (!createErr && created?.user?.id) {
         resolvedAuthId = created.user.id;
+        await deletePendingSignupDb(client, cleanEmail);
       } else if (createErr && /already/i.test(createErr.message)) {
         const matchedId = await resolveAuthUserId(client, cleanEmail);
         if (matchedId) {
@@ -102,6 +119,13 @@ export default async function handler(req: VercelReq, res: VercelRes) {
           await client.auth.admin.updateUserById(matchedId, {
             password,
             email_confirm: true,
+            user_metadata: userMetadata,
+          });
+          await deletePendingSignupDb(client, cleanEmail);
+        } else {
+          return sendJson(res, 500, {
+            success: false,
+            error: 'Account activation failed. Please try registering again.',
           });
         }
       } else if (createErr) {
@@ -111,7 +135,9 @@ export default async function handler(req: VercelReq, res: VercelRes) {
           await client.auth.admin.updateUserById(matchedId, {
             password,
             email_confirm: true,
+            user_metadata: userMetadata,
           });
+          await deletePendingSignupDb(client, cleanEmail);
         } else {
           return sendJson(res, 500, {
             success: false,
@@ -125,10 +151,18 @@ export default async function handler(req: VercelReq, res: VercelRes) {
         resolvedAuthId = matchedId;
         await client.auth.admin.updateUserById(matchedId, { email_confirm: true });
       }
+      if (pending) await deletePendingSignupDb(client, cleanEmail);
     }
 
     if (!resolvedAuthId) {
       resolvedAuthId = await resolveAuthUserId(client, cleanEmail);
+    }
+
+    if (!resolvedAuthId && hasPassword) {
+      return sendJson(res, 500, {
+        success: false,
+        error: 'Email verified, but account creation failed. Please try again.',
+      });
     }
 
     return sendJson(res, 200, {

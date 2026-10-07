@@ -56,7 +56,9 @@ function userSafeAuthError(err: unknown, fallback: string): string {
 }
 
 /**
- * Step 1: Register user with Supabase Auth & Trigger Mandatory 6-Digit OTP Email
+ * Step 1: Start registration — store pending signup + send OTP.
+ * Does NOT create auth.users / profiles until OTP succeeds (or admin skip-OTP policy).
+ * Closing the dialog mid-flow leaves only expiring pending/OTP rows, not a real account.
  */
 export async function signUpWithEmailOtp(params: {
   name: string;
@@ -76,173 +78,30 @@ export async function signUpWithEmailOtp(params: {
   const safeRole = sanitizeClientSignupRole(role);
   const lockedGender = lockedGenderFromRole(safeRole);
 
-  // 1. Create Supabase Auth user with the submitted password BEFORE sending OTP
-  let createdUserId: string | null = null;
-  let capturedOtpCode: string | undefined;
-  let capturedShowOtpInForm: boolean | undefined;
-  let skipOtp = false;
-  let clientSignUpFailedForBootstrap = false;
-
+  // Block if a real profile already exists for this email
   if (isSupabaseConfigured()) {
     try {
-      // Existing profile for this email → user must log in / reset password (do not soft-continue)
       const { data: existingByEmail } = await supabase
         .from('profiles')
-        .select('id, is_onboarded')
+        .select('id')
         .ilike('email', cleanEmail)
         .maybeSingle();
-      const existingRow = existingByEmail as { id: string; is_onboarded?: boolean } | null;
-      if (existingRow?.id) {
+      if ((existingByEmail as { id?: string } | null)?.id) {
         return {
           success: false,
           error: 'An account with this email is already registered. Please log in or use Forgot Password.',
         };
       }
-
-      const { data, error } = await supabase.auth.signUp({
-        email: cleanEmail,
-        password,
-        options: {
-          data: {
-            full_name: name,
-            display_name: name,
-            name,
-            role: safeRole,
-            gender: lockedGender,
-            is_onboarded: false,
-          },
-        },
-      });
-
-      // Supabase AuthResponse narrows data.user to `never` inside some error branches;
-      // keep a stable typed snapshot for recoverable signup paths.
-      const signupUser = (data?.user ?? null) as {
-        id?: string;
-        identities?: unknown[] | null;
-        email?: string | null;
-      } | null;
-
-      if ((import.meta as any)?.env?.DEV) {
-        console.debug('[signUpWithEmailOtp] signUp result', {
-          error: error?.message,
-          status: (error as any)?.status,
-          userId: signupUser?.id,
-          identitiesLen: Array.isArray(signupUser?.identities) ? signupUser!.identities!.length : null,
-        });
-      }
-
-      if (error) {
-        const lower = (error.message || '').toLowerCase();
-        const isAlreadyRegistered =
-          lower.includes('already registered') || lower.includes('already been registered');
-
-        const isRateLimit =
-          lower.includes('rate limit') ||
-          lower.includes('over_email_send_rate_limit') ||
-          lower.includes('too many requests') ||
-          (error as any).status === 429;
-
-        const isDbTriggerError =
-          lower.includes('database error saving new user') ||
-          lower.includes('database error') ||
-          lower.includes('unexpected_failure');
-
-        // "Already registered" may be an orphan Auth user (profile deleted). Let
-        // register-bootstrap reclaim it when no profile exists; only fail if bootstrap says so.
-        if (isAlreadyRegistered || isRateLimit || isDbTriggerError) {
-          if (signupUser?.id && isValidUuid(signupUser.id)) {
-            const identities = signupUser.identities;
-            if (!(Array.isArray(identities) && identities.length === 0)) {
-              createdUserId = signupUser.id;
-            }
-          }
-          if (!createdUserId) {
-            clientSignUpFailedForBootstrap = true;
-            console.warn('[signUpWithEmailOtp] Client signUp recoverable failure:', error.message);
-          }
-        } else {
-          return {
-            success: false,
-            error: userSafeAuthError(error.message, 'Sign up failed. Please try again.'),
-          };
-        }
-      }
-
-      if (!clientSignUpFailedForBootstrap && signupUser?.id && isValidUuid(signupUser.id)) {
-        // Supabase may return a user object without identities when the email is already
-        // registered (anti-enumeration). That path does NOT set the submitted password —
-        // reclaim via register-bootstrap (orphan Auth) or fail if a profile still exists.
-        const identities = signupUser.identities;
-        if (Array.isArray(identities) && identities.length === 0) {
-          clientSignUpFailedForBootstrap = true;
-          console.warn(
-            '[signUpWithEmailOtp] signUp returned empty identities; trying register-bootstrap'
-          );
-        } else {
-          createdUserId = signupUser.id;
-        }
-      } else if (!clientSignUpFailedForBootstrap && !signupUser) {
-        // Empty user without error — treat as already-registered / orphan Auth
-        clientSignUpFailedForBootstrap = true;
-        console.warn('[signUpWithEmailOtp] signUp returned no user; trying register-bootstrap');
-      }
-    } catch (err: any) {
-      console.warn('[signUpWithEmailOtp] exception:', err);
-      clientSignUpFailedForBootstrap = true;
-    }
-
-    // Resilient path: service-role bootstrap for orphan Auth / trigger / empty-user cases
-    if (!createdUserId && (clientSignUpFailedForBootstrap || !createdUserId)) {
-      try {
-        const bootRes = await apiFetch('/api/auth/register-bootstrap', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: cleanEmail,
-            password,
-            name,
-            role: safeRole,
-          }),
-        });
-        const bootData = await bootRes.json().catch(() => ({}));
-        const bootId = bootData?.authId || bootData?.userId;
-        if (bootRes.ok && bootData?.success && bootId && isValidUuid(bootId)) {
-          createdUserId = bootId;
-          if (bootData.skipOtp) skipOtp = true;
-        } else if (bootData?.code === 'ALREADY_REGISTERED' || /already registered/i.test(String(bootData?.error || ''))) {
-          return {
-            success: false,
-            error: 'An account with this email is already registered. Please log in or use Forgot Password.',
-          };
-        } else if (!createdUserId) {
-          return {
-            success: false,
-            error: userSafeAuthError(
-              bootData?.error,
-              'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.'
-            ),
-          };
-        }
-      } catch (bootErr) {
-        console.warn('[signUpWithEmailOtp] register-bootstrap failed:', bootErr);
-        return {
-          success: false,
-          error:
-            'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.',
-        };
-      }
-    }
-
-    if (!createdUserId) {
-      return {
-        success: false,
-        error:
-          'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.',
-      };
+    } catch (err) {
+      console.warn('[signUpWithEmailOtp] profile existence check notice:', err);
     }
   }
 
-  // 2. Dispatch custom 6-digit OTP (also stores pending password for post-verify Auth confirm)
+  // Pending signup + OTP only (server stores auth_pending_signups; no Auth/profile yet)
+  let capturedOtpCode: string | undefined;
+  let capturedShowOtpInForm: boolean | undefined;
+  let skipOtp = false;
+
   try {
     const sRes = await apiFetch('/api/auth/send-otp', {
       method: 'POST',
@@ -265,78 +124,107 @@ export async function signUpWithEmailOtp(params: {
     capturedShowOtpInForm = sData.showOtpInForm;
     if (sData.skipOtp) skipOtp = true;
   } catch (err) {
-    console.warn('Server OTP dispatch error:', err);
+    console.warn('[signUpWithEmailOtp] send-otp error:', err);
     return { success: false, error: 'Could not send verification email. Please try again.' };
   }
 
-  if (!createdUserId && !isSupabaseConfigured()) {
-    return {
-      success: true,
-      message: `A 6-digit verification code has been dispatched to ${cleanEmail}. Please check your email inbox.`,
-      needsOnboarding: true,
-      otpCode: capturedOtpCode,
-      showOtpInForm: capturedShowOtpInForm,
-    };
+  // Admin policy: create Auth + profile only when OTP is explicitly skipped
+  if (skipOtp) {
+    try {
+      const bootRes = await apiFetch('/api/auth/register-bootstrap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password,
+          name,
+          role: safeRole,
+        }),
+      });
+      const bootData = await bootRes.json().catch(() => ({}));
+      const bootId = bootData?.authId || bootData?.userId;
+
+      if (bootData?.code === 'ALREADY_REGISTERED' || /already registered/i.test(String(bootData?.error || ''))) {
+        return {
+          success: false,
+          error: 'An account with this email is already registered. Please log in or use Forgot Password.',
+        };
+      }
+
+      if (!bootRes.ok || !bootData?.success || !bootId || !isValidUuid(bootId)) {
+        return {
+          success: false,
+          error: userSafeAuthError(
+            bootData?.error,
+            'Could not create an authenticated account. Please try again.'
+          ),
+        };
+      }
+
+      const isFemaleRole = lockedGender === 'female';
+      const createdProfile: UserProfile = {
+        id: bootId,
+        authId: bootId,
+        name,
+        email: cleanEmail,
+        gender: lockedGender,
+        genderLocked: true,
+        role: safeRole,
+        age: 24,
+        dob: '2000-01-01',
+        nationality: 'United States',
+        countryCode: 'US',
+        spokenLanguages: ['English'],
+        bio: '',
+        interests: [],
+        avatarUrl: isFemaleRole
+          ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'
+          : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
+        gallery: [],
+        isVerified: false,
+        isOnboarded: false,
+        onlineStatus: 'online',
+        createdAt: new Date().toISOString().split('T')[0],
+        coinBalance: isFemaleRole ? 0 : 50,
+        hourlyCoinRate: safeRole === 'female_creator' ? 10 : 0,
+        earningsCoins: 0,
+        totalLifetimeEarnedUSD: 0,
+        emailVerified: true,
+        agencyName: undefined,
+        commissionPercent: undefined,
+      };
+
+      try {
+        await upsertProfileToSupabase(createdProfile);
+      } catch (err) {
+        console.warn('[signUpWithEmailOtp] skip-OTP profile upsert notice:', err);
+      }
+
+      return {
+        success: true,
+        skipOtp: true,
+        needsOnboarding: true,
+        user: createdProfile,
+        message:
+          bootData.message ||
+          'Account created without email OTP (admin policy). You can sign in now.',
+      };
+    } catch (bootErr) {
+      console.warn('[signUpWithEmailOtp] skip-OTP bootstrap failed:', bootErr);
+      return {
+        success: false,
+        error: 'Could not create an authenticated account. Please try again.',
+      };
+    }
   }
 
-  if (!createdUserId) {
-    return {
-      success: false,
-      error:
-        'Could not create an authenticated account. Please try again or use Forgot Password if you already registered.',
-    };
-  }
-
-  // 3. Persist a minimal pending profile — force sanitized public role/gender (overwrite stale TL)
-  const isFemaleRole = lockedGender === 'female';
-  const initialProfile: UserProfile = {
-    id: createdUserId,
-    authId: createdUserId,
-    name,
-    email: cleanEmail,
-    gender: lockedGender,
-    genderLocked: true,
-    role: safeRole,
-    age: 24,
-    dob: '2000-01-01',
-    nationality: 'United States',
-    countryCode: 'US',
-    spokenLanguages: ['English'],
-    bio: '',
-    interests: [],
-    avatarUrl: isFemaleRole
-      ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'
-      : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
-    gallery: [],
-    isVerified: false,
-    isOnboarded: false,
-    onlineStatus: 'online',
-    createdAt: new Date().toISOString().split('T')[0],
-    coinBalance: isFemaleRole ? 0 : 50,
-    hourlyCoinRate: safeRole === 'female_creator' ? 10 : 0,
-    earningsCoins: 0,
-    totalLifetimeEarnedUSD: 0,
-    emailVerified: skipOtp,
-    agencyName: undefined,
-    commissionPercent: undefined,
-  };
-
-  try {
-    await upsertProfileToSupabase(initialProfile);
-  } catch (err) {
-    console.warn('Initial profile Supabase upsert error:', err);
-  }
-
+  // Normal path: OTP sent; Auth/profile are created only after verifyEmailOtp succeeds
   return {
     success: true,
-    message: skipOtp
-      ? 'Account created without email OTP (admin policy). You can sign in now.'
-      : `A 6-digit verification code has been dispatched to ${cleanEmail}. Please check your email inbox.`,
     needsOnboarding: true,
-    user: initialProfile,
     otpCode: capturedOtpCode,
     showOtpInForm: capturedShowOtpInForm,
-    skipOtp,
+    message: `A 6-digit verification code has been dispatched to ${cleanEmail}. Please check your email inbox.`,
   };
 }
 
@@ -380,8 +268,12 @@ export async function verifyEmailOtp(
   const cleanEmail = email.trim().toLowerCase();
   const cleanToken = token.trim();
 
-  // Try real Supabase OTP verification
-  if (isSupabaseConfigured()) {
+  // Custom registration OTP: verify on server first so Auth/profile are created only after OTP succeeds.
+  // (supabase.auth.signUp is no longer called during registration start.)
+  const preferServerVerify = Boolean(password) || type === 'signup';
+
+  const trySupabaseNativeVerify = async (): Promise<SupabaseAuthResult | null> => {
+    if (!isSupabaseConfigured()) return null;
     try {
       const { data, error } = await supabase.auth.verifyOtp({
         email: cleanEmail,
@@ -392,7 +284,6 @@ export async function verifyEmailOtp(
       if (!error && data.user) {
         const userId = data.user.id;
 
-        // Fetch profile by auth id OR email (never create a second male for the same inbox)
         let dbProfile: any = null;
         const { data: byId } = await supabase
           .from('profiles')
@@ -422,7 +313,6 @@ export async function verifyEmailOtp(
         let profile: UserProfile;
         if (dbProfile) {
           profile = mapDbProfileToUserProfile(dbProfile);
-          // Public signup verify: force sanitized role/gender (overwrite stale team_leader)
           const forcedRole = role ? sanitizeClientSignupRole(role) : null;
           profile = {
             ...profile,
@@ -450,7 +340,6 @@ export async function verifyEmailOtp(
             });
           }
         } else {
-          // Initialize pending onboarding profile — never trust privileged metadata from client
           const metaRole = sanitizeClientSignupRole(
             (role as UserRole) || (data.user.user_metadata?.role as UserRole) || 'male_user'
           );
@@ -503,9 +392,15 @@ export async function verifyEmailOtp(
     } catch (err: any) {
       console.warn('Supabase verifyOtp exception:', err);
     }
+    return null;
+  };
+
+  if (!preferServerVerify) {
+    const native = await trySupabaseNativeVerify();
+    if (native) return native;
   }
 
-  // Server-side OTP verification fallback (custom email OTP when Supabase verifyOtp fails)
+  // Server-side OTP verification (creates Auth user from pending signup after OTP succeeds)
   try {
     const serverVerifyRes = await apiFetch('/api/auth/verify-otp', {
       method: 'POST',
@@ -658,6 +553,12 @@ export async function verifyEmailOtp(
     console.warn('Server verify check error:', e);
   }
 
+  // Non-signup recovery paths may still use native Supabase OTP
+  if (preferServerVerify) {
+    const native = await trySupabaseNativeVerify();
+    if (native) return native;
+  }
+
   return {
     success: false,
     error: 'Invalid or expired 6-digit verification code. Please check your email inbox.',
@@ -666,8 +567,12 @@ export async function verifyEmailOtp(
 
 /**
  * Resend OTP Code
+ * Pass password/name/role during registration so pending signup is refreshed if it expired.
  */
-export async function resendEmailOtp(email: string): Promise<{ success: boolean; message: string; error?: string; otpCode?: string; showOtpInForm?: boolean }> {
+export async function resendEmailOtp(
+  email: string,
+  opts?: { password?: string; name?: string; role?: UserRole }
+): Promise<{ success: boolean; message: string; error?: string; otpCode?: string; showOtpInForm?: boolean }> {
   const cleanEmail = email.trim().toLowerCase();
   let serverOtpCode: string | undefined;
   let serverShowOtpInForm: boolean | undefined;
@@ -677,7 +582,12 @@ export async function resendEmailOtp(email: string): Promise<{ success: boolean;
     const sRes = await apiFetch('/api/auth/send-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: cleanEmail }),
+      body: JSON.stringify({
+        email: cleanEmail,
+        ...(opts?.password ? { password: opts.password } : {}),
+        ...(opts?.name ? { name: opts.name } : {}),
+        ...(opts?.role ? { role: sanitizeClientSignupRole(opts.role) } : {}),
+      }),
     });
     if (sRes.ok) {
       const data = await sRes.json();

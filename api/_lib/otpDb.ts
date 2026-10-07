@@ -101,7 +101,7 @@ export async function savePendingSignupDb(
   if (error) throw new Error(error.message);
 }
 
-export async function takePendingSignupDb(
+export async function peekPendingSignupDb(
   client: SupabaseClient,
   email: string
 ): Promise<{ password_hash: string; name?: string; role?: string } | null> {
@@ -112,11 +112,28 @@ export async function takePendingSignupDb(
     .eq('email', cleanEmail)
     .maybeSingle();
   if (!data) return null;
-  await client.from('auth_pending_signups').delete().eq('email', cleanEmail);
-  if (Date.now() > new Date(data.expires_at).getTime()) return null;
+  if (Date.now() > new Date(data.expires_at).getTime()) {
+    await client.from('auth_pending_signups').delete().eq('email', cleanEmail);
+    return null;
+  }
   return {
     password_hash: data.password_hash,
     name: data.name || undefined,
     role: data.role || undefined,
   };
+}
+
+export async function deletePendingSignupDb(client: SupabaseClient, email: string): Promise<void> {
+  const cleanEmail = email.trim().toLowerCase();
+  await client.from('auth_pending_signups').delete().eq('email', cleanEmail);
+}
+
+/** Peek + delete (legacy). Prefer peek then delete after Auth create succeeds. */
+export async function takePendingSignupDb(
+  client: SupabaseClient,
+  email: string
+): Promise<{ password_hash: string; name?: string; role?: string } | null> {
+  const pending = await peekPendingSignupDb(client, email);
+  if (pending) await deletePendingSignupDb(client, email);
+  return pending;
 }

@@ -328,7 +328,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const res = await resendEmailOtp(email);
+      const res = await resendEmailOtp(email, {
+        password: password || undefined,
+        name: name.trim() || undefined,
+        role: selectedRole,
+      });
       if (res.success) {
         if (res.otpCode) {
           setReceivedOtpCode(res.otpCode);

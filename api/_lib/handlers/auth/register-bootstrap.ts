@@ -56,6 +56,33 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       return sendJson(res, 503, { success: false, error: 'Supabase not configured' });
     }
 
+    let allowCreateWithoutOtp = false;
+    let emailRegisterEnabled = true;
+    try {
+      const { data: cfg } = await client
+        .from('system_configs')
+        .select('allow_create_without_otp, email_register_enabled')
+        .limit(1)
+        .maybeSingle();
+      allowCreateWithoutOtp = Boolean(cfg?.allow_create_without_otp);
+      if (cfg?.email_register_enabled != null) {
+        emailRegisterEnabled = Boolean(cfg.email_register_enabled);
+      }
+    } catch (e: any) {
+      console.warn('[register-bootstrap] email policy notice:', e?.message || e);
+    }
+    const skipOtp = allowCreateWithoutOtp || !emailRegisterEnabled;
+
+    // Deferred registration: Auth/profile are created after OTP verify.
+    // Bootstrap is only allowed when admin policy skips OTP.
+    if (!skipOtp) {
+      return sendJson(res, 400, {
+        success: false,
+        code: 'OTP_REQUIRED',
+        error: 'Complete email OTP verification to create your account.',
+      });
+    }
+
     const gender =
       role === 'female_user' || role === 'female_creator' || role === 'female_host'
         ? 'female'
@@ -91,7 +118,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       // Orphan Auth (profile deleted) — reclaim with the new password
       const { error: updErr } = await client.auth.admin.updateUserById(authUserId, {
         password,
-        email_confirm: false,
+        email_confirm: true,
         user_metadata: userMetadata,
       });
       if (updErr) {
@@ -104,7 +131,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       const { data: created, error } = await client.auth.admin.createUser({
         email,
         password,
-        email_confirm: false,
+        email_confirm: true,
         user_metadata: userMetadata,
       });
       if (error) {
@@ -114,7 +141,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
           if (authUserId) {
             const { error: updErr } = await client.auth.admin.updateUserById(authUserId, {
               password,
-              email_confirm: false,
+              email_confirm: true,
               user_metadata: userMetadata,
             });
             if (updErr) {
@@ -153,7 +180,9 @@ export default async function handler(req: VercelReq, res: VercelRes) {
       email,
       role,
       gender,
-      message: 'Auth account ready for OTP verification.',
+      skipOtp: true,
+      emailConfirmed: true,
+      message: 'Account created without email OTP (admin policy).',
     });
   } catch (err: any) {
     console.error('[api/auth/register-bootstrap]', err);

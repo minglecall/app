@@ -17,7 +17,8 @@ const {
   saveOtpDb,
   verifyOtpDb,
   savePendingSignupDb,
-  takePendingSignupDb,
+  peekPendingSignupDb,
+  deletePendingSignupDb,
   generateSixDigitOtp,
   isSmtpConfigured,
   sendOtpEmailVercel,
@@ -201,7 +202,8 @@ async function verifyOtp(req, res) {
       });
     }
 
-    const pending = await takePendingSignupDb(client, cleanEmail);
+    // Peek only — delete pending after Auth create succeeds (avoids losing signup on create failure)
+    const pending = await peekPendingSignupDb(client, cleanEmail);
     const hasPassword = typeof password === 'string' && password.length > 0;
     let resolvedAuthId =
       (existing && existing.auth_id) || (existing && existing.id) || null;
@@ -229,19 +231,37 @@ async function verifyOtp(req, res) {
     if (hasPassword && pending) {
       const policyError = getPasswordPolicyError(password);
       if (policyError) return send(res, 400, { success: false, error: policyError });
+      const safeRole = sanitizePublicSignupRole(
+        pending.role || (verifyResult.metadata && verifyResult.metadata.role)
+      );
+      const displayName =
+        pending.name ||
+        (verifyResult.metadata && verifyResult.metadata.name) ||
+        cleanEmail.split('@')[0] ||
+        'User';
+      const gender =
+        safeRole === 'female_user' || safeRole === 'female_creator' || safeRole === 'female_host'
+          ? 'female'
+          : safeRole === 'other_user'
+            ? 'other'
+            : 'male';
+      const userMetadata = {
+        full_name: displayName,
+        display_name: displayName,
+        name: displayName,
+        role: safeRole,
+        gender,
+        is_onboarded: false,
+      };
       const { data: created, error: createErr } = await client.auth.admin.createUser({
         email: cleanEmail,
         password,
         email_confirm: true,
-        user_metadata: {
-          name: pending.name || (verifyResult.metadata && verifyResult.metadata.name),
-          role: sanitizePublicSignupRole(
-            pending.role || (verifyResult.metadata && verifyResult.metadata.role)
-          ),
-        },
+        user_metadata: userMetadata,
       });
       if (!createErr && created && created.user && created.user.id) {
         resolvedAuthId = created.user.id;
+        await deletePendingSignupDb(client, cleanEmail);
       } else if (createErr) {
         const matchedId = await lookupAuthId();
         if (matchedId) {
@@ -249,11 +269,18 @@ async function verifyOtp(req, res) {
           await client.auth.admin.updateUserById(matchedId, {
             password,
             email_confirm: true,
+            user_metadata: userMetadata,
           });
+          await deletePendingSignupDb(client, cleanEmail);
         } else if (!/already/i.test(createErr.message)) {
           return send(res, 500, {
             success: false,
             error: createErr.message || 'Account activation failed',
+          });
+        } else {
+          return send(res, 500, {
+            success: false,
+            error: 'Account activation failed. Please try registering again.',
           });
         }
       }
@@ -263,10 +290,19 @@ async function verifyOtp(req, res) {
         resolvedAuthId = matchedId;
         await client.auth.admin.updateUserById(matchedId, { email_confirm: true });
       }
+      if (pending) await deletePendingSignupDb(client, cleanEmail);
     }
 
     if (!resolvedAuthId) {
       resolvedAuthId = await lookupAuthId();
+    }
+
+    // Signup OTP without Auth create is a hard failure — do not claim success
+    if (!resolvedAuthId && hasPassword) {
+      return send(res, 500, {
+        success: false,
+        error: 'Email verified, but account creation failed. Please try again.',
+      });
     }
 
     return send(res, 200, {
@@ -313,6 +349,16 @@ async function registerBootstrap(req, res) {
 
     const policy = await getEmailPolicy(client);
     const skipOtp = Boolean(policy.allowCreateWithoutOtp || !policy.emailRegisterEnabled);
+
+    // Deferred registration: Auth/profile are created after OTP verify.
+    // Bootstrap is only allowed when admin policy skips OTP.
+    if (!skipOtp) {
+      return send(res, 400, {
+        success: false,
+        code: 'OTP_REQUIRED',
+        error: 'Complete email OTP verification to create your account.',
+      });
+    }
 
     const gender =
       role === 'female_user' || role === 'female_creator' || role === 'female_host'

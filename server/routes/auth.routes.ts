@@ -145,6 +145,31 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         return res.status(503).json({ success: false, error: 'Authentication service is not configured.' });
       }
 
+      // Deferred registration: Auth/profile are created after OTP verify.
+      // Bootstrap is only allowed when admin policy skips OTP.
+      let allowCreateWithoutOtp = false;
+      let emailRegisterEnabled = true;
+      try {
+        const { data: cfg } = await client
+          .from('system_configs')
+          .select('allow_create_without_otp, email_register_enabled')
+          .limit(1)
+          .maybeSingle();
+        allowCreateWithoutOtp = Boolean(cfg?.allow_create_without_otp);
+        if (cfg?.email_register_enabled != null) {
+          emailRegisterEnabled = Boolean(cfg.email_register_enabled);
+        }
+      } catch (e: any) {
+        console.warn('[register-bootstrap] email policy notice:', e?.message || e);
+      }
+      if (!allowCreateWithoutOtp && emailRegisterEnabled) {
+        return res.status(400).json({
+          success: false,
+          code: 'OTP_REQUIRED',
+          error: 'Complete email OTP verification to create your account.',
+        });
+      }
+
       // Existing profile with this email → must log in (do not hijack TL/admin accounts)
       const { data: existingProfile } = await client
         .from('profiles')
@@ -293,6 +318,8 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
   });
 
   // POST Dispatch 6-digit OTP code & confirmation link via email
+  // Signup: stores pending credentials only — Auth/profile are created after OTP verify
+  // (or via register-bootstrap when admin skip-OTP policy applies).
   router.post('/send-otp', authOtpSendLimiter, async (req, res) => {
     try {
       cleanupStalePendingSignups();
@@ -322,6 +349,52 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         }
       }
 
+      // Signup only: store pending hash for NEW emails. Never apply password to existing
+      // accounts here — that would allow unauthenticated resets. Use /reset-password after OTP.
+      if (password && !existing) {
+        const hashedPassword = await hashPassword(password);
+        pendingSignupByEmail.set(cleanEmail, {
+          passwordHash: hashedPassword,
+          name: name || undefined,
+          role: sanitizePublicSignupRole(role),
+          updatedAt: Date.now(),
+        });
+      }
+
+      // Admin policy: skip OTP email (client will call register-bootstrap to create Auth)
+      let allowCreateWithoutOtp = false;
+      let emailRegisterEnabled = true;
+      if (isSupabaseAdminConfigured()) {
+        try {
+          const admin = getSupabaseAdmin();
+          if (admin) {
+            const { data: cfg } = await admin
+              .from('system_configs')
+              .select('allow_create_without_otp, email_register_enabled')
+              .limit(1)
+              .maybeSingle();
+            allowCreateWithoutOtp = Boolean(cfg?.allow_create_without_otp);
+            if (cfg?.email_register_enabled != null) {
+              emailRegisterEnabled = Boolean(cfg.email_register_enabled);
+            }
+          }
+        } catch (e: any) {
+          console.warn('[send-otp] email policy notice:', e?.message || e);
+        }
+      }
+
+      if (allowCreateWithoutOtp || !emailRegisterEnabled) {
+        return res.json({
+          success: true,
+          delivered: false,
+          skipOtp: true,
+          message: allowCreateWithoutOtp
+            ? 'OTP skipped — admin allows account creation without email verification.'
+            : 'Registration emails are disabled by admin. Completing signup without OTP.',
+          showOtpInForm: false,
+        });
+      }
+
       const otpCode = generateSixDigitOtp();
       const showOtpInForm = process.env.OTP_DEBUG === 'true' && getShowOtpInForm();
       const sendResult = await sendOtpEmail({
@@ -331,25 +404,10 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         confirmationUrl,
       });
 
-      // Signup only: store pending hash for NEW emails. Never apply password to existing
-      // accounts here — that would allow unauthenticated resets. Use /reset-password after OTP.
-      if (password) {
-        if (!existing) {
-          const hashedPassword = await hashPassword(password);
-          pendingSignupByEmail.set(cleanEmail, {
-            passwordHash: hashedPassword,
-            name: name || undefined,
-            role: sanitizePublicSignupRole(role),
-            updatedAt: Date.now(),
-          });
-          // Password is applied to Auth/profile after verify + real auth user id exists
-          // (client also creates the Auth user via supabase.auth.signUp with the same password).
-        }
-      }
-
       return res.json({
         success: true,
         delivered: sendResult.delivered,
+        skipOtp: false,
         message: sendResult.message,
         showOtpInForm: showOtpInForm || !sendResult.delivered,
         otpCode: showOtpInForm || !sendResult.delivered ? otpCode : undefined,
@@ -396,6 +454,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
 
       const pending = pendingSignupByEmail.get(cleanEmail);
       const hasPassword = typeof password === 'string' && password.length > 0;
+      const wasPendingSignup = Boolean(pending && hasPassword);
       let resolvedAuthId: string | undefined =
         (existing?.authId && AUTH_UUID_RE.test(existing.authId) && existing.authId) ||
         (existing?.id && AUTH_UUID_RE.test(existing.id) && existing.id) ||
@@ -403,12 +462,14 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
 
       // Only apply password when this OTP belongs to an in-progress signup.
       // Password resets must use /reset-password (prevents OTP hijack of existing accounts).
+      // Creates Auth user here if it does not exist yet (deferred from registration start).
       if (hasPassword && pending) {
         const policyError = getPasswordPolicyError(password);
         if (policyError) {
           return res.status(400).json({ success: false, error: policyError });
         }
 
+        const safeRole = sanitizePublicSignupRole(pending.role || verifyResult.metadata?.role);
         if (isSupabaseAdminConfigured()) {
           const adminRes = await updateUserPasswordAdmin(
             existing?.id || '',
@@ -416,7 +477,8 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
             cleanEmail,
             {
               name: pending.name || verifyResult.metadata?.name,
-              role: sanitizePublicSignupRole(pending.role || verifyResult.metadata?.role),
+              role: safeRole,
+              gender: genderFromPublicRole(safeRole),
             }
           );
           if (!adminRes.success) {
@@ -464,6 +526,13 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
             console.warn('[verify-otp] auth id lookup notice:', e?.message || e);
           }
         }
+      }
+
+      if (!resolvedAuthId && wasPendingSignup) {
+        return res.status(500).json({
+          success: false,
+          error: 'Email verified, but account creation failed. Please try again.',
+        });
       }
 
       clearAuthBackoff('otp_verify', req);
