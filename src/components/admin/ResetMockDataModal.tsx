@@ -413,6 +413,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
       if (res.success) {
         setTimeout(() => {
           setIsProcessing(false);
+          onClose();
         }, 600);
       } else {
         setIsProcessing(false);
@@ -496,6 +497,7 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
         categories: res.categoriesCleared,
       });
       setIsProcessing(false);
+      if (res.success) onClose();
     } catch (err: any) {
       setIsProcessing(false);
       setResetFeedback({

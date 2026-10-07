@@ -28,6 +28,8 @@ import { ServerSetupWizard } from './components/setup/ServerSetupWizard';
 import { UserProfile } from './types';
 import { CheckCircle2, AlertTriangle, Info, AlertCircle, X } from 'lucide-react';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { isSetupLocation } from './navigation/appRoutes';
+import { useAppNavigation } from './navigation/useAppNavigation';
 
 
 
@@ -49,7 +51,7 @@ const MainApp: React.FC = () => {
     closeBlockReportModal,
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<string>('home');
+  const { activeTab, setActiveTab, replaceTab, exitApp } = useAppNavigation();
   const [currentUtcTime, setCurrentUtcTime] = useState<string>(() =>
     new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
   );
@@ -61,65 +63,33 @@ const MainApp: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
-  // URL route detection for /server-setup or #server-setup
-  const [isSetupRoute, setIsSetupRoute] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      return (
-        window.location.pathname.includes('server-setup') ||
-        window.location.hash.includes('server-setup') ||
-        window.location.pathname.includes('installer') ||
-        window.location.hash.includes('setup')
-      );
-    }
-    return false;
-  });
+  // Keep setup flag in sync with URL (pathname / legacy hash) without pushing history.
+  const [isSetupRoute, setIsSetupRoute] = useState<boolean>(() => isSetupLocation());
 
   useEffect(() => {
-    const handleHashChange = () => {
-      if (
-        window.location.pathname.includes('server-setup') ||
-        window.location.hash.includes('server-setup') ||
-        window.location.pathname.includes('installer') ||
-        window.location.hash.includes('setup')
-      ) {
-        setIsSetupRoute(true);
-      }
+    const syncSetupRoute = () => {
+      setIsSetupRoute(isSetupLocation() || activeTab === 'server_setup');
     };
-    window.addEventListener('hashchange', handleHashChange);
-    window.addEventListener('popstate', handleHashChange);
+    syncSetupRoute();
+    window.addEventListener('hashchange', syncSetupRoute);
+    window.addEventListener('popstate', syncSetupRoute);
     return () => {
-      window.removeEventListener('hashchange', handleHashChange);
-      window.removeEventListener('popstate', handleHashChange);
+      window.removeEventListener('hashchange', syncSetupRoute);
+      window.removeEventListener('popstate', syncSetupRoute);
     };
-  }, []);
+  }, [activeTab]);
 
   // Automatically kick out from admin/team_leader tab if permissions do not match
+  // Use replaceTab so auth redirects do not pollute / loop history.
   useEffect(() => {
     if (activeTab === 'admin' && (!isLoggedIn || currentUser.role !== 'admin')) {
-      setActiveTab('home');
+      replaceTab('home');
     }
     if (activeTab === 'team_leader' && (!isLoggedIn || (currentUser.role !== 'team_leader' && currentUser.role !== 'admin'))) {
-      setActiveTab('home');
+      replaceTab('home');
     }
-  }, [activeTab, isLoggedIn, currentUser.role]);
+  }, [activeTab, isLoggedIn, currentUser.role, replaceTab]);
 
-  // Dedicated full-screen Server Setup Wizard when accessing /server-setup
-  if (isSetupRoute || activeTab === 'server_setup') {
-    return (
-      <ServerSetupWizard
-        onExit={() => {
-          setIsSetupRoute(false);
-          window.location.hash = '';
-          setActiveTab('home');
-        }}
-        onComplete={() => {
-          setIsSetupRoute(false);
-          window.location.hash = '';
-          setActiveTab('home');
-        }}
-      />
-    );
-  }
   const [isStoreOpen, setIsStoreOpen] = useState(false);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'register'>('login');
@@ -149,6 +119,28 @@ const MainApp: React.FC = () => {
     setIsAuthOpen(false);
     setSelectedDeckUser(null);
   };
+
+  // Dedicated full-screen Server Setup Wizard when accessing /server-setup
+  if (isSetupRoute || activeTab === 'server_setup') {
+    return (
+      <ServerSetupWizard
+        onExit={() => {
+          setIsSetupRoute(false);
+          if (window.location.hash) {
+            window.location.hash = '';
+          }
+          replaceTab('home');
+        }}
+        onComplete={() => {
+          setIsSetupRoute(false);
+          if (window.location.hash) {
+            window.location.hash = '';
+          }
+          replaceTab('home');
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-app text-app flex flex-col font-sans selection-brand">
@@ -326,6 +318,7 @@ const MainApp: React.FC = () => {
         <GlobalBottomNav
           activeTab={activeTab}
           setActiveTab={setActiveTab}
+          onExitApp={exitApp}
           onOpenMatch={() => setIsMatchOpen(true)}
           onOpenChat={(id) => handleOpenChat(id)}
           isChatOpen={isChatOpen || chatUserId !== null}

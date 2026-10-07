@@ -2120,9 +2120,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             console.warn('URL auto-verify error:', e);
           })
           .finally(() => {
-            // Clean URL query parameters
+            // Clean URL query parameters while preserving SPA navigation history state
             const cleanUrl = window.location.origin + window.location.pathname;
-            window.history.replaceState({}, document.title, cleanUrl);
+            window.history.replaceState(window.history.state ?? {}, document.title, cleanUrl);
           });
       }
     } catch (e) {
@@ -5567,11 +5567,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const authDeleted = data?.data?.authDeleted !== false;
       if (!authDeleted) {
         showToast(
-          'Delete Incomplete',
+          'User Deleted (Auth warning)',
           `Profile removed for ${target?.name || userId}, but Auth login may still work. Retry delete or run orphan Auth cleanup.`,
-          'error'
+          'warning'
         );
-        return false;
+        // Profile is gone — still treat as success so delete modal can close
+        return true;
       }
       showToast(
         'User Deleted',

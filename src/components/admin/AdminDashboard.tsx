@@ -3683,7 +3683,7 @@ export const AdminDashboard: React.FC = () => {
                     setIsDeletingUserProcessing(true);
                     try {
                       const ok = await adminDeleteUser(deletingUser.id);
-                      if (ok !== false) setDeletingUser(null);
+                      if (ok) setDeletingUser(null);
                     } finally {
                       setIsDeletingUserProcessing(false);
                     }

@@ -376,14 +376,9 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
 
     if (!created) return;
 
-    setHydratedCreators((prev) => {
-      const without = prev.filter((c) => c.id !== created.id);
-      return [created, ...without];
-    });
-    setHydratedCreatorIds((prev) => new Set([...prev, created.id]));
-    await hydrateManagedCreators();
-
+    // Close create popup immediately on success (don't wait on list hydrate)
     setIsAddCreatorOpen(false);
+    setIsCreatorAvatarModalOpen(false);
     setNewCreatorForm({
       name: '',
       email: '',
@@ -397,6 +392,13 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
       tags: 'VIP Creator, HD Video, Conversationalist',
       avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
     });
+
+    setHydratedCreators((prev) => {
+      const without = prev.filter((c) => c.id !== created.id);
+      return [created, ...without];
+    });
+    setHydratedCreatorIds((prev) => new Set([...prev, created.id]));
+    void hydrateManagedCreators().catch(() => {});
   };
 
   // Handle Save Edited Creator Details
@@ -2016,7 +2018,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                       const ok = await banCreatorByTeamLeader(banningCreator.id, banDaysInput, banReasonInput);
                       if (ok) {
                         setBanningCreator(null);
-                        await loadAgencyStats();
+                        void loadAgencyStats().catch(() => {});
                       }
                     } finally {
                       setIsProcessingBan(false);
@@ -2077,15 +2079,16 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                   type="button"
                   onClick={async () => {
                     if (!deletingCreator) return;
-                    const ok = await deleteCreatorByTeamLeader(deletingCreator.id);
+                    const targetId = deletingCreator.id;
+                    const ok = await deleteCreatorByTeamLeader(targetId);
                     if (ok) {
+                      setDeletingCreator(null);
                       setHydratedCreatorIds((prev) => {
                         const next = new Set(prev);
-                        next.delete(deletingCreator.id);
+                        next.delete(targetId);
                         return next;
                       });
-                      setDeletingCreator(null);
-                      await loadAgencyStats();
+                      void loadAgencyStats().catch(() => {});
                     }
                   }}
                   className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold shadow-lg shadow-rose-950/60 transition-all cursor-pointer flex items-center gap-1.5"
