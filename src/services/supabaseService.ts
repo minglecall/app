@@ -509,10 +509,14 @@ export async function updateUserStatusInSupabase(
   userId: string,
   status: OnlineStatus
 ): Promise<boolean> {
-  // Busy is server-derived from open call_logs — never write busy/in_call from the client.
-  // Prefer heartbeat / update-status APIs so online cannot wipe an active-call busy state.
+  // online | offline | busy (manual). in_call normalizes to busy.
+  // Open call_logs still force busy on the server when not offline.
   const normalized: OnlineStatus =
-    status === 'in_call' || status === 'busy' ? 'online' : status;
+    status === 'in_call' || status === 'busy'
+      ? 'busy'
+      : status === 'offline'
+        ? 'offline'
+        : 'online';
 
   try {
     const res = await authFetch('/api/presence/heartbeat', {
@@ -520,7 +524,7 @@ export async function updateUserStatusInSupabase(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userId,
-        status: normalized === 'offline' ? 'offline' : 'online',
+        status: normalized,
       }),
     });
     if (res.ok) return true;
@@ -534,8 +538,7 @@ export async function updateUserStatusInSupabase(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userId,
-        status: normalized === 'offline' ? 'offline' : 'online',
-        // Do not forceOnline — server keeps busy when call_logs still open
+        status: normalized,
       }),
     });
     return res.ok;

@@ -17,7 +17,7 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
     getAuthoritativeStatus,
   } = ctx;
 
-  // Dedicated Presence REST Endpoint — client may request online|offline only
+  // Dedicated Presence REST Endpoint — online | busy | offline
   router.post('/', requireAuth, async (req, res) => {
     try {
       const userId = String((req as any).profileId || (req as any).user?.id || '');
@@ -26,18 +26,19 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
 
-      if (status === 'busy') {
+      const requested =
+        status === 'offline'
+          ? 'offline'
+          : status === 'busy' || status === 'in_call'
+            ? 'busy'
+            : status === 'online' || !status
+              ? 'online'
+              : null;
+      if (!requested) {
         return res.status(400).json({
           success: false,
-          error: 'Client cannot set busy; busy is derived from active calls.',
-          status: getAuthoritativeStatus(userId),
+          error: 'status must be online, busy, or offline',
         });
-      }
-
-      const requested =
-        status === 'offline' ? 'offline' : status === 'online' || !status ? 'online' : null;
-      if (!requested) {
-        return res.status(400).json({ success: false, error: 'status must be online or offline' });
       }
 
       const result = applyPresenceHeartbeat(userId, requested, {
@@ -69,18 +70,19 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
 
-      if (status === 'busy') {
+      const requested =
+        status === 'offline'
+          ? 'offline'
+          : status === 'busy' || status === 'in_call'
+            ? 'busy'
+            : status === 'online' || !status
+              ? 'online'
+              : null;
+      if (status && !requested) {
         return res.status(400).json({
           success: false,
-          error: 'Client cannot set busy; busy is derived from active calls.',
-          status: getAuthoritativeStatus(userId),
+          error: 'status must be online, busy, or offline',
         });
-      }
-
-      const requested =
-        status === 'offline' ? 'offline' : status === 'online' || !status ? 'online' : null;
-      if (status && !requested) {
-        return res.status(400).json({ success: false, error: 'status must be online or offline' });
       }
 
       const result = applyPresenceHeartbeat(userId, requested || 'online', {

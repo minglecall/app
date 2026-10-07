@@ -36,13 +36,16 @@ function normalizePresenceStatus(raw) {
 
 const ACTIVE_CALL_STATUSES = ['ringing', 'active', 'accepted', 'in_call', 'connecting'];
 
-/** Participants in open calls — authoritative source for busy (not client-writable). */
+/**
+ * Participants in open calls → busy.
+ * Stale ringing / abandoned active rows are closed so busy cannot stick.
+ */
 async function fetchActiveCallParticipantIds(client) {
   const ids = new Set();
   try {
     const { data, error } = await client
       .from('call_logs')
-      .select('caller_id, receiver_id, host_id, status, started_at, updated_at')
+      .select('id, caller_id, receiver_id, host_id, status, started_at, updated_at')
       .in('status', ACTIVE_CALL_STATUSES)
       .limit(500);
     if (error) {
@@ -50,21 +53,42 @@ async function fetchActiveCallParticipantIds(client) {
       return ids;
     }
     const now = Date.now();
+    const zombieIds = [];
     for (const row of data || []) {
       const st = String(row.status || '').toLowerCase();
-      const startedMs = Date.parse(row.started_at || row.updated_at || '') || 0;
+      const startedMs = Date.parse(row.started_at || '') || 0;
+      const updatedMs = Date.parse(row.updated_at || row.started_at || '') || 0;
+      const ageMs = Math.max(startedMs, updatedMs) ? now - Math.max(startedMs, updatedMs) : 0;
       // Drop abandoned ringing / zombie active rows so busy cannot stick forever
-      if (st === 'ringing' && startedMs && now - startedMs > 180_000) continue;
-      if (
+      const isZombieRinging = st === 'ringing' && ageMs > 90_000;
+      const isZombieActive =
         (st === 'active' || st === 'accepted' || st === 'in_call' || st === 'connecting') &&
-        startedMs &&
-        now - startedMs > 3 * 3600_000
-      ) {
+        ageMs > 30 * 60_000;
+      if (isZombieRinging || isZombieActive) {
+        if (row.id) zombieIds.push(String(row.id));
         continue;
       }
       for (const id of [row.caller_id, row.receiver_id, row.host_id]) {
         if (id) ids.add(String(id));
       }
+    }
+    // Best-effort close zombies so the next heartbeat does not re-scan them as busy
+    if (zombieIds.length) {
+      const endedAt = new Date().toISOString();
+      client
+        .from('call_logs')
+        .update({
+          status: 'missed',
+          ended_at: endedAt,
+          end_time: endedAt,
+          updated_at: endedAt,
+          end_reason: 'stale_presence_cleanup',
+        })
+        .in('id', zombieIds)
+        .then(({ error: closeErr }) => {
+          if (closeErr) console.warn('[presence] zombie call cleanup', closeErr.message);
+        })
+        .catch((e) => console.warn('[presence] zombie call cleanup', e && e.message));
     }
   } catch (e) {
     console.warn('[presence] fetchActiveCallParticipantIds', e && e.message);
@@ -82,19 +106,16 @@ async function buildPresenceMap(client) {
   for (const row of profilesRes.data || []) {
     const id = String(row.id);
     let status = normalizePresenceStatus(row.online_status);
+    const last = row.last_seen_at ? Date.parse(row.last_seen_at) : NaN;
+    const fresh = Number.isFinite(last) && now - last <= PRESENCE_STALE_MS;
     if (busyIds.has(id)) {
       // In an open call → always busy (even if last_seen briefly stale)
       status = 'busy';
     } else if (status === 'busy' || status === 'in_call') {
-      // No open call — clear sticky busy from DB
-      const last = row.last_seen_at ? Date.parse(row.last_seen_at) : NaN;
-      status =
-        Number.isFinite(last) && now - last <= PRESENCE_STALE_MS ? 'online' : 'offline';
+      // Manual Busy (DND) or leftover after hangup — keep while heartbeat is fresh
+      status = fresh ? 'busy' : 'offline';
     } else if (status !== 'offline') {
-      const last = row.last_seen_at ? Date.parse(row.last_seen_at) : NaN;
-      if (!Number.isFinite(last) || now - last > PRESENCE_STALE_MS) {
-        status = 'offline';
-      }
+      if (!fresh) status = 'offline';
     }
     presence[id] = status;
   }
@@ -134,21 +155,25 @@ async function handlePresence(path, req, res) {
   if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
   const body = await readJsonBody(req);
   const status = String((body && body.status) || 'online').toLowerCase();
-  // Client may only set online|offline; busy is derived from open call_logs
-  if (status === 'busy' || status === 'in_call') {
-    const presence = await buildPresenceMap(auth.client);
+  if (!['online', 'offline', 'busy', 'in_call'].includes(status)) {
     return send(res, 400, {
       success: false,
-      error: 'Client cannot set busy; busy is derived from active calls.',
-      status: presence[auth.profileId] || 'offline',
-      presence,
+      error: 'status must be online, busy, or offline',
     });
   }
   const busyIds = await fetchActiveCallParticipantIds(auth.client);
   const inActiveCall = busyIds.has(String(auth.profileId));
-  // Logout/offline always wins. Otherwise busy if in open call, else online.
-  const writeStatus =
-    status === 'offline' ? 'offline' : inActiveCall ? 'busy' : 'online';
+
+  // offline wins; open call forces busy; otherwise honor online | busy (manual DND)
+  let writeStatus = 'online';
+  if (status === 'offline') {
+    writeStatus = 'offline';
+  } else if (inActiveCall || status === 'busy' || status === 'in_call') {
+    writeStatus = 'busy';
+  } else {
+    writeStatus = 'online';
+  }
+
   const nowIso = new Date().toISOString();
   await auth.client
     .from('profiles')
@@ -1031,13 +1056,23 @@ async function handleSupabase(path, req, res) {
   if (path === 'supabase/update-status' && (req.method === 'POST' || req.method === 'PUT')) {
     const body = await readJsonBody(req);
     const status = String((body && body.status) || 'online').toLowerCase();
-    // Client sets online|offline; logout/offline always wins. Busy from open call_logs.
-    let onlineStatus = status === 'offline' ? 'offline' : 'online';
-    if (onlineStatus === 'online') {
+    // Client sets online|offline|busy; logout/offline always wins. Open call forces busy
+    // unless forceOnline (login). Manual busy is allowed when not in a call.
+    let onlineStatus = 'online';
+    if (status === 'offline') {
+      onlineStatus = 'offline';
+    } else if (status === 'busy' || status === 'in_call') {
+      onlineStatus = 'busy';
+    } else {
+      onlineStatus = 'online';
+    }
+    if (onlineStatus !== 'offline' && !body?.forceOnline) {
       const busyIds = await fetchActiveCallParticipantIds(auth.client);
-      if (busyIds.has(String(auth.profileId)) && !body?.forceOnline) {
+      if (busyIds.has(String(auth.profileId))) {
         onlineStatus = 'busy';
       }
+    } else if (body?.forceOnline && onlineStatus !== 'offline') {
+      onlineStatus = 'online';
     }
     const nowIso = new Date().toISOString();
     await auth.client

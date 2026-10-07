@@ -840,9 +840,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const accessTokenRef = useRef<string | null>(null);
   const adminActiveCallsRef = useRef<AdminActiveCall[]>(adminActiveCalls);
   const activeCallRef = useRef<CallSession | null>(activeCall);
+  /**
+   * User-chosen availability (online | busy | offline). Call lifecycle sets display
+   * busy without changing this — so after hangup / heartbeat we restore correctly
+   * and sticky call-busy cannot overwrite a manual Online choice.
+   */
+  const preferredStatusRef = useRef<'online' | 'busy' | 'offline'>('online');
   const billedMinutesRef = useRef<Set<number>>(new Set());
   const burnInFlightRef = useRef<Set<number>>(new Set());
   const endCallRef = useRef<() => void>(() => {});
+  const syncCallEndAndPresenceRef = useRef<
+    (payload: Record<string, unknown>, restoreIds: string[]) => Promise<void>
+  >(async () => {});
   const applyBurnBalancesRef = useRef<(payload: any) => void>(() => {});
   const applyWalletBalanceRef = useRef<(payload: {
     userId?: string;
@@ -891,6 +900,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const clearedId = prevId || currentUserIdRef.current;
     isLoggedInRef.current = false;
     currentUserIdRef.current = '';
+    preferredStatusRef.current = 'offline';
     supabaseAuthUserIdRef.current = null;
     accessTokenRef.current = null;
     setIsLoggedIn(false);
@@ -1025,6 +1035,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       isLoggedInRef.current = true;
       currentUserIdRef.current = activeId;
+      preferredStatusRef.current = 'online';
       setCurrentUserId(activeId);
       setIsLoggedIn(true);
       localStorage.setItem('livecall_logged_in', 'true');
@@ -1042,6 +1053,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         usersRef.current = next;
         return next;
       });
+
+      // Push online so rediscovered sessions do not stay sticky-busy from old call_logs
+      authFetch('/api/presence/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'online' }),
+      })
+        .then(async (res) => {
+          if (!res.ok) return;
+          const data = await res.json().catch(() => null);
+          if (!data?.success || !data.presence) return;
+          const presence = data.presence as Record<string, 'online' | 'busy' | 'offline'>;
+          setUsers((prev) =>
+            prev.map((u) => {
+              if (!(u.id in presence) && u.id !== activeId) return u;
+              const live =
+                u.id === activeId
+                  ? data.status || presence[u.id] || 'online'
+                  : presence[u.id] || 'offline';
+              return u.onlineStatus === live ? u : { ...u, onlineStatus: live };
+            })
+          );
+        })
+        .catch(() => {});
     } finally {
       authHydratingRef.current = false;
     }
@@ -1139,6 +1174,72 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (fallbackStatus === 'in_call') return 'busy';
     return fallbackStatus;
   };
+
+  /** Apply a presence map from the server, respecting local active-call lock. */
+  const applyPresenceMap = useCallback(
+    (presence: Record<string, 'online' | 'busy' | 'offline'>, selfStatus?: string) => {
+      setUsers((prev) => {
+        let changed = false;
+        const next = prev.map((u) => {
+          if (!(u.id in presence) && u.id !== currentUserIdRef.current) return u;
+          const fromMap =
+            u.id === currentUserIdRef.current
+              ? (selfStatus as any) || presence[u.id] || preferredStatusRef.current
+              : presence[u.id] || 'offline';
+          const liveStatus = getUserCallStatus(u.id, fromMap || 'offline');
+          if (u.onlineStatus !== liveStatus) {
+            changed = true;
+            return { ...u, onlineStatus: liveStatus };
+          }
+          return u;
+        });
+        return changed ? next : prev;
+      });
+    },
+    []
+  );
+
+  /** Close call on server first, then refresh presence (avoids sticky busy from open call_logs). */
+  const syncCallEndAndPresence = useCallback(
+    async (payload: Record<string, unknown>, restoreIds: string[]) => {
+      // Clear local call lock immediately so heartbeat cannot re-apply busy
+      activeCallRef.current = null;
+      try {
+        await authFetch('/api/calls/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        /* best effort */
+      }
+      // After a call, return to online (unless user chose offline). Clears sticky busy.
+      if (preferredStatusRef.current !== 'offline') {
+        preferredStatusRef.current = 'online';
+      }
+      const restore = preferredStatusRef.current;
+      setUsers((prev) =>
+        prev.map((u) => (restoreIds.includes(u.id) ? { ...u, onlineStatus: restore } : u))
+      );
+      try {
+        const res = await authFetch('/api/presence/heartbeat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: restore }),
+        });
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (data?.success && data.presence) {
+          applyPresenceMap(data.presence, data.status);
+        }
+      } catch {
+        /* best effort */
+      }
+    },
+    [applyPresenceMap]
+  );
+
+  syncCallEndAndPresenceRef.current = syncCallEndAndPresence;
 
   // Call lifecycle → local busy + DB sync + heartbeat refresh (call=busy; end handled in endCall)
   useEffect(() => {
@@ -2411,9 +2512,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!token) return;
       accessTokenRef.current = token;
       try {
-        const activeUid = currentUserIdRef.current;
-        // Never invent busy from client — server derives busy from activeCalls
-        const myStatus: 'online' | 'offline' = isLoggedInRef.current && activeUid ? 'online' : 'offline';
+        // Send preferred availability (not call-derived busy). Server forces busy when in open call.
+        const myStatus: 'online' | 'busy' | 'offline' = !isLoggedInRef.current
+          ? 'offline'
+          : preferredStatusRef.current;
 
         const res = await authFetch('/api/presence/heartbeat', {
           method: 'POST',
@@ -2424,25 +2526,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (res.ok && !isCancelled) {
           const data = await res.json();
           if (data.success && data.presence) {
-            const presence: Record<string, 'online' | 'busy' | 'offline'> = data.presence;
-            setUsers((prev) => {
-              let hasChanged = false;
-              const next = prev.map((u) => {
-                // Heartbeat presence map (DB + open call_logs → busy) is the authority
-                if (!(u.id in presence) && u.id !== currentUserIdRef.current) return u;
-                const fromMap =
-                  u.id === currentUserIdRef.current
-                    ? data.status || presence[u.id] || myStatus
-                    : presence[u.id] || 'offline';
-                const liveStatus = getUserCallStatus(u.id, fromMap);
-                if (u.onlineStatus !== liveStatus) {
-                  hasChanged = true;
-                  return { ...u, onlineStatus: liveStatus };
-                }
-                return u;
-              });
-              return hasChanged ? next : prev;
-            });
+            applyPresenceMap(
+              data.presence as Record<string, 'online' | 'busy' | 'offline'>,
+              data.status
+            );
           }
         }
       } catch (e) {
@@ -2588,13 +2675,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     if (u.id === currentUserIdRef.current) return u;
                     // Realtime presence is an UPGRADE-only signal (join → online).
                     // Never demote to offline here — HTTP /api/presence/heartbeat is
-                    // the authority for offline/stale (avoids badge flicker).
+                    // the authority for offline/stale/busy (avoids badge flicker).
+                    // Do not preserve sticky busy from local state when they appear in RT.
                     if (!onlineIds.has(u.id)) return u;
-                    const base: 'online' | 'busy' | 'offline' | 'in_call' =
-                      u.onlineStatus === 'busy' || u.onlineStatus === 'in_call'
-                        ? u.onlineStatus
-                        : 'online';
-                    const live = getUserCallStatus(u.id, base);
+                    if (u.onlineStatus === 'online') return u;
+                    // Only keep busy if this client knows they are in an active call
+                    const live = getUserCallStatus(u.id, 'online');
                     if (u.onlineStatus !== live) {
                       changed = true;
                       return { ...u, onlineStatus: live };
@@ -2972,7 +3058,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             billedMinutesRef.current.clear();
             burnInFlightRef.current.clear();
             const endedCallSnapshot = activeCallRef.current;
+            activeCallRef.current = null;
             setActiveCall(null);
+            if (preferredStatusRef.current !== 'offline') {
+              preferredStatusRef.current = 'online';
+            }
             const restoreIds = [
               endedCallSnapshot?.callerId,
               endedCallSnapshot?.receiverId,
@@ -2984,8 +3074,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             if (restoreIds.length) {
               setUsers((prev) =>
                 prev.map((u) =>
-                  restoreIds.includes(u.id) ? { ...u, onlineStatus: 'online' as const } : u
+                  restoreIds.includes(u.id)
+                    ? { ...u, onlineStatus: preferredStatusRef.current }
+                    : u
                 )
+              );
+            }
+            // Persist end + refresh presence so discovery stops showing busy
+            if (endedCallSnapshot?.id || data.callId) {
+              void syncCallEndAndPresenceRef.current(
+                {
+                  callId: endedCallSnapshot?.id || data.callId,
+                  callerId: endedCallSnapshot?.callerId || data.callerId,
+                  receiverId: endedCallSnapshot?.receiverId || data.receiverId,
+                  status: data.outcome || data.status || 'completed',
+                  outcome: data.outcome || data.status || 'completed',
+                  endedBy: currentUserIdRef.current,
+                  durationSeconds: endedCallSnapshot?.durationSeconds || 0,
+                  coinsSpent: endedCallSnapshot?.coinsSpent || 0,
+                  coinsEarned: endedCallSnapshot?.coinsEarned || 0,
+                },
+                restoreIds
               );
             }
             if (data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE') {
@@ -3369,12 +3478,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     }, 5000);
 
-    // 2. HTTP presence — DB + open call_logs → busy/online/offline for discovery/chat/profile
+    // 2. HTTP presence — always poll (WS alone cannot clear sticky busy from call_logs)
     presenceSyncTimer = setInterval(() => {
       if (isResettingRef.current) return;
-      if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
-        syncPresenceDirect();
-      }
+      syncPresenceDirect();
     }, 10000);
 
     // 3. User directory refresh from server (authoritative listings)
@@ -3396,9 +3503,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         broadcastChannel = new BroadcastChannel('livecall_presence_sync_channel');
         broadcastChannel.onmessage = (event) => {
           if (event.data?.type === 'presence_updated' || event.data?.type === 'user_switched') {
-            if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
-              syncPresenceDirect();
-            }
+            syncPresenceDirect();
             syncSupabaseStatusCycle();
           }
         };
@@ -3408,9 +3513,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'livecall_presence_trigger' || e.key === 'livecall_current_user_id') {
-        if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
-          syncPresenceDirect();
-        }
+        syncPresenceDirect();
         syncSupabaseStatusCycle();
       }
     };
@@ -3421,9 +3524,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (isSignalOpen()) {
           signalSend({ type: 'heartbeat', userId: currentUserIdRef.current });
         }
-        if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
-          syncPresenceDirect();
-        }
+        syncPresenceDirect();
         syncSupabaseStatusCycle();
       }
     };
@@ -3615,6 +3716,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (token) accessTokenRef.current = token;
       isLoggedInRef.current = true;
       currentUserIdRef.current = activeId;
+      preferredStatusRef.current = 'online';
       setCurrentUserId(activeId);
       setIsLoggedIn(true);
       localStorage.setItem('livecall_logged_in', 'true');
@@ -3649,7 +3751,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'online' }),
-      }).catch(() => {});
+      })
+        .then(async (res) => {
+          if (!res.ok) return;
+          const data = await res.json().catch(() => null);
+          if (data?.success && data.presence) {
+            applyPresenceMap(data.presence, data.status || 'online');
+          }
+        })
+        .catch(() => {});
       signalSend({ type: 'presence:update', userId: activeId, status: 'online' });
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && token) {
@@ -3685,6 +3795,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Mark local session offline immediately (stops heartbeats from pushing "online")
     isLoggedInRef.current = false;
     currentUserIdRef.current = '';
+    preferredStatusRef.current = 'offline';
     wsAuthenticatedRef.current = false;
     pendingCallReceiverRef.current = null;
 
@@ -4427,11 +4538,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
     }
 
-    // Sync call end to backend — persist missed/declined and clear busy via presence
-    authFetch('/api/calls/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    setActiveCall(null);
+    void syncCallEndAndPresence(
+      {
         callId: rejectedCall.id,
         callerId: rejectedCall.callerId,
         receiverId: rejectedCall.receiverId,
@@ -4447,41 +4556,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         receiverName: receiver?.name,
         startTime: rejectedCall.startTime || endNow,
         endTime: endNow,
-      }),
-    }).catch(() => {});
-
-    // Reset caller and receiver status back to online in memory
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === rejectedCall.callerId || u.id === rejectedCall.receiverId) {
-          return { ...u, onlineStatus: 'online' };
-        }
-        return u;
-      })
+      },
+      [rejectedCall.callerId, rejectedCall.receiverId]
     );
 
-    // Presence: calls/sync already set online in DB; refresh heartbeat map for all clients
-    authFetch('/api/presence/heartbeat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'online' }),
-    })
-      .then(async (res) => {
-        if (!res.ok) return;
-        const data = await res.json().catch(() => null);
-        if (data?.success && data.presence) {
-          const presence = data.presence as Record<string, 'online' | 'busy' | 'offline'>;
-          setUsers((prev) =>
-            prev.map((u) => {
-              if (!(u.id in presence)) return u;
-              return { ...u, onlineStatus: getUserCallStatus(u.id, presence[u.id] || 'offline') };
-            })
-          );
-        }
-      })
-      .catch(() => {});
-
-    setActiveCall(null);
     showToast(
       outcome === 'declined' ? 'Call Declined 🚫' : 'Call Cancelled',
       outcome === 'declined' ? 'The call was declined.' : 'You cancelled the call before it was answered.',
@@ -4521,37 +4599,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       status: ringingOutcome || 'completed',
     });
 
-    // Reset caller and receiver status back to online in memory
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === endedCall.callerId || u.id === endedCall.receiverId) {
-          return { ...u, onlineStatus: 'online' };
-        }
-        return u;
-      })
-    );
-
-    // Presence: calls/sync writes online; heartbeat refreshes busy/online for everyone
-    authFetch('/api/presence/heartbeat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'online' }),
-    })
-      .then(async (res) => {
-        if (!res.ok) return;
-        const data = await res.json().catch(() => null);
-        if (data?.success && data.presence) {
-          const presence = data.presence as Record<string, 'online' | 'busy' | 'offline'>;
-          setUsers((prev) =>
-            prev.map((u) => {
-              if (!(u.id in presence)) return u;
-              return { ...u, onlineStatus: getUserCallStatus(u.id, presence[u.id] || 'offline') };
-            })
-          );
-        }
-      })
-      .catch(() => {});
-
     if (!wasRinging && endedCall.durationSeconds > 0) {
       recordVideoCallDuration(endedCall.durationSeconds);
     }
@@ -4559,6 +4606,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const caller = users.find((u) => u.id === endedCall.callerId);
     const receiver = users.find((u) => u.id === endedCall.receiverId);
     const isFriendCall = isFriend(endedCall.receiverId) || isFriend(endedCall.callerId);
+    const logStatus = ringingOutcome || 'completed';
+
+    let syncPayload: Record<string, unknown> = {
+      callId: endedCall.id,
+      callerId: endedCall.callerId,
+      receiverId: endedCall.receiverId,
+      status: logStatus,
+      outcome: logStatus,
+      endedBy: currentUser.id,
+      reason,
+      durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
+      coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
+      coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
+      startTime: endedCall.startTime || endNow,
+      endTime: endNow,
+    };
 
     if (caller && receiver) {
       const tlId = receiver.teamLeaderId || receiver.createdById || null;
@@ -4568,7 +4631,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           ? Math.max(0, Math.round(endedCall.coinsSpent * (tlSharePct / 100)))
           : 0;
 
-      const logStatus = ringingOutcome || 'completed';
       const newLog: CallLogItem = {
         id: endedCall.id,
         callerId: caller.id,
@@ -4594,54 +4656,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return [newLog, ...withoutDup];
       });
 
-      // Persist via backend (service role) — use missed/declined/completed so call logs UI filters work
-      authFetch('/api/calls/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          callId: endedCall.id,
-          callerId: endedCall.callerId,
-          receiverId: endedCall.receiverId,
-          status: logStatus,
-          outcome: logStatus,
-          endedBy: currentUser.id,
-          reason,
-          durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
-          coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
-          coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
-          teamLeaderEarnedCoins: estimatedTlEarned,
-          teamLeaderId: tlId,
-          wasFriendCall: isFriendCall,
-          callerName: caller.name,
-          receiverName: receiver.name,
-          startTime: endedCall.startTime || endNow,
-          endTime: endNow,
-        }),
-      }).catch(() => {});
-
-      // Post-call rating is creator-requested only — do not auto-open modal or inject rating cards.
-    } else {
-      // Still persist economics even if local directory is missing a profile row
-      const fallbackStatus = ringingOutcome || 'completed';
-      authFetch('/api/calls/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          callId: endedCall.id,
-          callerId: endedCall.callerId,
-          receiverId: endedCall.receiverId,
-          status: fallbackStatus,
-          outcome: fallbackStatus,
-          endedBy: currentUser.id,
-          reason,
-          durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
-          coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
-          coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
-          startTime: endedCall.startTime || endNow,
-          endTime: endNow,
-        }),
-      }).catch(() => {});
+      syncPayload = {
+        ...syncPayload,
+        teamLeaderEarnedCoins: estimatedTlEarned,
+        teamLeaderId: tlId,
+        wasFriendCall: isFriendCall,
+        callerName: caller.name,
+        receiverName: receiver.name,
+      };
     }
+
+    // Clear call UI first, then persist end + presence (order avoids sticky busy)
+    setAdminActiveCalls((prev) =>
+      prev.filter(
+        (c) =>
+          c.id !== endedCall.id &&
+          c.hostId !== endedCall.receiverId &&
+          c.callerId !== endedCall.callerId
+      )
+    );
+    billedMinutesRef.current.clear();
+    burnInFlightRef.current.clear();
+    setActiveCall(null);
+
+    void syncCallEndAndPresence(syncPayload, [endedCall.callerId, endedCall.receiverId]);
 
     showToast(
       wasRinging
@@ -4660,13 +4698,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         : `Session duration: ${endedCall.durationSeconds}s. Total coins processed: ${endedCall.coinsSpent} 🪙. Logged to creator call history.`,
       'info'
     );
-
-    // Remove from active admin call list
-    setAdminActiveCalls((prev) => prev.filter((c) => c.id !== endedCall.id && c.hostId !== endedCall.receiverId && c.callerId !== endedCall.callerId));
-
-    billedMinutesRef.current.clear();
-    burnInFlightRef.current.clear();
-    setActiveCall(null);
   };
 
   // Keep endCallRef fresh for the billing interval (avoids stale closures)
@@ -6046,38 +6077,72 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const toggleUserStatus = (userId: string, newStatus: 'online' | 'busy' | 'offline' | 'in_call') => {
-    setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, onlineStatus: newStatus } : u))
-    );
+    const requested: 'online' | 'busy' | 'offline' =
+      newStatus === 'in_call' || newStatus === 'busy' ? 'busy' : newStatus === 'offline' ? 'offline' : 'online';
 
-    // Direct Supabase status sync
-    updateUserStatusInSupabase(userId, newStatus).catch((e) =>
-      console.warn('Direct Supabase toggle status notice:', e)
+    // Only the signed-in user may change their own preference via this control
+    const isSelf =
+      userId === currentUserIdRef.current ||
+      userId === currentUser?.id ||
+      (currentUser?.authId && userId === currentUser.authId);
+
+    if (isSelf) {
+      preferredStatusRef.current = requested;
+    }
+
+    // Optimistic UI — if self is in an active call, keep showing busy until hangup
+    const displayStatus: 'online' | 'busy' | 'offline' =
+      isSelf &&
+      activeCallRef.current &&
+      activeCallRef.current.status !== 'ended' &&
+      (activeCallRef.current.callerId === userId || activeCallRef.current.receiverId === userId)
+        ? 'busy'
+        : requested;
+
+    setUsers((prev) =>
+      prev.map((u) => (u.id === userId ? { ...u, onlineStatus: displayStatus } : u))
     );
 
     try {
-      localStorage.setItem('livecall_presence_trigger', `${userId}_${newStatus}_${Date.now()}`);
+      localStorage.setItem('livecall_presence_trigger', `${userId}_${requested}_${Date.now()}`);
       if (typeof BroadcastChannel !== 'undefined') {
         const bc = new BroadcastChannel('livecall_presence_sync_channel');
-        bc.postMessage({ type: 'presence_updated', userId, status: newStatus });
+        bc.postMessage({ type: 'presence_updated', userId, status: requested });
         bc.close();
       }
-    } catch (e) { }
-    authFetch('/api/presence', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, status: newStatus }),
-    }).catch((e) => console.warn('Presence API notice:', e));
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'presence:update',
-          userId,
-          status: newStatus,
-        })
-      );
+    } catch {
+      /* ignore */
     }
+
+    void (async () => {
+      try {
+        const res = await authFetch('/api/presence', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: requested }),
+        });
+        const data = await res.json().catch(() => null);
+        if (data?.presence) {
+          applyPresenceMap(data.presence, data.status || requested);
+        } else if (data?.status) {
+          setUsers((prev) =>
+            prev.map((u) =>
+              u.id === userId
+                ? { ...u, onlineStatus: getUserCallStatus(u.id, data.status) }
+                : u
+            )
+          );
+        } else if (!res.ok) {
+          // Fallback path
+          await updateUserStatusInSupabase(userId, requested);
+        }
+      } catch (e) {
+        console.warn('Presence API notice:', e);
+        updateUserStatusInSupabase(userId, requested).catch(() => {});
+      }
+    })();
+
+    signalSend({ type: 'presence:update', userId, status: requested });
   };
 
   /** @deprecated Client-only grants disabled — use POST /api/v1/finance/funding/admin-credit (ManualCoinModal). */

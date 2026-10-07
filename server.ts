@@ -277,30 +277,34 @@ async function startServer(): Promise<express.Express> {
 
 
 
-  // Helper to determine real-time presence — busy ONLY from activeCalls
+  // Helper to determine real-time presence — call busy, else honor preferred online|busy|offline
   const getAuthoritativeStatus = (userId: string): 'online' | 'busy' | 'offline' => {
     if (!userId) return 'offline';
 
-    // 1. Is user in a non-ended call? (sole source of busy)
+    // 1. Open call → busy
     const isBusy = Array.from(activeCalls.values()).some(
       (c) => (c.callerId === userId || c.receiverId === userId) && c.status !== 'ended'
     );
     if (isBusy) return 'busy';
 
-    // 2. Explicit offline status has strict priority
+    // 2. Explicit offline has strict priority
     const explicitStatus = presenceMap.get(userId);
     if (explicitStatus === 'offline') {
       return 'offline';
     }
 
-    // 3. Is socket currently open and active for this user?
-    const isConnected = connectedSockets.some((c) => c.userId === userId && c.ws.readyState === WebSocket.OPEN);
-    if (isConnected) return 'online';
-
-    // 4. Has user heartbeated recently (within last 12 seconds)?
+    // 3. Manual Busy (DND) while recently active / connected
     const lastSeen = userLastSeen.get(userId) || 0;
     const isRecentlyActive = Date.now() - lastSeen < 12000;
+    const isConnected = connectedSockets.some((c) => c.userId === userId && c.ws.readyState === WebSocket.OPEN);
+    if (explicitStatus === 'busy' && (isConnected || isRecentlyActive)) {
+      return 'busy';
+    }
 
+    // 4. Connected socket → online
+    if (isConnected) return 'online';
+
+    // 5. Recent heartbeat
     if (explicitStatus === 'online' && isRecentlyActive) return 'online';
     if (isRecentlyActive) return 'online';
 
@@ -1065,20 +1069,22 @@ async function startServer(): Promise<express.Express> {
   ): { status: 'online' | 'busy' | 'offline'; changed: boolean } => {
     const prev = presenceLastKnownStatus.get(userId) || getAuthoritativeStatus(userId);
 
-    // Client may only request online|offline. Busy is ignored/rejected upstream.
-    let intent: 'online' | 'offline' =
-      requestedStatus === 'offline' ? 'offline' : 'online';
-    if (opts?.fromUnload) intent = 'offline';
+    let intent: 'online' | 'busy' | 'offline' = 'online';
+    if (opts?.fromUnload || requestedStatus === 'offline') {
+      intent = 'offline';
+    } else if (requestedStatus === 'busy' || requestedStatus === 'in_call') {
+      intent = 'busy';
+    } else {
+      intent = 'online';
+    }
 
     if (intent === 'offline') {
       userLastSeen.delete(userId);
       presenceMap.set(userId, 'offline');
-      // Stop creator accrual and flush
       accrueCreatorOnlineTime(userId, { stop: true, forcePersist: true });
     } else {
       userLastSeen.set(userId, Date.now());
-      // Never store client busy — activeCalls drives busy via getAuthoritativeStatus
-      presenceMap.set(userId, 'online');
+      presenceMap.set(userId, intent);
       accrueCreatorOnlineTime(userId);
     }
 
@@ -1323,16 +1329,7 @@ async function startServer(): Promise<express.Express> {
             const { status } = msg;
             if (!userId) break;
 
-            if (status === 'busy') {
-              sendJson(ws, {
-                type: 'presence:error',
-                error: 'Client cannot set busy; busy is derived from active calls.',
-                status: getAuthoritativeStatus(userId),
-              });
-              break;
-            }
-
-            if (status === 'online' || status === 'offline') {
+            if (status === 'online' || status === 'offline' || status === 'busy' || status === 'in_call') {
               const result = applyPresenceHeartbeat(userId, status, { persistStatus: true });
               if (result.changed) {
                 broadcastPresence();
