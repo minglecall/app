@@ -811,7 +811,7 @@ export async function updateUserPasswordAdmin(
 export async function confirmUserEmailAdmin(
   email: string,
   userId?: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; authUserId?: string; error?: string }> {
   const client = getSupabaseAdmin();
   if (!client) {
     return { success: false, error: 'Supabase not configured' };
@@ -826,7 +826,7 @@ export async function confirmUserEmailAdmin(
         email_confirm: true,
       });
       if (!error) {
-        return { success: true };
+        return { success: true, authUserId: userId };
       }
       console.warn('[Supabase Admin] confirmUserEmailAdmin by id notice:', error.message);
     }
@@ -855,7 +855,7 @@ export async function confirmUserEmailAdmin(
     if (updErr) {
       return { success: false, error: updErr.message };
     }
-    return { success: true };
+    return { success: true, authUserId: matched.id };
   } catch (err: any) {
     console.error('[Supabase Admin] confirmUserEmailAdmin exception:', err);
     return { success: false, error: err?.message || 'Failed to confirm email' };

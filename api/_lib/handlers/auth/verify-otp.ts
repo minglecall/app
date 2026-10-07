@@ -9,6 +9,26 @@ import {
 } from '../../authHelpers';
 import { verifyOtpDb, takePendingSignupDb } from '../../otpDb';
 
+async function resolveAuthUserId(
+  client: NonNullable<ReturnType<typeof createServiceClient>>,
+  cleanEmail: string
+): Promise<string | null> {
+  let page = 1;
+  const perPage = 1000;
+  for (;;) {
+    const { data, error } = await client.auth.admin.listUsers({ page, perPage });
+    if (error) {
+      console.warn('[api/auth/verify-otp] listUsers notice:', error.message);
+      return null;
+    }
+    const matched = findAuthUserByEmail(data?.users as any, cleanEmail);
+    if (matched?.id) return matched.id;
+    if (!data?.users?.length || data.users.length < perPage) return null;
+    page += 1;
+    if (page > 50) return null;
+  }
+}
+
 export default async function handler(req: VercelReq, res: VercelRes) {
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
@@ -54,13 +74,17 @@ export default async function handler(req: VercelReq, res: VercelRes) {
 
     const pending = await takePendingSignupDb(client, cleanEmail);
     const hasPassword = typeof password === 'string' && password.length > 0;
+    let resolvedAuthId: string | null =
+      (typeof existing?.auth_id === 'string' && existing.auth_id) ||
+      (typeof existing?.id === 'string' && existing.id) ||
+      null;
 
     if (hasPassword && pending) {
       const policyError = getPasswordPolicyError(password);
       if (policyError) {
         return sendJson(res, 400, { success: false, error: policyError });
       }
-      const { error: createErr } = await client.auth.admin.createUser({
+      const { data: created, error: createErr } = await client.auth.admin.createUser({
         email: cleanEmail,
         password,
         email_confirm: true,
@@ -69,12 +93,22 @@ export default async function handler(req: VercelReq, res: VercelRes) {
           role: sanitizePublicSignupRole(pending.role || verifyResult.metadata?.role),
         },
       });
-      // Ignore "already registered" — client may have signed up already
-      if (createErr && !/already/i.test(createErr.message)) {
-        const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-        const matched = findAuthUserByEmail(list?.users as any, cleanEmail);
-        if (matched) {
-          await client.auth.admin.updateUserById(matched.id, {
+      if (!createErr && created?.user?.id) {
+        resolvedAuthId = created.user.id;
+      } else if (createErr && /already/i.test(createErr.message)) {
+        const matchedId = await resolveAuthUserId(client, cleanEmail);
+        if (matchedId) {
+          resolvedAuthId = matchedId;
+          await client.auth.admin.updateUserById(matchedId, {
+            password,
+            email_confirm: true,
+          });
+        }
+      } else if (createErr) {
+        const matchedId = await resolveAuthUserId(client, cleanEmail);
+        if (matchedId) {
+          resolvedAuthId = matchedId;
+          await client.auth.admin.updateUserById(matchedId, {
             password,
             email_confirm: true,
           });
@@ -86,17 +120,23 @@ export default async function handler(req: VercelReq, res: VercelRes) {
         }
       }
     } else {
-      const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-      const matched = findAuthUserByEmail(list?.users as any, cleanEmail);
-      if (matched) {
-        await client.auth.admin.updateUserById(matched.id, { email_confirm: true });
+      const matchedId = await resolveAuthUserId(client, cleanEmail);
+      if (matchedId) {
+        resolvedAuthId = matchedId;
+        await client.auth.admin.updateUserById(matchedId, { email_confirm: true });
       }
+    }
+
+    if (!resolvedAuthId) {
+      resolvedAuthId = await resolveAuthUserId(client, cleanEmail);
     }
 
     return sendJson(res, 200, {
       success: true,
       message: 'OTP Code verified successfully',
       emailConfirmed: true,
+      authId: resolvedAuthId,
+      userId: resolvedAuthId,
       metadata: {
         ...(verifyResult.metadata || {}),
         name: verifyResult.metadata?.name || pending?.name,

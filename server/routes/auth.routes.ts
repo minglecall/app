@@ -395,6 +395,10 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
 
       const pending = pendingSignupByEmail.get(cleanEmail);
       const hasPassword = typeof password === 'string' && password.length > 0;
+      let resolvedAuthId: string | undefined =
+        (existing?.authId && AUTH_UUID_RE.test(existing.authId) && existing.authId) ||
+        (existing?.id && AUTH_UUID_RE.test(existing.id) && existing.id) ||
+        undefined;
 
       // Only apply password when this OTP belongs to an in-progress signup.
       // Password resets must use /reset-password (prevents OTP hijack of existing accounts).
@@ -420,6 +424,9 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
               error: safeClientError(adminRes.error, 'Email verified, but account activation failed. Please try again.'),
             });
           }
+          if (adminRes.authUserId && AUTH_UUID_RE.test(adminRes.authUserId)) {
+            resolvedAuthId = adminRes.authUserId;
+          }
         }
 
         if (existing) {
@@ -435,6 +442,8 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         const confirmRes = await confirmUserEmailAdmin(cleanEmail, existing?.id);
         if (!confirmRes.success) {
           console.warn('[verify-otp] email confirm notice:', confirmRes.error);
+        } else if (confirmRes.authUserId && AUTH_UUID_RE.test(confirmRes.authUserId)) {
+          resolvedAuthId = confirmRes.authUserId;
         }
         if (pending) {
           pendingSignupByEmail.delete(cleanEmail);
@@ -443,11 +452,26 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         pendingSignupByEmail.delete(cleanEmail);
       }
 
+      // Always resolve Auth id for the client — custom OTP leaves no browser session,
+      // and profiles SELECT is authenticated-only under RLS.
+      if (!resolvedAuthId && isSupabaseAdminConfigured()) {
+        const admin = getSupabaseAdmin();
+        if (admin) {
+          try {
+            resolvedAuthId = (await findAuthUserIdByEmail(admin, cleanEmail)) || undefined;
+          } catch (e: any) {
+            console.warn('[verify-otp] auth id lookup notice:', e?.message || e);
+          }
+        }
+      }
+
       clearAuthBackoff('otp_verify', req);
       return res.json({
         success: true,
         message: 'OTP Code verified successfully',
         emailConfirmed: true,
+        authId: resolvedAuthId || null,
+        userId: resolvedAuthId || null,
         metadata: {
           ...(verifyResult.metadata || {}),
           name: verifyResult.metadata?.name || pending?.name,

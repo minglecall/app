@@ -203,11 +203,33 @@ async function verifyOtp(req, res) {
 
     const pending = await takePendingSignupDb(client, cleanEmail);
     const hasPassword = typeof password === 'string' && password.length > 0;
+    let resolvedAuthId =
+      (existing && existing.auth_id) || (existing && existing.id) || null;
+
+    async function lookupAuthId() {
+      let page = 1;
+      const perPage = 1000;
+      for (;;) {
+        const { data: list, error: listErr } = await client.auth.admin.listUsers({
+          page,
+          perPage,
+        });
+        if (listErr) {
+          console.warn('[api/auth/verify-otp] listUsers notice:', listErr.message);
+          return null;
+        }
+        const matched = findAuthUserByEmail(list && list.users, cleanEmail);
+        if (matched && matched.id) return matched.id;
+        if (!list || !list.users || list.users.length < perPage) return null;
+        page += 1;
+        if (page > 50) return null;
+      }
+    }
 
     if (hasPassword && pending) {
       const policyError = getPasswordPolicyError(password);
       if (policyError) return send(res, 400, { success: false, error: policyError });
-      const { error: createErr } = await client.auth.admin.createUser({
+      const { data: created, error: createErr } = await client.auth.admin.createUser({
         email: cleanEmail,
         password,
         email_confirm: true,
@@ -218,15 +240,17 @@ async function verifyOtp(req, res) {
           ),
         },
       });
-      if (createErr && !/already/i.test(createErr.message)) {
-        const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-        const matched = findAuthUserByEmail(list && list.users, cleanEmail);
-        if (matched) {
-          await client.auth.admin.updateUserById(matched.id, {
+      if (!createErr && created && created.user && created.user.id) {
+        resolvedAuthId = created.user.id;
+      } else if (createErr) {
+        const matchedId = await lookupAuthId();
+        if (matchedId) {
+          resolvedAuthId = matchedId;
+          await client.auth.admin.updateUserById(matchedId, {
             password,
             email_confirm: true,
           });
-        } else {
+        } else if (!/already/i.test(createErr.message)) {
           return send(res, 500, {
             success: false,
             error: createErr.message || 'Account activation failed',
@@ -234,17 +258,23 @@ async function verifyOtp(req, res) {
         }
       }
     } else {
-      const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
-      const matched = findAuthUserByEmail(list && list.users, cleanEmail);
-      if (matched) {
-        await client.auth.admin.updateUserById(matched.id, { email_confirm: true });
+      const matchedId = await lookupAuthId();
+      if (matchedId) {
+        resolvedAuthId = matchedId;
+        await client.auth.admin.updateUserById(matchedId, { email_confirm: true });
       }
+    }
+
+    if (!resolvedAuthId) {
+      resolvedAuthId = await lookupAuthId();
     }
 
     return send(res, 200, {
       success: true,
       message: 'OTP Code verified successfully',
       emailConfirmed: true,
+      authId: resolvedAuthId,
+      userId: resolvedAuthId,
       metadata: {
         ...(verifyResult.metadata || {}),
         name: (verifyResult.metadata && verifyResult.metadata.name) || (pending && pending.name),

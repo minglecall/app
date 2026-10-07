@@ -523,15 +523,21 @@ export async function verifyEmailOtp(
         const isMetaFemale = lockedGender === 'female';
         const isMetaOther = lockedGender === 'other';
 
-        // Require a real auth/profile identity — never mint orphan UUIDs for the same inbox
+        // Require a real auth/profile identity — never mint orphan UUIDs for the same inbox.
+        // Prefer server-returned authId: custom OTP leaves no browser session, and profiles
+        // SELECT is authenticated-only under RLS, so client lookups often fail here.
         let resolvedId: string | null = null;
         let existingProfile: UserProfile | null = null;
+        const serverAuthId = sData.authId || sData.userId;
+        if (typeof serverAuthId === 'string' && isValidUuid(serverAuthId)) {
+          resolvedId = serverAuthId;
+        }
 
         if (isSupabaseConfigured()) {
           try {
             const { data: sessionData } = await supabase.auth.getSession();
             if (sessionData.session?.user?.id) {
-              resolvedId = sessionData.session.user.id;
+              resolvedId = resolvedId || sessionData.session.user.id;
             }
 
             const { data: existingByEmail } = await supabase
