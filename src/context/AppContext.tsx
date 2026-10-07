@@ -1864,11 +1864,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     liveProfile.coinBalance !== undefined ? liveProfile.coinBalance : u.coinBalance,
                   earningsCoins:
                     liveProfile.earningsCoins !== undefined ? liveProfile.earningsCoins : u.earningsCoins,
-                  onlineStatus: getUserCallStatus(u.id, u.onlineStatus),
+                  onlineStatus: getUserCallStatus(
+                    u.id,
+                    (liveProfile.onlineStatus as any) || u.onlineStatus || 'offline'
+                  ),
                 };
               });
             }
-            return [{ ...liveProfile, onlineStatus: getUserCallStatus(liveProfile.id, 'offline') }, ...prev];
+            return [
+              {
+                ...liveProfile,
+                onlineStatus: getUserCallStatus(
+                  liveProfile.id,
+                  (liveProfile.onlineStatus as any) || 'offline'
+                ),
+              },
+              ...prev,
+            ];
           });
         }
       } catch (err) {
@@ -2432,15 +2444,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   });
                   const next = prev.map((u) => {
                     if (u.id === currentUserIdRef.current) return u;
-                    // Presence channel only knows online membership; do not demote busy/in_call
-                    let base: 'online' | 'busy' | 'offline' | 'in_call' = onlineIds.has(u.id)
-                      ? 'online'
-                      : 'offline';
-                    if (
-                      !onlineIds.has(u.id) &&
-                      (u.onlineStatus === 'busy' || u.onlineStatus === 'in_call')
-                    ) {
+                    // Presence channel = realtime membership. Prefer busy/in_call from DB/heartbeat
+                    // when peer is still in the channel; only force offline when they leave AND
+                    // were not busy (busy is cleared by calls/sync + heartbeat map).
+                    let base: 'online' | 'busy' | 'offline' | 'in_call';
+                    if (onlineIds.has(u.id)) {
+                      base =
+                        u.onlineStatus === 'busy' || u.onlineStatus === 'in_call'
+                          ? u.onlineStatus
+                          : 'online';
+                    } else if (u.onlineStatus === 'busy' || u.onlineStatus === 'in_call') {
+                      // Keep busy briefly — HTTP heartbeat will authoritative-clear if stale
                       base = u.onlineStatus;
+                    } else {
+                      base = 'offline';
                     }
                     const live = getUserCallStatus(u.id, base);
                     if (u.onlineStatus !== live) {
@@ -2739,8 +2756,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 return [...remaining, mergedUser];
               });
             }
-          } else if (data.type === 'call:incoming') {
-            const { callId, callerId, receiverId } = data;
+          } else if (
+            data.type === 'call:incoming' ||
+            data.type === 'call:initiate' ||
+            data.type === 'call:ringing'
+          ) {
+            const callId =
+              String(data.callId || '').trim() ||
+              `call_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            const callerId = String(data.callerId || '').trim();
+            const receiverId = String(data.receiverId || '').trim();
+            if (!callerId || !receiverId) return;
             setActiveCall({
               id: callId,
               callerId,
@@ -2752,24 +2778,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               giftsSent: [],
               status: 'ringing',
             });
-            showToast('Incoming Video Call 📹', 'Incoming call ringing on your device!', 'info');
-          } else if (data.type === 'call:ringing') {
-            const { callId, callerId, receiverId } = data;
-            setActiveCall({
-              id: callId,
-              callerId,
-              receiverId,
-              startTime: Date.now(),
-              durationSeconds: 0,
-              coinsSpent: 0,
-              coinsEarned: 0,
-              giftsSent: [],
-              status: 'ringing',
-            });
+            setUsers((prev) =>
+              prev.map((u) =>
+                u.id === callerId || u.id === receiverId
+                  ? { ...u, onlineStatus: 'busy' as const }
+                  : u
+              )
+            );
+            if (data.type === 'call:incoming' || data.type === 'call:initiate') {
+              showToast('Incoming Video Call 📹', 'Incoming call ringing on your device!', 'info');
+            }
           } else if (data.type === 'call:accepted') {
             const { startTime } = data;
             billedMinutesRef.current.clear();
             burnInFlightRef.current.clear();
+            const accepted = activeCallRef.current;
             setActiveCall((prev) => {
               if (!prev) return null;
               return {
@@ -2779,12 +2802,47 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 billedMinutes: 0,
               };
             });
+            if (accepted) {
+              setUsers((prev) =>
+                prev.map((u) =>
+                  u.id === accepted.callerId || u.id === accepted.receiverId
+                    ? { ...u, onlineStatus: 'busy' as const }
+                    : u
+                )
+              );
+              authFetch('/api/calls/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  callId: accepted.id,
+                  callerId: accepted.callerId,
+                  receiverId: accepted.receiverId,
+                  status: 'active',
+                  startTime: new Date(startTime || Date.now()).toISOString(),
+                }),
+              }).catch(() => {});
+            }
             showToast('Call Connected! 📹', '1-on-1 WebRTC Video Call connected live.', 'success');
           } else if (data.type === 'call:ended') {
             billedMinutesRef.current.clear();
             burnInFlightRef.current.clear();
             const endedCallSnapshot = activeCallRef.current;
             setActiveCall(null);
+            const restoreIds = [
+              endedCallSnapshot?.callerId,
+              endedCallSnapshot?.receiverId,
+              data.callerId,
+              data.receiverId,
+            ]
+              .map((id) => String(id || '').trim())
+              .filter(Boolean);
+            if (restoreIds.length) {
+              setUsers((prev) =>
+                prev.map((u) =>
+                  restoreIds.includes(u.id) ? { ...u, onlineStatus: 'online' as const } : u
+                )
+              );
+            }
             if (data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE') {
               showToast('Call Ended', 'Call ended due to insufficient coin balance.', 'error');
             } else if (data.outcome === 'declined' || data.status === 'declined') {
@@ -3397,13 +3455,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       authFetch('/api/supabase/update-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'online', forceOnline: true }),
+      }).catch(() => {});
+      authFetch('/api/presence/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'online' }),
       }).catch(() => {});
+      signalSend({ type: 'presence:update', userId: activeId, status: 'online' });
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && token) {
         wsRef.current.send(JSON.stringify({ type: 'auth', accessToken: token, prevUserId: oldId }));
       } else {
-        // Kick WS connect once login flags + token are ready
+        // Kick WS / Realtime connect once login flags + token are ready
         setTimeout(() => wsConnectRef.current(), 0);
       }
     };
@@ -3447,19 +3511,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     localStorage.setItem('livecall_logged_in', 'false');
     localStorage.removeItem('livecall_current_user_id');
 
-    // Notify peers / other tabs
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      try {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'presence:update',
-            userId: prevId,
-            status: 'offline',
-          })
-        );
-      } catch {
-        /* ignore */
-      }
+    // Notify peers via Realtime or native WS
+    try {
+      signalSend({
+        type: 'presence:update',
+        userId: prevId,
+        status: 'offline',
+      });
+    } catch {
+      /* ignore */
+    }
+    try {
+      realtimeRef.current?.disconnect();
+    } catch {
+      /* ignore */
     }
 
     try {
@@ -3887,14 +3952,54 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return false;
     }
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && wsAuthenticatedRef.current) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'call:initiate',
-          callerId: currentUser.id,
-          receiverId: receiverId,
-        })
+    const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const initiatePayload = {
+      type: 'call:initiate',
+      callId,
+      callerId: currentUser.id,
+      receiverId,
+    };
+
+    const markBusyLocal = () => {
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === currentUser.id || u.id === receiverId
+            ? { ...u, onlineStatus: 'busy' as const }
+            : u
+        )
       );
+      setActiveCall({
+        id: callId,
+        callerId: currentUser.id,
+        receiverId,
+        startTime: Date.now(),
+        durationSeconds: 0,
+        coinsSpent: 0,
+        coinsEarned: 0,
+        giftsSent: [],
+        status: 'ringing',
+      });
+    };
+
+    const persistBusy = () => {
+      authFetch('/api/calls/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callId,
+          callerId: currentUser.id,
+          receiverId,
+          status: 'ringing',
+          startTime: new Date().toISOString(),
+        }),
+      }).catch(() => {});
+    };
+
+    if (isSignalOpen()) {
+      signalSend(initiatePayload);
+      // Caller ringing UX is local (Realtime has no Express echo of call:ringing)
+      markBusyLocal();
+      persistBusy();
       showToast(
         'Calling... 📞',
         `Ringing ${receiver.name}. Waiting for call acceptance...`,
@@ -3913,6 +4018,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
     window.setTimeout(() => {
       if (pendingCallReceiverRef.current !== receiverId) return;
+      // Retry once if signaling came up
+      if (isSignalOpen()) {
+        pendingCallReceiverRef.current = null;
+        startCall(receiverId);
+        return;
+      }
       pendingCallReceiverRef.current = null;
       showToast(
         'Call Failed',
@@ -3926,15 +4037,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const acceptCall = () => {
     if (!activeCall) return;
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'call:accept',
-          callId: activeCall.id,
-          userId: currentUser.id,
-        })
-      );
-    }
+    signalSend({
+      type: 'call:accepted',
+      callId: activeCall.id,
+      userId: currentUser.id,
+      callerId: activeCall.callerId,
+      receiverId: activeCall.receiverId,
+      toUserId: activeCall.callerId,
+      startTime: Date.now(),
+    });
 
     // Do NOT compute or apply coin burns here — caller-only server billing owns minute 1+
     setActiveCall((prev) => {
@@ -3948,6 +4059,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         coinsEarned: 0,
       };
     });
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.id === activeCall.callerId || u.id === activeCall.receiverId
+          ? { ...u, onlineStatus: 'busy' as const }
+          : u
+      )
+    );
+    authFetch('/api/calls/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        callId: activeCall.id,
+        callerId: activeCall.callerId,
+        receiverId: activeCall.receiverId,
+        status: 'active',
+        startTime: new Date().toISOString(),
+      }),
+    }).catch(() => {});
 
     const receiverUser = users.find((u) => u.id === activeCall.receiverId);
     const receiverName = receiverUser ? receiverUser.name : 'Creator';
@@ -3969,18 +4098,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const wsType = isCaller ? 'call:cancel' : 'call:reject';
     const reason = isCaller ? 'Caller hangup' : 'Receiver reject';
     const endNow = Date.now();
+    const peerId = isCaller ? rejectedCall.receiverId : rejectedCall.callerId;
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: wsType,
-          callId: rejectedCall.id,
-          userId: currentUser.id,
-          outcome,
-          reason,
-        })
-      );
-    }
+    signalSend({
+      type: wsType === 'call:cancel' ? 'call:ended' : 'call:ended',
+      callId: rejectedCall.id,
+      userId: currentUser.id,
+      callerId: rejectedCall.callerId,
+      receiverId: rejectedCall.receiverId,
+      toUserId: peerId,
+      outcome,
+      reason,
+      status: outcome,
+    });
 
     const caller = users.find((u) => u.id === rejectedCall.callerId);
     const receiver = users.find((u) => u.id === rejectedCall.receiverId);
@@ -4011,7 +4141,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
     }
 
-    // Sync call end to backend — persist missed/declined even at 0 duration
+    // Sync call end to backend — persist missed/declined and clear busy via presence
     authFetch('/api/calls/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4019,7 +4149,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         callId: rejectedCall.id,
         callerId: rejectedCall.callerId,
         receiverId: rejectedCall.receiverId,
-        status: 'ended',
+        status: outcome,
         outcome,
         endedBy: currentUser.id,
         reason,
@@ -4044,10 +4174,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       })
     );
 
-    // Update Supabase Database status to online
+    // Own row via client; peer cleared by calls/sync (service role)
     if (isSupabaseConfigured()) {
-      updateUserStatusInSupabase(rejectedCall.callerId, 'online').catch(() => {});
-      updateUserStatusInSupabase(rejectedCall.receiverId, 'online').catch(() => {});
+      updateUserStatusInSupabase(currentUser.id, 'online').catch(() => {});
     }
 
     setActiveCall(null);
@@ -4074,17 +4203,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         : 'Receiver reject'
       : undefined;
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: wsType,
-          callId: endedCall.id,
-          userId: currentUser.id,
-          outcome: ringingOutcome || 'completed',
-          reason,
-        })
-      );
-    }
+    const peerId = isCaller ? endedCall.receiverId : endedCall.callerId;
+    signalSend({
+      type: 'call:ended',
+      callId: endedCall.id,
+      userId: currentUser.id,
+      callerId: endedCall.callerId,
+      receiverId: endedCall.receiverId,
+      toUserId: peerId,
+      outcome: ringingOutcome || 'completed',
+      reason,
+      status: ringingOutcome || 'completed',
+    });
 
     // Reset caller and receiver status back to online in memory
     setUsers((prev) =>
@@ -4096,10 +4226,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       })
     );
 
-    // Update Supabase Database status to online immediately
+    // Own status via client; peer cleared via calls/sync (service role)
     if (isSupabaseConfigured()) {
-      updateUserStatusInSupabase(endedCall.callerId, 'online').catch(() => {});
-      updateUserStatusInSupabase(endedCall.receiverId, 'online').catch(() => {});
+      updateUserStatusInSupabase(currentUser.id, 'online').catch(() => {});
     }
 
     if (!wasRinging && endedCall.durationSeconds > 0) {

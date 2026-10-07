@@ -12,15 +12,50 @@ const {
   mapProfileRow,
 } = require('./helpers');
 
+/** Offline if no heartbeat / last_seen within this window (heartbeat is ~15s). */
+const PRESENCE_STALE_MS = 45_000;
+
+function normalizePresenceStatus(raw) {
+  const s = String(raw || 'offline').toLowerCase();
+  if (s === 'in_call') return 'busy';
+  if (s === 'online' || s === 'busy') return s;
+  return 'offline';
+}
+
 async function buildPresenceMap(client) {
   const presence = {};
-  const { data } = await client.from('profiles').select('id, online_status').limit(2000);
+  const { data } = await client
+    .from('profiles')
+    .select('id, online_status, last_seen_at')
+    .limit(2000);
+  const now = Date.now();
   for (const row of data || []) {
-    const s = String(row.online_status || 'offline').toLowerCase();
-    presence[row.id] =
-      s === 'online' || s === 'busy' || s === 'in_call' ? (s === 'in_call' ? 'busy' : s) : 'offline';
+    let status = normalizePresenceStatus(row.online_status);
+    if (status !== 'offline') {
+      const last = row.last_seen_at ? Date.parse(row.last_seen_at) : NaN;
+      if (!Number.isFinite(last) || now - last > PRESENCE_STALE_MS) {
+        status = 'offline';
+      }
+    }
+    presence[row.id] = status;
   }
   return presence;
+}
+
+async function setProfilesOnlineStatus(client, userIds, status) {
+  const ids = Array.from(
+    new Set((userIds || []).map((id) => String(id || '').trim()).filter(Boolean))
+  );
+  if (!ids.length) return;
+  const now = new Date().toISOString();
+  await client
+    .from('profiles')
+    .update({
+      online_status: status,
+      last_seen_at: now,
+      updated_at: now,
+    })
+    .in('id', ids);
 }
 
 async function handlePresence(path, req, res) {
@@ -51,24 +86,35 @@ async function handlePresence(path, req, res) {
     });
   }
   const onlineStatus = status === 'offline' ? 'offline' : 'online';
-  // Preserve busy if already in a call (heartbeat must not clear it)
+  // Preserve busy only while last_seen is fresh (active call heartbeat)
   const { data: current } = await auth.client
     .from('profiles')
-    .select('online_status')
+    .select('online_status, last_seen_at')
     .eq('id', auth.profileId)
     .maybeSingle();
   const prev = String((current && current.online_status) || '').toLowerCase();
+  const lastSeenMs = current?.last_seen_at ? Date.parse(current.last_seen_at) : NaN;
+  const busyFresh =
+    (prev === 'busy' || prev === 'in_call') &&
+    Number.isFinite(lastSeenMs) &&
+    Date.now() - lastSeenMs <= PRESENCE_STALE_MS;
   const writeStatus =
-    onlineStatus === 'online' && (prev === 'busy' || prev === 'in_call') ? 'busy' : onlineStatus;
+    onlineStatus === 'offline'
+      ? 'offline'
+      : onlineStatus === 'online' && busyFresh
+        ? 'busy'
+        : onlineStatus;
+  const nowIso = new Date().toISOString();
   await auth.client
     .from('profiles')
     .update({
       online_status: writeStatus,
-      last_seen_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      last_seen_at: nowIso,
+      updated_at: nowIso,
     })
     .eq('id', auth.profileId);
   const presence = await buildPresenceMap(auth.client);
+  // Own row is always fresh after this write
   presence[auth.profileId] = writeStatus === 'in_call' ? 'busy' : writeStatus;
   return send(res, 200, {
     success: true,
@@ -213,11 +259,14 @@ async function handleCalls(path, req, res) {
   if (path === 'calls/sync' && req.method === 'POST') {
     const body = await readJsonBody(req);
     const callId = String((body && (body.callId || body.id)) || randomUUID());
+    const callerId = String((body && body.callerId) || auth.profileId || '').trim();
+    const receiverId = String((body && body.receiverId) || '').trim();
+    const callStatus = String((body && body.status) || 'completed').toLowerCase();
     const payload = {
       id: callId,
-      caller_id: (body && body.callerId) || auth.profileId,
-      receiver_id: body && body.receiverId,
-      status: (body && body.status) || 'completed',
+      caller_id: callerId || auth.profileId,
+      receiver_id: receiverId || undefined,
+      status: callStatus,
       duration_seconds: Number((body && (body.durationSeconds || body.duration)) || 0),
       coins_spent: Number((body && body.coinsSpent) || 0),
       coins_earned: Number((body && body.coinsEarned) || 0),
@@ -228,7 +277,30 @@ async function handleCalls(path, req, res) {
     Object.keys(payload).forEach((k) => payload[k] == null && delete payload[k]);
     const { error } = await auth.client.from('call_logs').upsert(payload, { onConflict: 'id' });
     if (error) console.warn('[api/calls/sync]', error.message);
-    return send(res, 200, { success: true, callId });
+
+    // Authoritative presence: busy while ringing/active; online when call ends
+    const busyStatuses = new Set(['ringing', 'active', 'accepted', 'in_call', 'connecting']);
+    const endStatuses = new Set([
+      'completed',
+      'missed',
+      'declined',
+      'cancelled',
+      'canceled',
+      'failed',
+      'ended',
+      'rejected',
+    ]);
+    try {
+      if (busyStatuses.has(callStatus)) {
+        await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'busy');
+      } else if (endStatuses.has(callStatus)) {
+        await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'online');
+      }
+    } catch (e) {
+      console.warn('[api/calls/sync] presence update failed', e && e.message);
+    }
+
+    return send(res, 200, { success: true, callId, presenceUpdated: true });
   }
 
   if (path === 'calls/burn' && req.method === 'POST') {
@@ -718,23 +790,29 @@ async function handleSupabase(path, req, res) {
   if (path === 'supabase/update-status' && (req.method === 'POST' || req.method === 'PUT')) {
     const body = await readJsonBody(req);
     const status = String((body && body.status) || 'online').toLowerCase();
-    // Client sets online|offline only; preserve busy when already in a call
-    let onlineStatus = status === 'offline' ? 'offline' : status === 'busy' ? 'busy' : 'online';
-    if (onlineStatus === 'online') {
+    // Client sets online|offline; logout/offline always wins. Busy only via calls/sync.
+    let onlineStatus = status === 'offline' ? 'offline' : 'online';
+    if (onlineStatus === 'online' && !body?.forceOnline) {
       const { data: current } = await auth.client
         .from('profiles')
-        .select('online_status')
+        .select('online_status, last_seen_at')
         .eq('id', auth.profileId)
         .maybeSingle();
       const prev = String((current && current.online_status) || '').toLowerCase();
-      if (prev === 'busy' || prev === 'in_call') onlineStatus = 'busy';
+      const lastSeenMs = current?.last_seen_at ? Date.parse(current.last_seen_at) : NaN;
+      const busyFresh =
+        (prev === 'busy' || prev === 'in_call') &&
+        Number.isFinite(lastSeenMs) &&
+        Date.now() - lastSeenMs <= PRESENCE_STALE_MS;
+      if (busyFresh) onlineStatus = 'busy';
     }
+    const nowIso = new Date().toISOString();
     await auth.client
       .from('profiles')
       .update({
         online_status: onlineStatus,
-        last_seen_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        last_seen_at: nowIso,
+        updated_at: nowIso,
       })
       .eq('id', auth.profileId);
     return send(res, 200, { success: true, userId: auth.profileId, status: onlineStatus });
@@ -759,15 +837,16 @@ async function handleSupabase(path, req, res) {
   }
 
   if (path === 'supabase/user-statuses' && req.method === 'GET') {
+    const presence = await buildPresenceMap(auth.client);
     const { data, error } = await auth.client
       .from('profiles')
       .select('id, online_status, last_seen_at')
       .limit(1000);
     if (error) return send(res, 500, { success: false, error: error.message });
-    // Client expects statuses[] with { id, online_status }
+    // Client expects statuses[] with { id, online_status } — apply stale-offline rule
     const statuses = (data || []).map((row) => ({
       id: row.id,
-      online_status: row.online_status || 'offline',
+      online_status: presence[row.id] || 'offline',
       last_seen_at: row.last_seen_at,
     }));
     return send(res, 200, { success: true, statuses });

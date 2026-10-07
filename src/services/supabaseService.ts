@@ -514,14 +514,19 @@ export async function updateUserStatusInSupabase(
   // 1. Direct client-side Supabase update if configured
   if (isSupabaseConfigured() && userId) {
     try {
+      const patch = {
+        online_status: status,
+        last_seen_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
       const { error: byIdError } = await (supabase
         .from('profiles') as any)
-        .update({ online_status: status })
+        .update(patch)
         .eq('id', userId);
 
       const { error: byAuthError } = await (supabase
         .from('profiles') as any)
-        .update({ online_status: status })
+        .update(patch)
         .eq('auth_id', userId);
 
       if (!byIdError || !byAuthError) {

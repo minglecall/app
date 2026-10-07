@@ -183,7 +183,22 @@ async function requireAuth(req) {
       error: { message: 'Supabase not configured', code: 'ENV' },
     };
   }
-  const token = bearer(req);
+  let token = bearer(req);
+  // sendBeacon cannot set Authorization — allow accessToken in JSON body (cached on req.body)
+  if (!token) {
+    try {
+      const body = await readJsonBody(req);
+      if (body && typeof body === 'object') {
+        req.body = body;
+        const fromBody = body.accessToken || body.access_token;
+        if (typeof fromBody === 'string' && fromBody.trim()) {
+          token = fromBody.trim();
+        }
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
   if (!token) {
     return {
       ok: false,

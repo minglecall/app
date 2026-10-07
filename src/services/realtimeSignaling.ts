@@ -109,13 +109,16 @@ export class RealtimeSignaling {
     if (!this.connected || !this.userChannel) return false;
     const type = String(payload.type || '');
 
-    // Route directed events to recipient user channel
+    // Route directed events to recipient user channel (prefer explicit toUserId)
     const targetId =
-      payload.receiverId ||
       payload.toUserId ||
       payload.targetUserId ||
-      payload.userId ||
-      payload.calleeId;
+      payload.calleeId ||
+      (type === 'call:accept' || type === 'call:accepted' || type === 'call:reject' || type === 'call:end'
+        ? payload.callerId
+        : null) ||
+      payload.receiverId ||
+      payload.userId;
 
     try {
       if (
@@ -138,12 +141,21 @@ export class RealtimeSignaling {
       }
 
       if (type === 'presence:update' || type === 'heartbeat' || type === 'user:update') {
-        await this.presenceChannel?.track({
-          userId: this.profileId,
-          online_at: new Date().toISOString(),
-          status: payload.status || 'online',
-          ...(payload.user ? { user: payload.user } : {}),
-        });
+        const nextStatus = String(payload.status || 'online').toLowerCase();
+        if (nextStatus === 'offline') {
+          try {
+            await this.presenceChannel?.untrack();
+          } catch {
+            /* ignore */
+          }
+        } else {
+          await this.presenceChannel?.track({
+            userId: this.profileId,
+            online_at: new Date().toISOString(),
+            status: nextStatus === 'busy' || nextStatus === 'in_call' ? 'busy' : 'online',
+            ...(payload.user ? { user: payload.user } : {}),
+          });
+        }
         await this.presenceChannel?.send({
           type: 'broadcast',
           event: 'signal',
@@ -165,15 +177,28 @@ export class RealtimeSignaling {
   }
 
   disconnect() {
-    if (this.userChannel) {
-      supabase.removeChannel(this.userChannel);
-      this.userChannel = null;
-    }
-    if (this.presenceChannel) {
-      supabase.removeChannel(this.presenceChannel);
-      this.presenceChannel = null;
-    }
+    const presence = this.presenceChannel;
+    const user = this.userChannel;
+    this.presenceChannel = null;
+    this.userChannel = null;
     this.connected = false;
+    void (async () => {
+      try {
+        if (presence) await presence.untrack();
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (presence) await supabase.removeChannel(presence);
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (user) await supabase.removeChannel(user);
+      } catch {
+        /* ignore */
+      }
+    })();
   }
 }
 
