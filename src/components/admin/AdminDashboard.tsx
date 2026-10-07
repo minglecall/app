@@ -698,7 +698,7 @@ export const AdminDashboard: React.FC = () => {
             }`}
           >
             <Database className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Supabase & R2 Storage</span>
+            <span>Settings</span>
           </button>
           <button
             onClick={() => setActiveSubTab('api-health')}
@@ -3437,9 +3437,10 @@ export const AdminDashboard: React.FC = () => {
       {activeSubTab === 'creator-ops' && <AdminCreatorTargetConfig />}
       {activeSubTab === 'finance-module' && <AdminFinancialModule />}
 
-      {/* Sub-Tab 7: Supabase PostgreSQL & Cloudflare R2 Infrastructure Management */}
+      {/* Settings: database, R2, moderation, features, schema */}
       {activeSubTab === 'infra' && <AdminDatabaseStorageConfig />}
       {activeSubTab === 'api-health' && <AdminApiHealthPanel />}
+      {/* Email: OTP / transactional templates, policy, logs */}
       {activeSubTab === 'email' && <AdminEmailPanel />}
 
       {/* Manual Coin Addition Modal */}

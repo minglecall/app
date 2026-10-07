@@ -13,6 +13,9 @@ const {
   getEmailEnvStatus,
   getEmailPolicy,
   saveEmailPolicy,
+  getEmailTemplates,
+  saveEmailTemplates,
+  DEFAULT_EMAIL_TEMPLATES,
   testEmailConnection,
   sendTransactionalEmail,
   isSmtpConfigured,
@@ -124,6 +127,7 @@ async function handleAdmin(path, req, res) {
     const client = auth.client || createServiceClient();
     const env = getEmailEnvStatus();
     const policy = await getEmailPolicy(client);
+    const templates = await getEmailTemplates(client);
     let logs = [];
     try {
       const { data } = await client
@@ -142,6 +146,8 @@ async function handleAdmin(path, req, res) {
       data: {
         env,
         policy,
+        templates,
+        defaults: DEFAULT_EMAIL_TEMPLATES,
         logs,
         configured: isSmtpConfigured(),
       },
@@ -187,6 +193,25 @@ async function handleAdmin(path, req, res) {
       return send(res, 500, {
         success: false,
         error: { message: (e && e.message) || 'Failed to save email policy', code: 'SAVE_FAILED' },
+      });
+    }
+  }
+
+  if (path === 'admin/email/templates' && req.method === 'POST') {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const body = await readJsonBody(req);
+    try {
+      const templates = await saveEmailTemplates(auth.client, body && body.templates ? body.templates : body);
+      return send(res, 200, {
+        success: true,
+        data: { templates },
+        message: 'Email templates saved. OTP and transactional emails will use these.',
+      });
+    } catch (e) {
+      return send(res, 500, {
+        success: false,
+        error: { message: (e && e.message) || 'Failed to save email templates', code: 'SAVE_FAILED' },
       });
     }
   }

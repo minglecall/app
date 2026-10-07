@@ -408,6 +408,98 @@ const DEFAULT_EMAIL_POLICY = {
   emailShowOtpFallback: false,
 };
 
+const DEFAULT_OTP_HTML =
+  '<p>Hello <strong>{{name}}</strong>,</p><p>Your 6-digit OTP is:</p><p style="font-size:28px;letter-spacing:6px;font-weight:800">{{otp}}</p><p>Valid for 10 minutes.</p><p><a href="{{link}}">Confirm email</a></p>';
+
+const DEFAULT_EMAIL_TEMPLATES = {
+  otp_register: {
+    subject: 'Your 6-Digit Verification Code: {{otp}} - MingleCall',
+    html: DEFAULT_OTP_HTML,
+  },
+  otp_signin: {
+    subject: 'Your sign-in code: {{otp}} - MingleCall',
+    html: DEFAULT_OTP_HTML,
+  },
+  password_reset: {
+    subject: 'Password reset code: {{otp}} - MingleCall',
+    html: DEFAULT_OTP_HTML,
+  },
+  account_create: {
+    subject: 'Your MingleCall account is ready',
+    html: '<p>Hello <strong>{{name}}</strong>,</p><p>Your account (<strong>{{email}}</strong>) was created. Sign in with the password you were given.</p>',
+  },
+  account_delete: {
+    subject: 'Your MingleCall account was deleted',
+    html: '<p>Hello <strong>{{name}}</strong>,</p><p>Your account (<strong>{{email}}</strong>) has been permanently deleted.</p>',
+  },
+  connection_test: {
+    subject: 'MingleCall email connection test ({{otp}})',
+    html: '<p>Hello <strong>{{name}}</strong>,</p><p>This is a connection test from the Admin Email tab.</p><p>Test code: <strong>{{otp}}</strong></p>',
+  },
+};
+
+function parseEmailTemplatesJson(raw) {
+  const base = JSON.parse(JSON.stringify(DEFAULT_EMAIL_TEMPLATES));
+  if (!raw || typeof raw !== 'string' || !String(raw).trim()) return base;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return base;
+    Object.keys(DEFAULT_EMAIL_TEMPLATES).forEach((key) => {
+      const row = parsed[key];
+      if (row && typeof row === 'object') {
+        if (typeof row.subject === 'string' && row.subject.trim()) base[key].subject = row.subject;
+        if (typeof row.html === 'string' && row.html.trim()) base[key].html = row.html;
+      }
+    });
+  } catch (e) {
+    // keep defaults
+  }
+  return base;
+}
+
+function renderEmailTemplate(template, vars) {
+  const replace = (input) =>
+    String(input || '')
+      .replace(/\{\{\s*name\s*\}\}/gi, (vars && vars.name) || 'User')
+      .replace(/\{\{\s*otp\s*\}\}/gi, (vars && vars.otp) || '')
+      .replace(/\{\{\s*email\s*\}\}/gi, (vars && vars.email) || '')
+      .replace(/\{\{\s*link\s*\}\}/gi, (vars && vars.link) || '#');
+  return {
+    subject: replace(template && template.subject),
+    html: replace(template && template.html),
+  };
+}
+
+async function getEmailTemplates(client) {
+  if (!client) return parseEmailTemplatesJson('');
+  try {
+    const { data } = await client
+      .from('system_configs')
+      .select('email_templates_json')
+      .eq('id', 'default')
+      .maybeSingle();
+    return parseEmailTemplatesJson(data && data.email_templates_json);
+  } catch (e) {
+    console.warn('[email] getEmailTemplates notice:', e && e.message);
+    return parseEmailTemplatesJson('');
+  }
+}
+
+async function saveEmailTemplates(client, templates) {
+  if (!client) throw new Error('Supabase not configured');
+  const merged = parseEmailTemplatesJson(JSON.stringify(templates || {}));
+  const { error } = await client.from('system_configs').upsert(
+    {
+      id: 'default',
+      email_templates_json: JSON.stringify(merged),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'id' }
+  );
+  if (error) throw new Error(error.message);
+  return merged;
+}
+
 async function getEmailPolicy(client) {
   const out = { ...DEFAULT_EMAIL_POLICY };
   if (!client) return out;
@@ -692,17 +784,34 @@ async function dispatchEmailViaEnv({ to, name, subject, html, purpose, meta }) {
   }
 }
 
-async function sendOtpEmailVercel({ to, name, otpCode }) {
+async function sendOtpEmailVercel({ to, name, otpCode, confirmationUrl, templateKey }) {
   const display = name || 'User';
-  const subject = 'Your LiveCall verification code';
-  const html = `<p>Hello <strong>${display}</strong>,</p><p>Your 6-digit OTP is:</p><p style="font-size:28px;letter-spacing:6px;font-weight:800">${otpCode}</p><p>Valid for 10 minutes.</p>`;
-  return dispatchEmailViaEnv({
-    to,
+  const cleanTo = String(to || '')
+    .trim()
+    .toLowerCase();
+  const client = createServiceClient();
+  const templates = await getEmailTemplates(client);
+  const key = templateKey && templates[templateKey] ? templateKey : 'otp_register';
+  const appUrl =
+    clean(process.env.APP_URL) ||
+    clean(process.env.VITE_APP_URL) ||
+    'https://minglecall.com';
+  const link =
+    confirmationUrl ||
+    `${appUrl}/?auth_verify=1&email=${encodeURIComponent(cleanTo)}&code=${otpCode}`;
+  const rendered = renderEmailTemplate(templates[key], {
     name: display,
-    subject,
-    html,
-    purpose: 'otp_register',
-    meta: { kind: 'otp' },
+    otp: String(otpCode || ''),
+    email: cleanTo,
+    link,
+  });
+  return dispatchEmailViaEnv({
+    to: cleanTo,
+    name: display,
+    subject: rendered.subject,
+    html: rendered.html,
+    purpose: key,
+    meta: { kind: 'otp', templateKey: key },
   });
 }
 
@@ -765,11 +874,19 @@ async function testEmailConnection({ to, name } = {}) {
 
   const display = name || 'Admin';
   const otp = generateSixDigitOtp();
+  const client = createServiceClient();
+  const templates = await getEmailTemplates(client);
+  const rendered = renderEmailTemplate(templates.connection_test, {
+    name: display,
+    otp,
+    email: dest,
+    link: clean(process.env.APP_URL) || 'https://minglecall.com',
+  });
   const result = await dispatchEmailViaEnv({
     to: dest,
     name: display,
-    subject: `LiveCall email connection test (${otp})`,
-    html: `<p>Hello <strong>${display}</strong>,</p><p>This is a connection test from the Admin Email tab.</p><p>Test code: <strong>${otp}</strong></p><p>Credentials were loaded from server environment variables.</p>`,
+    subject: rendered.subject,
+    html: rendered.html,
     purpose: 'test',
     meta: { kind: 'connection_test' },
   });
@@ -820,6 +937,11 @@ module.exports = {
   getEmailEnvStatus,
   getEmailPolicy,
   saveEmailPolicy,
+  getEmailTemplates,
+  saveEmailTemplates,
+  parseEmailTemplatesJson,
+  renderEmailTemplate,
+  DEFAULT_EMAIL_TEMPLATES,
   logEmailDispatch,
   testEmailConnection,
   DEFAULT_EMAIL_POLICY,

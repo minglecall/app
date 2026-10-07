@@ -3,6 +3,7 @@
  */
 const {
   send,
+  clean,
   readJsonBody,
   createServiceClient,
   isValidEmail,
@@ -13,6 +14,8 @@ const {
   isTeamLeaderRole,
   isAdminRole,
   getEmailPolicy,
+  getEmailTemplates,
+  renderEmailTemplate,
   sendTransactionalEmail,
 } = require('./helpers');
 
@@ -311,12 +314,19 @@ async function handleTeamleader(path, req, res) {
       try {
         const policy = await getEmailPolicy(client);
         if (policy.emailAccountCreateEnabled && email) {
+          const templates = await getEmailTemplates(client);
+          const rendered = renderEmailTemplate(templates.account_create, {
+            name,
+            email,
+            otp: '',
+            link: clean(process.env.APP_URL) || 'https://minglecall.com',
+          });
           await sendTransactionalEmail({
             to: email,
             name,
             purpose: 'account_create',
-            subject: 'Your LiveCall creator account is ready',
-            html: `<p>Hello <strong>${name}</strong>,</p><p>Your female creator account on LiveCall was created by your team leader. Sign in with <strong>${email}</strong> and the password you were given.</p>`,
+            subject: rendered.subject,
+            html: rendered.html,
             meta: { creatorId: authUserId, leaderId },
           });
         }

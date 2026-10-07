@@ -24,6 +24,10 @@ import { hardDeleteUserCompletely, cleanupOrphanAuthUsersAdmin } from '../userHa
 import { isR2Configured, updateR2RuntimeConfig } from '../r2Storage';
 import { requireAdmin, requireAuth } from '../middleware/auth';
 import { getPasswordPolicyError } from '../../shared/passwordPolicy';
+import {
+  DEFAULT_EMAIL_TEMPLATES,
+  parseEmailTemplatesJson,
+} from '../../shared/emailTemplates';
 
 /** Read ALLOW_FACTORY_RESET from live .env (so edits apply without full restart) + process.env. */
 function getAllowFactoryResetRaw(): string {
@@ -721,11 +725,12 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
         emailShowOtpFallback: Boolean(raw.showOtpInForm),
       };
       let logs: any[] = [];
+      let templates = parseEmailTemplatesJson('');
       if (client) {
         const { data: cfg } = await client
           .from('system_configs')
           .select(
-            'email_register_enabled, email_account_create_enabled, email_account_delete_enabled, allow_create_without_otp, email_show_otp_fallback, smtp_show_otp'
+            'email_register_enabled, email_account_create_enabled, email_account_delete_enabled, allow_create_without_otp, email_show_otp_fallback, smtp_show_otp, email_templates_json'
           )
           .eq('id', 'default')
           .maybeSingle();
@@ -737,6 +742,7 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
             allowCreateWithoutOtp: cfg.allow_create_without_otp ?? false,
             emailShowOtpFallback: cfg.email_show_otp_fallback ?? cfg.smtp_show_otp ?? false,
           };
+          templates = parseEmailTemplatesJson((cfg as any).email_templates_json || '');
         }
         const { data: logRows } = await client
           .from('email_dispatch_log')
@@ -770,9 +776,40 @@ export function createAdminRouter(ctx: ServerRuntime): Router {
               'Email credentials are loaded from environment variables (RESEND_API_KEY / SMTP_*).',
           },
           policy,
+          templates,
+          defaults: DEFAULT_EMAIL_TEMPLATES,
           logs,
           configured: Boolean(raw.configured),
         },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  router.post('/email/templates', requireAdmin, async (req, res) => {
+    try {
+      const client = getSupabaseAdmin();
+      if (!client) {
+        return res.status(503).json({ success: false, error: 'Supabase not configured' });
+      }
+      const incoming = req.body?.templates || req.body || {};
+      const templates = parseEmailTemplatesJson(JSON.stringify(incoming));
+      const { error } = await client.from('system_configs').upsert(
+        {
+          id: 'default',
+          email_templates_json: JSON.stringify(templates),
+          updated_at: new Date().toISOString(),
+        } as any,
+        { onConflict: 'id' }
+      );
+      if (error) {
+        return res.status(500).json({ success: false, error: error.message });
+      }
+      return res.json({
+        success: true,
+        data: { templates },
+        message: 'Email templates saved. OTP and transactional emails will use these.',
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });

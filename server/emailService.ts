@@ -2,6 +2,13 @@ import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import {
+  DEFAULT_EMAIL_TEMPLATES,
+  parseEmailTemplatesJson,
+  renderEmailTemplate,
+  type EmailTemplateKey,
+} from '../shared/emailTemplates';
+import { getSupabaseAdmin } from './supabaseAdmin';
 
 function hashOtp(code: string) {
   return crypto.createHash('sha256').update(String(code).trim()).digest('hex');
@@ -219,14 +226,31 @@ export function isSmtpConfigured(): boolean {
   return hasEnvSmtp || hasRuntimeSmtp || hasResend;
 }
 
+async function loadEmailTemplatesFromDb() {
+  try {
+    const client = getSupabaseAdmin();
+    if (!client) return DEFAULT_EMAIL_TEMPLATES;
+    const { data } = await client
+      .from('system_configs')
+      .select('email_templates_json')
+      .eq('id', 'default')
+      .maybeSingle();
+    return parseEmailTemplatesJson((data as any)?.email_templates_json);
+  } catch (e: any) {
+    console.warn('[Email Service] load templates notice:', e?.message || e);
+    return DEFAULT_EMAIL_TEMPLATES;
+  }
+}
+
 // Send Email containing BOTH 6-digit OTP code and Confirmation Link
 export async function sendOtpEmail(params: {
   to: string;
   name?: string;
   otpCode: string;
   confirmationUrl?: string;
+  templateKey?: EmailTemplateKey;
 }): Promise<{ success: boolean; delivered: boolean; message: string; otpCode?: string }> {
-  const { to, name = 'User', otpCode, confirmationUrl } = params;
+  const { to, name = 'User', otpCode, confirmationUrl, templateKey = 'otp_register' } = params;
   const cleanTo = to.trim().toLowerCase();
 
   // Save in server store
@@ -235,72 +259,16 @@ export async function sendOtpEmail(params: {
   const appUrl = (process.env.APP_URL || '').trim() || `http://localhost:${process.env.PORT || 3000}`;
   const directLink = confirmationUrl || `${appUrl}/?auth_verify=1&email=${encodeURIComponent(cleanTo)}&code=${otpCode}`;
 
-  const htmlContent = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Your Verification Code</title>
-</head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0f172a; color: #f8fafc;">
-  <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #0f172a; padding: 40px 16px;">
-    <tr>
-      <td align="center">
-        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 540px; background-color: #1e293b; border-radius: 16px; border: 1px solid #334155; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
-          <!-- Header Banner -->
-          <tr>
-            <td style="padding: 32px 32px 24px 32px; text-align: center; background: linear-gradient(135deg, #e11d48 0%, #be123c 100%);">
-              <h1 style="margin: 0; color: #ffffff; font-size: 26px; font-weight: 800; letter-spacing: -0.5px;">LiveCall Connect</h1>
-              <p style="margin: 8px 0 0 0; color: #ffe4e6; font-size: 14px; font-weight: 500;">Account Verification & Security</p>
-            </td>
-          </tr>
-
-          <!-- Body Content -->
-          <tr>
-            <td style="padding: 32px;">
-              <p style="margin: 0 0 16px 0; font-size: 16px; color: #e2e8f0; line-height: 24px;">
-                Hello <strong style="color: #ffffff;">${name}</strong>,
-              </p>
-              <p style="margin: 0 0 24px 0; font-size: 15px; color: #94a3b8; line-height: 22px;">
-                Thank you for joining LiveCall! Use your 6-digit OTP verification code below to verify your email address:
-              </p>
-
-              <!-- 6-DIGIT OTP CODE BOX -->
-              <div style="background-color: #0f172a; border: 2px dashed #f43f5e; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
-                <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: #fb7185; font-weight: 700; margin-bottom: 8px;">
-                  Your 6-Digit OTP Code
-                </div>
-                <div style="font-size: 36px; font-weight: 800; letter-spacing: 8px; color: #ffffff; font-family: 'Courier New', monospace; text-shadow: 0 0 12px rgba(244,63,94,0.4);">
-                  ${otpCode}
-                </div>
-                <div style="font-size: 12px; color: #64748b; margin-top: 8px;">
-                  Valid for 10 minutes &bull; Do not share with anyone
-                </div>
-              </div>
-
-              <!-- OPTIONAL INSTANT CONFIRMATION LINK -->
-              <div style="text-align: center; margin: 32px 0 16px 0;">
-                <p style="margin: 0 0 12px 0; font-size: 13px; color: #94a3b8;">
-                  Prefer not to type the code? Verify with one click:
-                </p>
-                <a href="${directLink}" style="display: inline-block; background-color: #f43f5e; color: #ffffff; font-weight: 600; font-size: 14px; text-decoration: none; padding: 12px 28px; border-radius: 8px; box-shadow: 0 4px 12px rgba(244,63,94,0.3);">
-                  Confirm Email Directly
-                </a>
-              </div>
-
-              <div style="border-top: 1px solid #334155; margin-top: 32px; padding-top: 20px; font-size: 12px; color: #64748b; line-height: 18px; text-align: center;">
-                If you did not request this verification, please safely ignore this email.
-              </div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
+  const templates = await loadEmailTemplatesFromDb();
+  const tpl = templates[templateKey] || templates.otp_register;
+  const rendered = renderEmailTemplate(tpl, {
+    name,
+    otp: otpCode,
+    email: cleanTo,
+    link: directLink,
+  });
+  const htmlContent = rendered.html;
+  const emailSubject = rendered.subject;
 
   const resendKey = runtimeSmtpConfig.resendApiKey || process.env.RESEND_API_KEY;
   const smtpHost = runtimeSmtpConfig.host || process.env.SMTP_HOST;
@@ -329,7 +297,7 @@ export async function sendOtpEmail(params: {
         body: JSON.stringify({
           from: resendSender,
           to: [cleanTo],
-          subject: `Your 6-Digit Verification Code: ${otpCode} - LiveCall`,
+          subject: emailSubject,
           html: htmlContent,
         }),
       });
@@ -368,7 +336,7 @@ export async function sendOtpEmail(params: {
           body: JSON.stringify({
             from: 'LiveCall <onboarding@resend.dev>',
             to: [cleanTo],
-            subject: `Your 6-Digit Verification Code: ${otpCode} - LiveCall`,
+            subject: emailSubject,
             html: htmlContent,
           }),
         });
@@ -446,7 +414,7 @@ export async function sendOtpEmail(params: {
         await transporter.sendMail({
           from: senderAddress,
           to: cleanTo,
-          subject: `Your 6-Digit Verification Code: ${otpCode} - LiveCall`,
+          subject: emailSubject,
           html: htmlContent,
         });
 
@@ -495,7 +463,7 @@ export async function sendOtpEmail(params: {
             await retryTransporter.sendMail({
               from: fallbackSender,
               to: cleanTo,
-              subject: `Your 6-Digit Verification Code: ${otpCode} - LiveCall`,
+              subject: emailSubject,
               html: htmlContent,
             });
 

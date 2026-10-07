@@ -3528,13 +3528,15 @@ CREATE TABLE IF NOT EXISTS public.auth_pending_signups (
 ALTER TABLE public.auth_pending_signups ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================================
--- EMAIL POLICY + DISPATCH LOG (Admin Email tab ó credentials stay in Vercel env)
+-- EMAIL POLICY + DISPATCH LOG (Admin Email tab ù credentials stay in Vercel env)
 -- ============================================================================
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS email_register_enabled BOOLEAN DEFAULT true;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS email_account_create_enabled BOOLEAN DEFAULT true;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS email_account_delete_enabled BOOLEAN DEFAULT false;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS allow_create_without_otp BOOLEAN DEFAULT false;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS email_show_otp_fallback BOOLEAN DEFAULT false;
+-- Admin Email tab templates (subject + html). Placeholders: {{name}}, {{otp}}, {{email}}, {{link}}
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS email_templates_json TEXT DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS public.email_dispatch_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3552,4 +3554,4 @@ CREATE INDEX IF NOT EXISTS idx_email_dispatch_log_created ON public.email_dispat
 CREATE INDEX IF NOT EXISTS idx_email_dispatch_log_recipient ON public.email_dispatch_log(recipient_email);
 ALTER TABLE public.email_dispatch_log ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "deny all email_dispatch_log" ON public.email_dispatch_log;
--- No anon/authenticated policies ó service_role only (admin APIs).
+-- No anon/authenticated policies ù service_role only (admin APIs).
