@@ -72,6 +72,7 @@ import {
   purgeAllProfilesFromSupabase,
   subscribeToRealtimeProfiles,
   subscribeToRealtimeChat,
+  subscribeToFriendRequests,
   fetchRecentMessagesForUser,
   fetchPayoutRequestsFromSupabase,
   upsertPayoutRequestToSupabase,
@@ -156,9 +157,11 @@ interface AppContextType {
   chatMessages: ChatMessage[];
   unreadMessagesCount: number;
   pendingFriendRequestsCount: number;
+  missedCallsCount: number;
   readMessageIds: string[];
   markChatAsRead: (otherUserId: string) => void;
   markAllChatsAsRead: () => void;
+  markCallLogsSeen: () => void;
   feedPosts: FeedPost[];
   callLogs: CallLogItem[];
   friendRequests: FriendRequest[];
@@ -463,6 +466,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => []);
 
   const [callLogs, setCallLogs] = useState<CallLogItem[]>(() => []);
+  const [callLogsSeenAt, setCallLogsSeenAt] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem('livecall_call_logs_seen_at');
+      const n = raw ? Number(raw) : 0;
+      return Number.isFinite(n) ? n : 0;
+    } catch {
+      return 0;
+    }
+  });
 
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(() => []);
 
@@ -718,13 +730,42 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Unread messages count for current user (DB is_read wins; readMessageIds is mirror cache)
   const unreadMessagesCount = chatMessages.filter(
-    (m) => m.receiverId === currentUser.id && m.isRead !== true && !readMessageIds.includes(m.id)
+    (m) =>
+      m.receiverId === currentUser.id &&
+      currentUser.id !== 'guest_user' &&
+      m.isRead !== true &&
+      !readMessageIds.includes(m.id)
   ).length;
 
   // Pending incoming friend requests count for current user
   const pendingFriendRequestsCount = friendRequests.filter(
-    (r) => r.receiverId === currentUser.id && r.status === 'pending'
+    (r) =>
+      r.receiverId === currentUser.id &&
+      currentUser.id !== 'guest_user' &&
+      r.status === 'pending'
   ).length;
+
+  const markCallLogsSeen = () => {
+    const now = Date.now();
+    setCallLogsSeenAt(now);
+    try {
+      localStorage.setItem('livecall_call_logs_seen_at', String(now));
+    } catch {
+      /* ignore */
+    }
+  };
+  const missedCallsCount =
+    currentUser.id === 'guest_user'
+      ? 0
+      : callLogs.filter((log) => {
+          const mine =
+            log.receiverId === currentUser.id || log.callerId === currentUser.id;
+          if (!mine) return false;
+          const st = String(log.status || '').toLowerCase();
+          if (st !== 'missed' && st !== 'declined') return false;
+          const ts = Number(log.endTime || log.startTime || 0);
+          return !callLogsSeenAt || (Number.isFinite(ts) && ts > callLogsSeenAt);
+        }).length;
 
   // Real-time signaling: Supabase Realtime on Vercel; WebSocket /ws for local Express
   const wsRef = useRef<WebSocket | null>(null);
@@ -1075,16 +1116,76 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     activeCallRef.current = activeCall;
   }, [activeCall]);
 
-  // Helper to ensure users who are actively in a call are consistently locked to 'in_call' across all presence updates
-  const getUserCallStatus = (uid: string, fallbackStatus: 'online' | 'busy' | 'offline' | 'in_call'): 'online' | 'busy' | 'offline' | 'in_call' => {
-    if (activeCallRef.current && (activeCallRef.current.callerId === uid || activeCallRef.current.receiverId === uid) && activeCallRef.current.status !== 'ended') {
-      return 'in_call';
+  // Local call lock → busy (matches DB/heartbeat vocabulary: online | busy | offline)
+  const getUserCallStatus = (
+    uid: string,
+    fallbackStatus: 'online' | 'busy' | 'offline' | 'in_call'
+  ): 'online' | 'busy' | 'offline' | 'in_call' => {
+    if (
+      activeCallRef.current &&
+      (activeCallRef.current.callerId === uid || activeCallRef.current.receiverId === uid) &&
+      activeCallRef.current.status !== 'ended'
+    ) {
+      return 'busy';
     }
-    if (adminActiveCallsRef.current.some((ac) => (ac.hostId === uid || ac.callerId === uid) && ac.status === 'active')) {
-      return 'in_call';
+    if (
+      adminActiveCallsRef.current.some(
+        (ac) => (ac.hostId === uid || ac.callerId === uid) && ac.status === 'active'
+      )
+    ) {
+      return 'busy';
     }
+    // Normalize legacy in_call from any payload to busy
+    if (fallbackStatus === 'in_call') return 'busy';
     return fallbackStatus;
   };
+
+  // Call lifecycle → local busy + DB sync + heartbeat refresh (call=busy; end handled in endCall)
+  useEffect(() => {
+    if (!isLoggedInRef.current || !currentUserIdRef.current) return;
+    if (!activeCall || activeCall.status === 'ended') return;
+    const { callerId, receiverId, id: callId, status } = activeCall;
+    setUsers((prev) => {
+      let changed = false;
+      const next = prev.map((u) => {
+        if (u.id !== callerId && u.id !== receiverId) return u;
+        if (u.onlineStatus === 'busy') return u;
+        changed = true;
+        return { ...u, onlineStatus: 'busy' as const };
+      });
+      return changed ? next : prev;
+    });
+    authFetch('/api/calls/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        callId,
+        callerId,
+        receiverId,
+        status: status === 'active' ? 'active' : 'ringing',
+        startTime: new Date(activeCall.startTime || Date.now()).toISOString(),
+      }),
+    }).catch(() => {});
+    authFetch('/api/presence/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'online' }),
+    })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (!data?.success || !data.presence) return;
+        const presence = data.presence as Record<string, 'online' | 'busy' | 'offline'>;
+        setUsers((prev) =>
+          prev.map((u) => {
+            if (!(u.id in presence)) return u;
+            const live = getUserCallStatus(u.id, presence[u.id] || 'offline');
+            return u.onlineStatus === live ? u : { ...u, onlineStatus: live };
+          })
+        );
+      })
+      .catch(() => {});
+  }, [activeCall?.id, activeCall?.status]);
 
   // Unified helper to calculate effective coin burn rate per minute for any host/caller pair
   const getEffectiveCallRate = (hostId?: string, callerId?: string): number => {
@@ -2327,20 +2428,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             setUsers((prev) => {
               let hasChanged = false;
               const next = prev.map((u) => {
-                if (u.id === currentUserIdRef.current && isLoggedInRef.current) {
-                  const liveCallStatus = getUserCallStatus(
-                    u.id,
-                    data.status || presence[u.id] || myStatus
-                  );
-                  if (u.onlineStatus !== liveCallStatus) {
-                    hasChanged = true;
-                    return { ...u, onlineStatus: liveCallStatus };
-                  }
-                  return u;
-                }
-                // Heartbeat map is authority. Missing key ⇒ keep previous (avoid mass-offline flicker).
-                if (!(u.id in presence)) return u;
-                const liveStatus = getUserCallStatus(u.id, presence[u.id] || 'offline');
+                // Heartbeat presence map (DB + open call_logs → busy) is the authority
+                if (!(u.id in presence) && u.id !== currentUserIdRef.current) return u;
+                const fromMap =
+                  u.id === currentUserIdRef.current
+                    ? data.status || presence[u.id] || myStatus
+                    : presence[u.id] || 'offline';
+                const liveStatus = getUserCallStatus(u.id, fromMap);
                 if (u.onlineStatus !== liveStatus) {
                   hasChanged = true;
                   return { ...u, onlineStatus: liveStatus };
@@ -3145,16 +3239,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 return next;
               });
             }
-          } else if (data.type === 'friend_request:incoming') {
-            if (data.request) {
+          } else if (data.type === 'friend_request:incoming' || data.type === 'friend_request:send') {
+            // Express remaps send→incoming; Realtime may deliver either
+            const req = data.request;
+            if (req?.id) {
               setFriendRequests((prev) => {
-                if (prev.some((r) => r.id === data.request.id)) return prev;
-                return [data.request, ...prev];
+                if (prev.some((r) => r.id === req.id)) return prev;
+                return [req, ...prev];
               });
-              if (data.request.receiverId === currentUserIdRef.current) {
+              if (req.receiverId === currentUserIdRef.current) {
                 showToast(
                   '🌸 Friend Request Received!',
-                  `${data.request.senderName} sent you a Friend Request! Accept to unlock discounted Friend Call Rates.`,
+                  `${req.senderName || 'Someone'} sent you a Friend Request! Accept to unlock discounted Friend Call Rates.`,
                   'success'
                 );
               }
@@ -3273,14 +3369,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     }, 5000);
 
-    // 2. HTTP presence — always on Realtime/Vercel (DB map is source of truth for busy + peers);
-    //    native WS only falls back when the socket is down (WS broadcasts presence otherwise).
+    // 2. HTTP presence — DB + open call_logs → busy/online/offline for discovery/chat/profile
     presenceSyncTimer = setInterval(() => {
       if (isResettingRef.current) return;
       if (!isSignalOpen() || shouldUseRealtimeSignaling()) {
         syncPresenceDirect();
       }
-    }, 15000);
+    }, 10000);
 
     // 3. User directory refresh from server (authoritative listings)
     userDirectoryTimer = setInterval(() => {
@@ -3288,11 +3383,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       syncUserDirectory();
     }, 30000);
 
-    // 4. Push own status to Supabase periodically; friend requests hydrate from DB
+    // 4. Friend requests + social hydrate (badge counts) — poll often enough for pending badges
     supabaseStatusTimer = setInterval(() => {
       if (isResettingRef.current) return;
       syncSupabaseStatusCycle();
-    }, 20000);
+    }, 12000);
 
     // Cross-tab Synchronization using BroadcastChannel (presence only; no social data dumps)
     let broadcastChannel: BroadcastChannel | null = null;
@@ -3361,6 +3456,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Supabase Realtime channel subscription for multi-device broadcast redundancy
     let unsubscribeSupabaseChat = () => { };
+    let unsubscribeFriendRequests = () => { };
     if (isSupabaseConfigured()) {
       unsubscribeSupabaseChat = subscribeToRealtimeChat(
         currentUserId,
@@ -3407,6 +3503,46 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           );
         }
       );
+      unsubscribeFriendRequests = subscribeToFriendRequests(currentUserId, (row) => {
+        setFriendRequests((prev) => {
+          const idx = prev.findIndex((r) => r.id === row.id);
+          const status = (row.status || 'pending') as FriendRequest['status'];
+          if (idx === -1) {
+            const sender = usersRef.current.find((u) => u.id === row.senderId);
+            const receiver = usersRef.current.find((u) => u.id === row.receiverId);
+            return [
+              {
+                id: row.id,
+                senderId: row.senderId,
+                senderName: sender?.name || 'User',
+                senderAvatar: sender?.avatarUrl || '',
+                receiverId: row.receiverId,
+                receiverName: receiver?.name || 'User',
+                receiverAvatar: receiver?.avatarUrl || '',
+                status,
+                timestamp: row.createdAt || new Date().toISOString(),
+              },
+              ...prev,
+            ];
+          }
+          const next = [...prev];
+          next[idx] = { ...next[idx], status };
+          return next;
+        });
+        // Keep list authoritative via API hydrate as well
+        void authFetch('/api/v1/friends/requests')
+          .then(async (res) => {
+            if (!res.ok) return;
+            const frJson = await res.json().catch(() => null);
+            if (frJson?.success && Array.isArray(frJson.data?.requests)) {
+              setFriendRequests(frJson.data.requests as FriendRequest[]);
+            }
+            if (Array.isArray(frJson?.data?.friendIds)) {
+              setFriends(frJson.data.friendIds.map(String));
+            }
+          })
+          .catch(() => {});
+      });
     }
 
     return () => {
@@ -3435,6 +3571,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       realtimeRef.current = null;
       unsubscribeSupabaseChat();
+      unsubscribeFriendRequests();
     };
   }, [currentUserId, isLoggedIn]);
 
@@ -4323,10 +4460,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       })
     );
 
-    // Own row via client; peer cleared by calls/sync (service role)
-    if (isSupabaseConfigured()) {
-      updateUserStatusInSupabase(currentUser.id, 'online').catch(() => {});
-    }
+    // Presence: calls/sync already set online in DB; refresh heartbeat map for all clients
+    authFetch('/api/presence/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'online' }),
+    })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (data?.success && data.presence) {
+          const presence = data.presence as Record<string, 'online' | 'busy' | 'offline'>;
+          setUsers((prev) =>
+            prev.map((u) => {
+              if (!(u.id in presence)) return u;
+              return { ...u, onlineStatus: getUserCallStatus(u.id, presence[u.id] || 'offline') };
+            })
+          );
+        }
+      })
+      .catch(() => {});
 
     setActiveCall(null);
     showToast(
@@ -4378,10 +4531,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       })
     );
 
-    // Own status via client; peer cleared via calls/sync (service role)
-    if (isSupabaseConfigured()) {
-      updateUserStatusInSupabase(currentUser.id, 'online').catch(() => {});
-    }
+    // Presence: calls/sync writes online; heartbeat refreshes busy/online for everyone
+    authFetch('/api/presence/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'online' }),
+    })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (data?.success && data.presence) {
+          const presence = data.presence as Record<string, 'online' | 'busy' | 'offline'>;
+          setUsers((prev) =>
+            prev.map((u) => {
+              if (!(u.id in presence)) return u;
+              return { ...u, onlineStatus: getUserCallStatus(u.id, presence[u.id] || 'offline') };
+            })
+          );
+        }
+      })
+      .catch(() => {});
 
     if (!wasRinging && endedCall.durationSeconds > 0) {
       recordVideoCallDuration(endedCall.durationSeconds);
@@ -5138,19 +5307,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         showToast('Message failed', msg, 'error');
         return { ok: false, clientTempId };
       }
+      const durable: ChatMessage = {
+        ...serverMsg,
+        isRead: Boolean(serverMsg.isRead),
+        createdAt: serverMsg.createdAt || serverMsg.timestamp,
+        timestamp: serverMsg.createdAt || serverMsg.timestamp,
+        clientTempId,
+      };
       setChatMessages((prev) => {
         const withoutTemp = prev.filter((m) => m.id !== clientTempId && m.id !== serverMsg.id);
-        return [
-          ...withoutTemp,
-          {
-            ...serverMsg,
-            isRead: Boolean(serverMsg.isRead),
-            createdAt: serverMsg.createdAt || serverMsg.timestamp,
-            timestamp: serverMsg.createdAt || serverMsg.timestamp,
-            clientTempId,
-          },
-        ];
+        return [...withoutTemp, durable];
       });
+      // Push to peer inbox for badge (Realtime/Vercel; postgres_changes is backup)
+      if (receiverId && receiverId !== currentUser.id) {
+        void signalSendAsync({
+          type: 'chat:message',
+          toUserId: receiverId,
+          receiverId,
+          message: { ...durable, isRead: false },
+        });
+      }
       return { ok: true, clientTempId };
     } catch (err: any) {
       console.warn('[sendMessage] failed:', err);
@@ -6853,14 +7029,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       applyFriendsServerPayload(json.data);
       const newRequest = json.data?.request as FriendRequest | undefined;
 
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && newRequest) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'friend_request:send',
-            receiverId: targetUser.id,
-            request: newRequest,
-          })
-        );
+      if (newRequest) {
+        // Notify peer on Realtime (Vercel) or native WS — must use incoming type for badge toast
+        void signalSendAsync({
+          type: 'friend_request:incoming',
+          toUserId: targetUser.id,
+          receiverId: targetUser.id,
+          request: {
+            ...newRequest,
+            senderName: currentUser.name,
+            senderAvatar: currentUser.avatarUrl,
+            receiverName: targetUser.name,
+            receiverAvatar: targetUser.avatarUrl,
+          },
+        });
       }
 
       showToast(
@@ -6899,15 +7081,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       applyFriendsServerPayload(json.data);
       const accepted = (json.data?.request as FriendRequest | undefined) || targetReq;
 
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && accepted) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'friend_request:accept',
-            requestId,
-            senderId: accepted.senderId,
-            receiverId: accepted.receiverId,
-          })
-        );
+      if (accepted) {
+        const peerId =
+          accepted.senderId === currentUser.id ? accepted.receiverId : accepted.senderId;
+        void signalSendAsync({
+          type: 'friend_request:accepted',
+          toUserId: peerId,
+          requestId,
+          senderId: accepted.senderId,
+          receiverId: accepted.receiverId,
+        });
       }
 
       const otherName =
@@ -6948,15 +7131,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       applyFriendsServerPayload(json.data);
       const declined = (json.data?.request as FriendRequest | undefined) || targetReq;
 
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && declined) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'friend_request:decline',
-            requestId,
-            senderId: declined.senderId,
-            receiverId: declined.receiverId,
-          })
-        );
+      if (declined) {
+        const peerId =
+          declined.senderId === currentUser.id ? declined.receiverId : declined.senderId;
+        void signalSendAsync({
+          type: 'friend_request:declined',
+          toUserId: peerId,
+          requestId,
+          senderId: declined.senderId,
+          receiverId: declined.receiverId,
+        });
       }
 
       showToast(
@@ -6992,15 +7176,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       applyFriendsServerPayload(json.data);
 
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'friend_request:remove',
-            userA: currentUser.id,
-            userB: userId,
-          })
-        );
-      }
+      void signalSendAsync({
+        type: 'friend_request:removed',
+        toUserId: userId,
+        userA: currentUser.id,
+        userB: userId,
+      });
 
       const targetUser = users.find((u) => u.id === userId);
       const targetName = targetUser ? targetUser.name : 'User';
@@ -8609,6 +8790,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         chatMessages,
         unreadMessagesCount,
         pendingFriendRequestsCount,
+        missedCallsCount,
+        markCallLogsSeen,
         readMessageIds,
         markChatAsRead,
         markAllChatsAsRead,

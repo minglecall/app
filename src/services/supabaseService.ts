@@ -509,44 +509,40 @@ export async function updateUserStatusInSupabase(
   userId: string,
   status: OnlineStatus
 ): Promise<boolean> {
-  let clientSuccess = false;
+  // Busy is server-derived from open call_logs — never write busy/in_call from the client.
+  // Prefer heartbeat / update-status APIs so online cannot wipe an active-call busy state.
+  const normalized: OnlineStatus =
+    status === 'in_call' || status === 'busy' ? 'online' : status;
 
-  // 1. Direct client-side Supabase update if configured
-  if (isSupabaseConfigured() && userId) {
-    try {
-      const patch = {
-        online_status: status,
-        last_seen_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      const { error: byIdError } = await (supabase
-        .from('profiles') as any)
-        .update(patch)
-        .eq('id', userId);
-
-      const { error: byAuthError } = await (supabase
-        .from('profiles') as any)
-        .update(patch)
-        .eq('auth_id', userId);
-
-      if (!byIdError || !byAuthError) {
-        clientSuccess = true;
-      }
-    } catch (err) {
-      console.warn('Direct Supabase status update exception:', err);
-    }
-  }
-
-  // 2. Also dispatch to server endpoint for guaranteed persistence via Supabase Admin
   try {
-    authFetch('/api/supabase/update-status', {
+    const res = await authFetch('/api/presence/heartbeat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, status }),
-    }).catch(() => { });
-  } catch (e) { }
+      body: JSON.stringify({
+        userId,
+        status: normalized === 'offline' ? 'offline' : 'online',
+      }),
+    });
+    if (res.ok) return true;
+  } catch (e) {
+    console.warn('presence heartbeat status update failed:', e);
+  }
 
-  return clientSuccess;
+  try {
+    const res = await authFetch('/api/supabase/update-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        status: normalized === 'offline' ? 'offline' : 'online',
+        // Do not forceOnline — server keeps busy when call_logs still open
+      }),
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn('update-status fallback failed:', e);
+    return false;
+  }
 }
 
 /**
@@ -1194,6 +1190,62 @@ export async function saveMessageToSupabase(_message: ChatMessage): Promise<bool
 // ============================================================================
 // REALTIME CHAT & PRESENCE SUBSCRIPTIONS
 // ============================================================================
+
+/** Realtime friend_requests for badge counts (pending incoming). */
+export function subscribeToFriendRequests(
+  userId: string,
+  onChange: (row: {
+    id: string;
+    senderId: string;
+    receiverId: string;
+    status: string;
+    createdAt?: string;
+  }) => void
+) {
+  if (!isSupabaseConfigured() || !userId) return () => {};
+
+  const mapRow = (raw: any) => ({
+    id: String(raw.id),
+    senderId: String(raw.sender_id),
+    receiverId: String(raw.receiver_id),
+    status: String(raw.status || 'pending'),
+    createdAt: raw.created_at,
+  });
+
+  const channel = supabase
+    .channel(`friend_requests_${userId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'friend_requests',
+        filter: `receiver_id=eq.${userId}`,
+      },
+      (payload) => {
+        const raw = (payload.new || payload.old) as any;
+        if (raw?.id) onChange(mapRow(raw));
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'friend_requests',
+        filter: `sender_id=eq.${userId}`,
+      },
+      (payload) => {
+        const raw = (payload.new || payload.old) as any;
+        if (raw?.id) onChange(mapRow(raw));
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
 
 export function subscribeToRealtimeChat(
   userId: string,

@@ -133,6 +133,7 @@ export class RealtimeSignaling {
         targetId &&
         (type.startsWith('call:') ||
           type.startsWith('friend_request:') ||
+          type === 'chat:message' ||
           type === 'chat:incall_preview' ||
           type.startsWith('quick_match:') ||
           type === 'match:created')

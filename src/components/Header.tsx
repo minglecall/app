@@ -70,6 +70,8 @@ export const Header: React.FC<HeaderProps> = ({
     dailyRewardRecord,
     unreadMessagesCount,
     pendingFriendRequestsCount,
+    missedCallsCount,
+    markCallLogsSeen,
     theme,
     toggleTheme,
     systemSettings,
@@ -104,6 +106,7 @@ export const Header: React.FC<HeaderProps> = ({
   }, [showPersonaMenu]);
 
   const handleNav = (tab: string) => {
+    if (tab === 'call_logs') markCallLogsSeen();
     setActiveTab(tab);
     setShowPersonaMenu(false);
   };
@@ -688,14 +691,23 @@ export const Header: React.FC<HeaderProps> = ({
                 <button
                   id="subheader-call-logs-tab"
                   onClick={() => handleNav('call_logs')}
-                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-semibold transition-all cursor-pointer ${
+                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-semibold transition-all cursor-pointer relative ${
                     activeTab === 'call_logs'
                       ? 'bg-brand text-white shadow-brand'
-                      : 'text-app-muted hover:text-app-heading hover:bg-brand-soft'
+                      : missedCallsCount > 0
+                        ? 'bg-rose-500/15 border border-rose-500/30 text-rose-300'
+                        : 'text-app-muted hover:text-app-heading hover:bg-brand-soft'
                   }`}
                   title="View Call Logs & Records"
                 >
-                  <PhoneCall className="w-3.5 h-3.5" />
+                  <div className="relative">
+                    <PhoneCall className="w-3.5 h-3.5" />
+                    {missedCallsCount > 0 && (
+                      <span className="absolute -top-1.5 -right-2 px-1 min-w-[14px] h-[14px] rounded-full bg-rose-500 text-white text-[8px] font-bold flex items-center justify-center border border-[var(--app-bg)]">
+                        {missedCallsCount > 9 ? '9+' : missedCallsCount}
+                      </span>
+                    )}
+                  </div>
                   <span>Calls</span>
                 </button>
 

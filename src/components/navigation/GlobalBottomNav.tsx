@@ -34,7 +34,14 @@ export const GlobalBottomNav: React.FC<GlobalBottomNavProps> = ({
   isMatchOpen,
   onCloseOverlays,
 }) => {
-  const { currentUser, isLoggedIn, unreadMessagesCount, pendingFriendRequestsCount } = useApp();
+  const {
+    currentUser,
+    isLoggedIn,
+    unreadMessagesCount,
+    pendingFriendRequestsCount,
+    missedCallsCount,
+    markCallLogsSeen,
+  } = useApp();
   const [showExitConfirm, setShowExitConfirm] = useState(false);
 
   if (!isLoggedIn) {
@@ -49,6 +56,7 @@ export const GlobalBottomNav: React.FC<GlobalBottomNavProps> = ({
   const isLeader = currentUser.role === 'team_leader';
 
   const handleTabClick = (tab: string) => {
+    if (tab === 'call_logs') markCallLogsSeen();
     onCloseOverlays();
     setActiveTab(tab);
   };
@@ -168,10 +176,17 @@ export const GlobalBottomNav: React.FC<GlobalBottomNavProps> = ({
                 <button
                   id="global-nav-call-logs"
                   onClick={() => handleTabClick('call_logs')}
-                  className={item(activeTab === 'call_logs' && !isChatOpen && !isMatchOpen)}
+                  className={`${item(activeTab === 'call_logs' && !isChatOpen && !isMatchOpen)} relative`}
                   title="Call Logs"
                 >
-                  <PhoneCall className="w-4.5 h-4.5 mb-0.5" />
+                  <div className="relative">
+                    <PhoneCall className="w-4.5 h-4.5 mb-0.5" />
+                    {missedCallsCount > 0 && (
+                      <span className="absolute -top-1.5 -right-2.5 px-1 min-w-[14px] h-[14px] rounded-full bg-rose-500 text-white text-[8px] font-bold flex items-center justify-center border-2 border-[var(--app-bg)]">
+                        {missedCallsCount > 9 ? '9+' : missedCallsCount}
+                      </span>
+                    )}
+                  </div>
                   <span className="text-[8px] font-medium leading-none">Logs</span>
                 </button>
               )}
