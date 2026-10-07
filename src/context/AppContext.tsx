@@ -731,19 +731,61 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const realtimeRef = useRef<RealtimeSignaling | null>(null);
   const wsAuthenticatedRef = useRef(false);
   const signalSend = (data: Record<string, any>) => {
+    void signalSendAsync(data);
+  };
+  const signalSendAsync = async (data: Record<string, any>): Promise<boolean> => {
     if (realtimeRef.current?.isConnected()) {
-      void realtimeRef.current.send(data);
-      return;
+      return realtimeRef.current.send(data);
     }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data));
+      return true;
     }
+    return false;
   };
   const isSignalOpen = () =>
     Boolean(realtimeRef.current?.isConnected()) ||
     Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN);
   const wsConnectRef = useRef<() => void>(() => {});
   const pendingCallReceiverRef = useRef<string | null>(null);
+  /** Clears when call is accepted / ended — auto-missed if still ringing. */
+  const ringTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ringPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ringTimedOutRef = useRef(false);
+  const clearRingTimeout = () => {
+    if (ringTimeoutRef.current != null) {
+      clearTimeout(ringTimeoutRef.current);
+      ringTimeoutRef.current = null;
+    }
+    if (ringPollRef.current != null) {
+      clearInterval(ringPollRef.current);
+      ringPollRef.current = null;
+    }
+    ringTimedOutRef.current = false;
+  };
+  const activateCallLocally = (startTime?: number) => {
+    billedMinutesRef.current.clear();
+    burnInFlightRef.current.clear();
+    const accepted = activeCallRef.current;
+    setActiveCall((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        status: 'active',
+        startTime: startTime || Date.now(),
+        billedMinutes: 0,
+      };
+    });
+    if (accepted) {
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === accepted.callerId || u.id === accepted.receiverId
+            ? { ...u, onlineStatus: 'busy' as const }
+            : u
+        )
+      );
+    }
+  };
   const showToastRef = useRef<(title: string, message: string, type?: 'success' | 'error' | 'info' | 'warning') => void>(
     () => {}
   );
@@ -2767,6 +2809,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const callerId = String(data.callerId || '').trim();
             const receiverId = String(data.receiverId || '').trim();
             if (!callerId || !receiverId) return;
+            const meId = String(currentUserIdRef.current || '');
+            // Only the callee should enter incoming ringing from initiate/incoming.
+            // call:ringing may echo to caller (Express); ignore if we're neither party.
+            if (data.type === 'call:initiate' || data.type === 'call:incoming') {
+              if (!meId || receiverId !== meId) return;
+            } else if (meId && meId !== callerId && meId !== receiverId) {
+              return;
+            }
+            // Don't clobber an already-active call
+            const cur = activeCallRef.current;
+            if (cur && cur.status === 'active') return;
             setActiveCall({
               id: callId,
               callerId,
@@ -2789,41 +2842,36 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               showToast('Incoming Video Call 📹', 'Incoming call ringing on your device!', 'info');
             }
           } else if (data.type === 'call:accepted') {
+            clearRingTimeout();
             const { startTime } = data;
-            billedMinutesRef.current.clear();
-            burnInFlightRef.current.clear();
             const accepted = activeCallRef.current;
-            setActiveCall((prev) => {
-              if (!prev) return null;
-              return {
-                ...prev,
-                status: 'active',
-                startTime: startTime || Date.now(),
-                billedMinutes: 0,
-              };
-            });
-            if (accepted) {
-              setUsers((prev) =>
-                prev.map((u) =>
-                  u.id === accepted.callerId || u.id === accepted.receiverId
-                    ? { ...u, onlineStatus: 'busy' as const }
-                    : u
-                )
-              );
-              authFetch('/api/calls/sync', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  callId: accepted.id,
-                  callerId: accepted.callerId,
-                  receiverId: accepted.receiverId,
-                  status: 'active',
-                  startTime: new Date(startTime || Date.now()).toISOString(),
-                }),
-              }).catch(() => {});
+            if (!accepted || accepted.status === 'active') return;
+            // Only call parties should activate
+            const meId = String(currentUserIdRef.current || '');
+            if (
+              meId &&
+              meId !== String(accepted.callerId) &&
+              meId !== String(accepted.receiverId) &&
+              meId !== String(data.callerId || '') &&
+              meId !== String(data.receiverId || '')
+            ) {
+              return;
             }
+            activateCallLocally(typeof startTime === 'number' ? startTime : Date.now());
+            authFetch('/api/calls/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                callId: accepted.id,
+                callerId: accepted.callerId,
+                receiverId: accepted.receiverId,
+                status: 'active',
+                startTime: new Date(startTime || Date.now()).toISOString(),
+              }),
+            }).catch(() => {});
             showToast('Call Connected! 📹', '1-on-1 WebRTC Video Call connected live.', 'success');
           } else if (data.type === 'call:ended') {
+            clearRingTimeout();
             billedMinutesRef.current.clear();
             burnInFlightRef.current.clear();
             const endedCallSnapshot = activeCallRef.current;
@@ -3958,6 +4006,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       callId,
       callerId: currentUser.id,
       receiverId,
+      toUserId: receiverId,
     };
 
     const markBusyLocal = () => {
@@ -3996,15 +4045,92 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     if (isSignalOpen()) {
-      signalSend(initiatePayload);
-      // Caller ringing UX is local (Realtime has no Express echo of call:ringing)
-      markBusyLocal();
-      persistBusy();
-      showToast(
-        'Calling... 📞',
-        `Ringing ${receiver.name}. Waiting for call acceptance...`,
-        'info'
-      );
+      void (async () => {
+        const sent = realtimeRef.current?.isConnected()
+          ? await realtimeRef.current.send(initiatePayload)
+          : (signalSend(initiatePayload), true);
+        if (sent === false) {
+          showToast(
+            'Call Failed',
+            'Could not reach the other user. Ask them to open the app and try again.',
+            'error'
+          );
+          return;
+        }
+        // Caller ringing UX is local (Realtime has no Express echo of call:ringing)
+        markBusyLocal();
+        persistBusy();
+        showToast(
+          'Calling... 📞',
+          `Ringing ${receiver.name}. Waiting for call acceptance...`,
+          'info'
+        );
+        // Auto-miss if host never accepts (Realtime/Vercel has no server ring reaper)
+        clearRingTimeout();
+        const ringMs = Math.max(15, Number(systemSettings.callRingTimeoutSeconds) || 30) * 1000;
+        ringTimeoutRef.current = setTimeout(() => {
+          const call = activeCallRef.current;
+          if (call && call.id === callId && call.status === 'ringing') {
+            ringTimedOutRef.current = true;
+            showToast('Call Missed', 'No answer — ring timed out.', 'info');
+            endCallRef.current();
+          }
+        }, ringMs);
+        // DB poll fallback: host accept writes call_logs.status=active even if Realtime signal drops
+        if (isSupabaseConfigured()) {
+          ringPollRef.current = setInterval(() => {
+            const call = activeCallRef.current;
+            if (!call || call.id !== callId || call.status !== 'ringing') {
+              if (ringPollRef.current != null) {
+                clearInterval(ringPollRef.current);
+                ringPollRef.current = null;
+              }
+              return;
+            }
+            void (async () => {
+              try {
+                const { data, error } = await supabase
+                  .from('call_logs')
+                  .select('status, started_at, start_time')
+                  .eq('id', callId)
+                  .maybeSingle();
+                if (error || !data) return;
+                const row = data as {
+                  status?: string | null;
+                  started_at?: string | null;
+                  start_time?: string | null;
+                };
+                const st = String(row.status || '').toLowerCase();
+                if (st === 'active' || st === 'accepted' || st === 'in_call' || st === 'connecting') {
+                  clearRingTimeout();
+                  const ts = row.started_at || row.start_time;
+                  const startMs = ts ? new Date(ts).getTime() : Date.now();
+                  activateCallLocally(Number.isFinite(startMs) ? startMs : Date.now());
+                  showToast(
+                    'Call Connected! 📹',
+                    '1-on-1 WebRTC Video Call connected live.',
+                    'success'
+                  );
+                } else if (
+                  st === 'missed' ||
+                  st === 'declined' ||
+                  st === 'cancelled' ||
+                  st === 'canceled' ||
+                  st === 'rejected' ||
+                  st === 'failed' ||
+                  st === 'ended' ||
+                  st === 'completed'
+                ) {
+                  clearRingTimeout();
+                  endCallRef.current();
+                }
+              } catch (e) {
+                console.warn('[call] ring status poll failed', e);
+              }
+            })();
+          }, 2000);
+        }
+      })();
       return true;
     }
 
@@ -4036,16 +4162,47 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const acceptCall = () => {
     if (!activeCall) return;
+    clearRingTimeout();
+    const callSnapshot = activeCall;
+    const startTime = Date.now();
 
-    signalSend({
+    const acceptPayload = {
       type: 'call:accepted',
-      callId: activeCall.id,
+      callId: callSnapshot.id,
       userId: currentUser.id,
-      callerId: activeCall.callerId,
-      receiverId: activeCall.receiverId,
-      toUserId: activeCall.callerId,
-      startTime: Date.now(),
-    });
+      callerId: callSnapshot.callerId,
+      receiverId: callSnapshot.receiverId,
+      toUserId: callSnapshot.callerId,
+      startTime,
+    };
+
+    // Persist active first — caller ring-poll uses call_logs if Realtime drops
+    authFetch('/api/calls/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        callId: callSnapshot.id,
+        callerId: callSnapshot.callerId,
+        receiverId: callSnapshot.receiverId,
+        status: 'active',
+        startTime: new Date(startTime).toISOString(),
+      }),
+    }).catch(() => {});
+
+    void (async () => {
+      let sent = await signalSendAsync(acceptPayload);
+      if (!sent) {
+        await new Promise((r) => setTimeout(r, 400));
+        sent = await signalSendAsync(acceptPayload);
+      }
+      if (!sent) {
+        showToast(
+          'Signal weak',
+          'Call accepted locally — reconnecting the caller. Stay on this screen.',
+          'warning'
+        );
+      }
+    })();
 
     // Do NOT compute or apply coin burns here — caller-only server billing owns minute 1+
     setActiveCall((prev) => {
@@ -4053,7 +4210,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return {
         ...prev,
         status: 'active',
-        startTime: Date.now(),
+        startTime,
         billedMinutes: 0,
         coinsSpent: 0,
         coinsEarned: 0,
@@ -4061,27 +4218,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
     setUsers((prev) =>
       prev.map((u) =>
-        u.id === activeCall.callerId || u.id === activeCall.receiverId
+        u.id === callSnapshot.callerId || u.id === callSnapshot.receiverId
           ? { ...u, onlineStatus: 'busy' as const }
           : u
       )
     );
-    authFetch('/api/calls/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        callId: activeCall.id,
-        callerId: activeCall.callerId,
-        receiverId: activeCall.receiverId,
-        status: 'active',
-        startTime: new Date().toISOString(),
-      }),
-    }).catch(() => {});
 
-    const receiverUser = users.find((u) => u.id === activeCall.receiverId);
+    const receiverUser = users.find((u) => u.id === callSnapshot.receiverId);
     const receiverName = receiverUser ? receiverUser.name : 'Creator';
-    const ratePerMin = getEffectiveCallRate(activeCall.receiverId, activeCall.callerId);
-    const isFriendCall = isFriend(activeCall.receiverId) || isFriend(activeCall.callerId);
+    const ratePerMin = getEffectiveCallRate(callSnapshot.receiverId, callSnapshot.callerId);
+    const isFriendCall = isFriend(callSnapshot.receiverId) || isFriend(callSnapshot.callerId);
 
     showToast(
       'Call Connected! 📹',
@@ -4092,16 +4238,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const rejectCall = () => {
     if (!activeCall) return;
+    clearRingTimeout();
     const rejectedCall = activeCall;
     const isCaller = currentUser.id === rejectedCall.callerId;
     const outcome = isCaller ? 'missed' : 'declined';
-    const wsType = isCaller ? 'call:cancel' : 'call:reject';
     const reason = isCaller ? 'Caller hangup' : 'Receiver reject';
     const endNow = Date.now();
     const peerId = isCaller ? rejectedCall.receiverId : rejectedCall.callerId;
 
-    signalSend({
-      type: wsType === 'call:cancel' ? 'call:ended' : 'call:ended',
+    void signalSendAsync({
+      type: 'call:ended',
       callId: rejectedCall.id,
       userId: currentUser.id,
       callerId: rejectedCall.callerId,
@@ -4189,6 +4335,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const endCall = () => {
     if (!activeCall) return;
+    const wasRingTimeout = ringTimedOutRef.current;
+    clearRingTimeout();
     const endedCall = activeCall;
     const wasRinging = endedCall.status === 'ringing';
     const isCaller = currentUser.id === endedCall.callerId;
@@ -4196,15 +4344,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Ringing hangup should classify like cancel/decline (not completed)
     const ringingOutcome = wasRinging ? (isCaller ? 'missed' : 'declined') : null;
-    const wsType = wasRinging ? (isCaller ? 'call:cancel' : 'call:reject') : 'call:end';
     const reason = wasRinging
       ? isCaller
-        ? 'Caller hangup'
+        ? wasRingTimeout
+          ? 'Ring timeout'
+          : 'Caller hangup'
         : 'Receiver reject'
       : undefined;
 
     const peerId = isCaller ? endedCall.receiverId : endedCall.callerId;
-    signalSend({
+    void signalSendAsync({
       type: 'call:ended',
       callId: endedCall.id,
       userId: currentUser.id,
@@ -4273,7 +4422,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return [newLog, ...withoutDup];
       });
 
-      // Persist via backend (service role) — client RLS blocks non-admin inserts into call_logs
+      // Persist via backend (service role) — use missed/declined/completed so call logs UI filters work
       authFetch('/api/calls/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4281,7 +4430,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           callId: endedCall.id,
           callerId: endedCall.callerId,
           receiverId: endedCall.receiverId,
-          status: 'ended',
+          status: logStatus,
           outcome: logStatus,
           endedBy: currentUser.id,
           reason,
@@ -4301,6 +4450,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // Post-call rating is creator-requested only — do not auto-open modal or inject rating cards.
     } else {
       // Still persist economics even if local directory is missing a profile row
+      const fallbackStatus = ringingOutcome || 'completed';
       authFetch('/api/calls/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4308,8 +4458,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           callId: endedCall.id,
           callerId: endedCall.callerId,
           receiverId: endedCall.receiverId,
-          status: 'ended',
-          outcome: ringingOutcome || 'completed',
+          status: fallbackStatus,
+          outcome: fallbackStatus,
           endedBy: currentUser.id,
           reason,
           durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
@@ -4322,11 +4472,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     showToast(
-      wasRinging ? (ringingOutcome === 'declined' ? 'Call Declined 🚫' : 'Call Cancelled') : 'Call Ended',
+      wasRinging
+        ? ringingOutcome === 'declined'
+          ? 'Call Declined 🚫'
+          : wasRingTimeout
+            ? 'Call Missed'
+            : 'Call Cancelled'
+        : 'Call Ended',
       wasRinging
         ? ringingOutcome === 'declined'
           ? 'The call was declined.'
-          : 'You cancelled the call before it was answered.'
+          : wasRingTimeout
+            ? 'No answer — ring timed out. Saved to call logs.'
+            : 'You cancelled the call before it was answered.'
         : `Session duration: ${endedCall.durationSeconds}s. Total coins processed: ${endedCall.coinsSpent} 🪙. Logged to creator call history.`,
       'info'
     );

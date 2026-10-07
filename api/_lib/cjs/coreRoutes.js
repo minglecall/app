@@ -132,15 +132,58 @@ async function handleMessages(path, req, res) {
 
   if ((path === 'messages' || path === 'messages/index') && req.method === 'POST') {
     const body = await readJsonBody(req);
-    const receiverId = String((body && body.receiverId) || '');
+    const receiverId = String((body && body.receiverId) || '').trim();
     const text = String((body && body.text) || '').slice(0, 4000);
     const mediaUrl = body && body.mediaUrl ? String(body.mediaUrl).slice(0, 2048) : null;
-    const type = String((body && body.type) || (mediaUrl ? 'image' : 'text'));
+    const rawType = String((body && body.type) || (mediaUrl ? 'image' : 'text'));
+    const ALLOWED = new Set([
+      'text',
+      'image',
+      'video',
+      'voice',
+      'gift',
+      'friend_request',
+      'call_rating',
+      'system',
+    ]);
+    const type = ALLOWED.has(rawType) ? rawType : mediaUrl ? 'image' : 'text';
     const clientTempId = (body && body.clientTempId) || null;
     if (!receiverId) {
       return send(res, 400, {
         success: false,
         error: { message: 'receiverId required', code: 'BAD_REQUEST' },
+      });
+    }
+    if (!auth.profile || !auth.profileId) {
+      return send(res, 403, {
+        success: false,
+        error: { message: 'Sender profile not found', code: 'SENDER_NOT_FOUND' },
+      });
+    }
+    if (!text && !mediaUrl) {
+      return send(res, 400, {
+        success: false,
+        error: { message: 'Message text or media required', code: 'EMPTY_MESSAGE' },
+      });
+    }
+    const { data: receiver, error: recvErr } = await client
+      .from('profiles')
+      .select('id, is_banned')
+      .eq('id', receiverId)
+      .maybeSingle();
+    if (recvErr) {
+      return send(res, 500, { success: false, error: { message: recvErr.message, code: 'SEND_FAILED' } });
+    }
+    if (!receiver) {
+      return send(res, 404, {
+        success: false,
+        error: { message: 'Receiver not found', code: 'RECEIVER_NOT_FOUND' },
+      });
+    }
+    if (receiver.is_banned) {
+      return send(res, 403, {
+        success: false,
+        error: { message: 'Receiver unavailable', code: 'RECEIVER_UNAVAILABLE' },
       });
     }
     const { data: blocked } = await client
@@ -156,15 +199,22 @@ async function handleMessages(path, req, res) {
     const row = {
       sender_id: auth.profileId,
       receiver_id: receiverId,
-      text,
+      text: text || (mediaUrl ? '📷 Photo' : ''),
       type,
       media_url: mediaUrl,
       media_type: (body && body.mediaType) || undefined,
+      original_language: (body && body.originalLanguage) || undefined,
       is_read: false,
       created_at: new Date().toISOString(),
     };
     const { data, error } = await client.from('messages').insert(row).select('*').maybeSingle();
-    if (error) return send(res, 500, { success: false, error: { message: error.message } });
+    if (error) {
+      console.warn('[api/messages] insert', error.message);
+      return send(res, 500, {
+        success: false,
+        error: { message: 'Failed to send message', code: 'SEND_FAILED' },
+      });
+    }
     const mapped = {
       id: data.id,
       senderId: data.sender_id,
@@ -198,11 +248,25 @@ async function handleMessages(path, req, res) {
   }
 
   if (path.startsWith('messages/conversation/') && req.method === 'GET') {
-    const otherUserId = decodeURIComponent(path.replace('messages/conversation/', ''));
+    const otherUserId = decodeURIComponent(
+      path.replace('messages/conversation/', '').split('?')[0]
+    );
     if (!otherUserId || otherUserId === 'conversation') {
       return send(res, 400, { success: false, error: { message: 'otherUserId required' } });
     }
-    const { data, error } = await client
+    let clearedAt = null;
+    try {
+      const { data: clearRow } = await client
+        .from('message_conversation_clears')
+        .select('cleared_at')
+        .eq('user_id', auth.profileId)
+        .eq('other_user_id', otherUserId)
+        .maybeSingle();
+      clearedAt = clearRow && clearRow.cleared_at ? clearRow.cleared_at : null;
+    } catch (_) {
+      /* table may be missing in older DBs */
+    }
+    let q = client
       .from('messages')
       .select('*')
       .or(
@@ -210,6 +274,8 @@ async function handleMessages(path, req, res) {
       )
       .order('created_at', { ascending: true })
       .limit(200);
+    if (clearedAt) q = q.gt('created_at', clearedAt);
+    const { data, error } = await q;
     if (error) return send(res, 500, { success: false, error: { message: error.message } });
     const messages = (data || []).map((row) => ({
       id: row.id,
@@ -226,13 +292,26 @@ async function handleMessages(path, req, res) {
   }
 
   if (path.startsWith('messages/conversation/') && req.method === 'DELETE') {
-    const otherUserId = decodeURIComponent(path.replace('messages/conversation/', ''));
-    await client
-      .from('messages')
-      .delete()
-      .or(
-        `and(sender_id.eq.${auth.profileId},receiver_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},receiver_id.eq.${auth.profileId})`
-      );
+    const otherUserId = decodeURIComponent(path.replace('messages/conversation/', '').split('?')[0]);
+    if (!otherUserId || otherUserId === 'conversation') {
+      return send(res, 400, { success: false, error: { message: 'otherUserId required' } });
+    }
+    // Soft-hide for acting user only (parity with Express) — do not hard-delete peer history
+    const { error } = await client.from('message_conversation_clears').upsert(
+      {
+        user_id: auth.profileId,
+        other_user_id: otherUserId,
+        cleared_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,other_user_id' }
+    );
+    if (error) {
+      console.warn('[api/messages] clear', error.message);
+      return send(res, 500, {
+        success: false,
+        error: { message: 'Could not clear conversation', code: 'CLEAR_FAILED' },
+      });
+    }
     return send(res, 200, { success: true });
   }
 
@@ -360,6 +439,16 @@ async function handleCalls(path, req, res) {
         return send(res, 403, {
           success: false,
           error: { message: 'Only the call caller may trigger billing', code: 'FORBIDDEN' },
+        });
+      }
+      const callStatus = String(callRow.status || '').toLowerCase();
+      if (!['active', 'accepted', 'in_call', 'connecting'].includes(callStatus)) {
+        return send(res, 409, {
+          success: false,
+          error: {
+            message: 'Call is not active — billing starts after accept',
+            code: 'CALL_NOT_ACTIVE',
+          },
         });
       }
       const receiverId = String(callRow.receiver_id || callRow.host_id || '');

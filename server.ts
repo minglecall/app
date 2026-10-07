@@ -1509,7 +1509,9 @@ async function startServer(): Promise<express.Express> {
             break;
           }
 
-          case 'call:accept': {
+          case 'call:accept':
+          case 'call:accepted': {
+            // Client emits call:accepted; accept legacy call:accept as well
             const { callId } = msg;
             const call = activeCalls.get(callId);
             if (!call) return;
@@ -1591,7 +1593,9 @@ async function startServer(): Promise<express.Express> {
 
           case 'call:reject':
           case 'call:cancel':
-          case 'call:end': {
+          case 'call:end':
+          case 'call:ended': {
+            // Client emits call:ended for cancel/reject/hangup; keep legacy aliases
             const { callId, userId, outcome, reason } = msg;
             const call = activeCalls.get(callId);
 
@@ -1603,7 +1607,7 @@ async function startServer(): Promise<express.Express> {
                 wasRinging: call.status === 'ringing',
                 endedBy,
                 reason: reason || null,
-                wsType: msg.type,
+                wsType: msg.type === 'call:ended' ? 'call:end' : msg.type,
                 outcome: outcome || null,
                 notifyParticipants: true,
               }).catch((err) => console.warn('[WS call end] finalize failed:', err));

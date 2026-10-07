@@ -114,8 +114,16 @@ export class RealtimeSignaling {
       payload.toUserId ||
       payload.targetUserId ||
       payload.calleeId ||
-      (type === 'call:accept' || type === 'call:accepted' || type === 'call:reject' || type === 'call:end'
+      (type === 'call:accept' ||
+      type === 'call:accepted' ||
+      type === 'call:reject' ||
+      type === 'call:cancel' ||
+      type === 'call:end' ||
+      type === 'call:ended'
         ? payload.callerId
+        : null) ||
+      (type === 'call:initiate' || type === 'call:incoming' || type === 'call:ringing'
+        ? payload.receiverId
         : null) ||
       payload.receiverId ||
       payload.userId;
@@ -129,14 +137,37 @@ export class RealtimeSignaling {
           type.startsWith('quick_match:') ||
           type === 'match:created')
       ) {
-        const targetChannel = supabase.channel(`user:${targetId}`);
-        await targetChannel.subscribe();
+        // Must use the same topic the peer subscribed to in connect(): user:{profileId}
+        const targetChannel = supabase.channel(`user:${targetId}`, {
+          config: { broadcast: { self: false } },
+        });
+        // CRITICAL: wait until SUBSCRIBED before broadcast — otherwise initiate/accept are dropped
+        const ok = await waitForSubscribe(targetChannel, 5000);
+        if (!ok) {
+          console.warn('[RealtimeSignaling] target channel subscribe failed', targetId, type);
+          try {
+            await supabase.removeChannel(targetChannel);
+          } catch {
+            /* ignore */
+          }
+          return false;
+        }
         await targetChannel.send({
           type: 'broadcast',
           event: 'signal',
           payload,
         });
         await supabase.removeChannel(targetChannel);
+        // Presence fanout backup — peer filters by callId / callerId / receiverId
+        try {
+          await this.presenceChannel?.send({
+            type: 'broadcast',
+            event: 'signal',
+            payload,
+          });
+        } catch {
+          /* best-effort */
+        }
         return true;
       }
 

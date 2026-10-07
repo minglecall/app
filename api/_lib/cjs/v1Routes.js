@@ -385,13 +385,112 @@ async function handleV1(fullPath, req, res) {
       });
     }
     if (path === 'friends/request' && method === 'POST') {
-      const receiverId = String((body && (body.receiverId || body.targetUserId || body.userId)) || '');
+      const receiverId = String((body && (body.targetUserId || body.receiverId || body.userId)) || '');
       if (!receiverId || receiverId === me) {
-        return send(res, 400, { success: false, error: { message: 'Invalid receiverId' } });
+        return send(res, 400, {
+          success: false,
+          error: { message: 'Invalid targetUserId', code: 'INVALID_TARGET' },
+        });
       }
+
+      const { data: sender } = await client
+        .from('profiles')
+        .select('id, role, gender, is_banned')
+        .eq('id', me)
+        .maybeSingle();
+      if (!sender) {
+        return send(res, 404, {
+          success: false,
+          error: { message: 'Sender profile not found', code: 'SENDER_NOT_FOUND' },
+        });
+      }
+      if (sender.is_banned) {
+        return send(res, 403, {
+          success: false,
+          error: { message: 'Account unavailable', code: 'SENDER_BANNED' },
+        });
+      }
+      const senderRole = String(sender.role || '').toLowerCase();
+      const canSend =
+        String(sender.gender || '').toLowerCase() === 'female' ||
+        senderRole === 'female_creator' ||
+        senderRole === 'female_host' ||
+        senderRole === 'female_user';
+      if (!canSend) {
+        return send(res, 403, {
+          success: false,
+          error: {
+            message: 'Only female hosts can initiate friend requests',
+            code: 'SENDER_NOT_ALLOWED',
+          },
+        });
+      }
+
+      const { data: target } = await client
+        .from('profiles')
+        .select('id, is_banned')
+        .eq('id', receiverId)
+        .maybeSingle();
+      if (!target) {
+        return send(res, 404, {
+          success: false,
+          error: { message: 'Target user not found', code: 'NOT_FOUND' },
+        });
+      }
+      if (target.is_banned) {
+        return send(res, 403, {
+          success: false,
+          error: { message: 'Target user unavailable', code: 'TARGET_BANNED' },
+        });
+      }
+
+      const { data: blockedRows } = await client
+        .from('blocked_users')
+        .select('user_id')
+        .or(
+          `and(user_id.eq.${me},blocked_user_id.eq.${receiverId}),and(user_id.eq.${receiverId},blocked_user_id.eq.${me})`
+        )
+        .limit(1);
+      if (blockedRows && blockedRows.length) {
+        return send(res, 403, {
+          success: false,
+          error: { message: 'Blocked relationship', code: 'BLOCKED' },
+        });
+      }
+
+      // Clear stale declined/cancelled rows so UNIQUE(sender_id, receiver_id) does not 500
+      const pairFilter = `and(sender_id.eq.${me},receiver_id.eq.${receiverId}),and(sender_id.eq.${receiverId},receiver_id.eq.${me})`;
+      const { data: existingRows, error: existErr } = await client
+        .from('friend_requests')
+        .select('id, status')
+        .or(pairFilter);
+      if (existErr) throw existErr;
+      const rows = existingRows || [];
+      if (rows.some((r) => r.status === 'accepted')) {
+        return send(res, 409, {
+          success: false,
+          error: { message: 'Already friends', code: 'ALREADY_FRIENDS' },
+        });
+      }
+      if (rows.some((r) => r.status === 'pending')) {
+        return send(res, 409, {
+          success: false,
+          error: { message: 'Friend request already pending', code: 'PENDING_EXISTS' },
+        });
+      }
+      if (rows.length > 0) {
+        const { error: delErr } = await client.from('friend_requests').delete().or(pairFilter);
+        if (delErr) throw delErr;
+      }
+
       const { data, error } = await client
         .from('friend_requests')
-        .insert({ sender_id: me, receiver_id: receiverId, status: 'pending' })
+        .insert({
+          sender_id: me,
+          receiver_id: receiverId,
+          status: 'pending',
+          created_at: new Date().toISOString(),
+        })
         .select('*')
         .maybeSingle();
       if (error) throw error;
