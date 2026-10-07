@@ -5,6 +5,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import {
   isSupabaseAdminConfigured,
   updateUserStatusAdmin,
+  getSupabaseAdmin,
 } from '../supabaseAdmin';
 
 export function createLivekitRouter(ctx: ServerRuntime): Router {
@@ -93,9 +94,35 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
         return res.status(403).json({ error: 'Admin test rooms require admin privileges.' });
       }
 
-      // Non-admin rooms: require an active call record + membership (caller/receiver)
+      // Non-admin rooms: membership via in-memory activeCalls OR call_logs (Accept race / multi-instance)
       if (!isAdminTestRoom) {
-        const call = activeCalls.get(room);
+        let call = activeCalls.get(room) || null;
+        if (!call && isSupabaseAdminConfigured()) {
+          const supabase = getSupabaseAdmin();
+          if (supabase) {
+            const { data: row } = await supabase
+              .from('call_logs')
+              .select('id, caller_id, receiver_id, host_id, status')
+              .eq('id', room)
+              .maybeSingle();
+            const st = String(row?.status || '').toLowerCase();
+            const open = ['ringing', 'active', 'accepted', 'in_call', 'connecting'].includes(st);
+            if (row && open) {
+              call = {
+                id: String(row.id),
+                callerId: String(row.caller_id || ''),
+                receiverId: String(row.receiver_id || row.host_id || ''),
+                status: st === 'ringing' ? 'ringing' : 'active',
+                ringingAt: Date.now(),
+                startTime: st === 'ringing' ? undefined : Date.now(),
+              } as any;
+              // Hydrate memory so subsequent burns / admin monitor see the call
+              activeCalls.set(room, call as any);
+            } else if (row && !open) {
+              return res.status(409).json({ error: 'This call has already ended.' });
+            }
+          }
+        }
         if (!call) {
           return res.status(404).json({ error: 'Call room not found or is no longer active.' });
         }
@@ -111,14 +138,19 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
 
       const apiKey = String(livekitConfig.apiKey || '').trim();
       const apiSecret = String(livekitConfig.apiSecret || '').trim();
-      const livekitUrl = String(livekitConfig.wsUrl || '').trim() || 'wss://your-livekit-project.livekit.cloud';
+      const livekitUrl = String(livekitConfig.wsUrl || '').trim();
+      const urlOk =
+        Boolean(livekitUrl) &&
+        !livekitUrl.includes('your-livekit') &&
+        (livekitUrl.startsWith('wss://') || livekitUrl.startsWith('ws://'));
 
-      if (!apiKey || !apiSecret || apiKey === 'devkey' || apiSecret === 'secret') {
+      if (!apiKey || !apiSecret || apiKey === 'devkey' || apiSecret === 'secret' || !urlOk) {
         return res.json({
           configured: false,
           token: null,
-          wsUrl: livekitUrl,
-          message: 'LiveKit credentials missing or placeholder. Save your API Key & Secret first.',
+          wsUrl: urlOk ? livekitUrl : null,
+          message:
+            'LiveKit credentials missing or placeholder. Set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET.',
         });
       }
 

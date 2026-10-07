@@ -3290,15 +3290,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             clearRingTimeout();
             const { startTime } = data;
             const accepted = activeCallRef.current;
-            if (!accepted || accepted.status === 'active') return;
-            // Only call parties should activate
-            const meId = String(currentUserIdRef.current || '');
+            // If we have no local ringing session yet, hydrate from signal (caller recovery)
+            if (!accepted) {
+              const callerId = String(data.callerId || '').trim();
+              const receiverId = String(data.receiverId || '').trim();
+              const callId = String(data.callId || '').trim();
+              if (
+                callId &&
+                callerId &&
+                receiverId &&
+                (isSelfIdRef.current(callerId) || isSelfIdRef.current(receiverId))
+              ) {
+                activeCallRef.current = {
+                  id: callId,
+                  callerId,
+                  receiverId,
+                  startTime: typeof startTime === 'number' ? startTime : Date.now(),
+                  durationSeconds: 0,
+                  coinsSpent: 0,
+                  coinsEarned: 0,
+                  giftsSent: [],
+                  status: 'ringing',
+                };
+                setActiveCall(activeCallRef.current);
+              } else {
+                return;
+              }
+            }
+            const session = activeCallRef.current;
+            if (!session || session.status === 'active') return;
+            // Party check — profile id OR auth id
             if (
-              meId &&
-              meId !== String(accepted.callerId) &&
-              meId !== String(accepted.receiverId) &&
-              meId !== String(data.callerId || '') &&
-              meId !== String(data.receiverId || '')
+              !isSelfIdRef.current(session.callerId) &&
+              !isSelfIdRef.current(session.receiverId) &&
+              !isSelfIdRef.current(data.callerId) &&
+              !isSelfIdRef.current(data.receiverId)
             ) {
               return;
             }
@@ -3307,9 +3333,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                callId: accepted.id,
-                callerId: accepted.callerId,
-                receiverId: accepted.receiverId,
+                callId: session.id,
+                callerId: session.callerId,
+                receiverId: session.receiverId,
                 status: 'active',
                 startTime: new Date(startTime || Date.now()).toISOString(),
               }),
@@ -4659,7 +4685,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 console.warn('[call] ring status poll failed', e);
               }
             })();
-          }, 2000);
+          }, 1000);
         }
       })();
       return true;
@@ -4696,6 +4722,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     clearRingTimeout();
     const callSnapshot = activeCall;
     const startTime = Date.now();
+    const callerUser = users.find((u) => u.id === callSnapshot.callerId);
+    const receiverUser = users.find((u) => u.id === callSnapshot.receiverId);
 
     const acceptPayload = {
       type: 'call:accepted',
@@ -4704,23 +4732,53 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       callerId: callSnapshot.callerId,
       receiverId: callSnapshot.receiverId,
       toUserId: callSnapshot.callerId,
+      toAuthId: callerUser?.authId || undefined,
+      callerAuthId: callerUser?.authId || undefined,
+      receiverAuthId: currentUser.authId || supabaseAuthUserIdRef.current || undefined,
       startTime,
     };
 
-    // Persist active first — caller ring-poll uses call_logs if Realtime drops
-    authFetch('/api/calls/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        callId: callSnapshot.id,
-        callerId: callSnapshot.callerId,
-        receiverId: callSnapshot.receiverId,
-        status: 'active',
-        startTime: new Date(startTime).toISOString(),
-      }),
-    }).catch(() => {});
-
     void (async () => {
+      // Persist active BEFORE LiveKit token so membership checks succeed
+      try {
+        await authFetch('/api/calls/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            callId: callSnapshot.id,
+            callerId: callSnapshot.callerId,
+            receiverId: callSnapshot.receiverId,
+            status: 'active',
+            startTime: new Date(startTime).toISOString(),
+            callerName: callerUser?.name,
+            receiverName: receiverUser?.name || currentUser.name,
+            hostName: receiverUser?.name || currentUser.name,
+          }),
+        });
+      } catch {
+        /* still proceed — ringing row may already authorize token */
+      }
+
+      // Flip local UI to active → VideoCallStudio connects LiveKit
+      setActiveCall((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          status: 'active',
+          startTime,
+          billedMinutes: 0,
+          coinsSpent: 0,
+          coinsEarned: 0,
+        };
+      });
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === callSnapshot.callerId || u.id === callSnapshot.receiverId
+            ? { ...u, onlineStatus: 'busy' as const }
+            : u
+        )
+      );
+
       let sent = await signalSendAsync(acceptPayload);
       if (!sent) {
         await new Promise((r) => setTimeout(r, 400));
@@ -4729,42 +4787,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!sent) {
         showToast(
           'Signal weak',
-          'Call accepted locally — reconnecting the caller. Stay on this screen.',
+          'Call accepted — waiting for caller via call log sync. Stay on this screen.',
           'warning'
         );
       }
+
+      const ratePerMin = getEffectiveCallRate(callSnapshot.receiverId, callSnapshot.callerId);
+      const isFriendCall = isFriend(callSnapshot.receiverId) || isFriend(callSnapshot.callerId);
+      showToast(
+        'Call Connected! 📹',
+        `Connecting LiveKit with ${callerUser?.name || 'caller'}. ${
+          isFriendCall ? '✨ Friend Rate: ' + ratePerMin + ' 🪙/min' : '🪙 Rate: ' + ratePerMin + ' 🪙/min'
+        }.`,
+        'success'
+      );
     })();
-
-    // Do NOT compute or apply coin burns here — caller-only server billing owns minute 1+
-    setActiveCall((prev) => {
-      if (!prev) return null;
-      return {
-        ...prev,
-        status: 'active',
-        startTime,
-        billedMinutes: 0,
-        coinsSpent: 0,
-        coinsEarned: 0,
-      };
-    });
-    setUsers((prev) =>
-      prev.map((u) =>
-        u.id === callSnapshot.callerId || u.id === callSnapshot.receiverId
-          ? { ...u, onlineStatus: 'busy' as const }
-          : u
-      )
-    );
-
-    const receiverUser = users.find((u) => u.id === callSnapshot.receiverId);
-    const receiverName = receiverUser ? receiverUser.name : 'Creator';
-    const ratePerMin = getEffectiveCallRate(callSnapshot.receiverId, callSnapshot.callerId);
-    const isFriendCall = isFriend(callSnapshot.receiverId) || isFriend(callSnapshot.callerId);
-
-    showToast(
-      'Call Connected! 📹',
-      `Live 1-on-1 Call connected with ${receiverName}. ${isFriendCall ? '✨ Friend Rate: ' + ratePerMin + ' 🪙/min' : '🪙 Rate: ' + ratePerMin + ' 🪙/min'}. Billing is server-authoritative.`,
-      'success'
-    );
   };
 
   const rejectCall = () => {

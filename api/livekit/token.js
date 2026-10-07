@@ -1,6 +1,6 @@
 /**
  * /api/livekit/token — plain CommonJS (Hobby-safe).
- * Isolated from api/router.ts so a router boot failure cannot break LiveKit token minting.
+ * Isolated from api/router so a router boot failure cannot break LiveKit token minting.
  */
 const { createClient } = require('@supabase/supabase-js');
 const { AccessToken } = require('livekit-server-sdk');
@@ -31,6 +31,13 @@ function livekitEnv() {
     apiKey: clean(process.env.LIVEKIT_API_KEY),
     apiSecret: clean(process.env.LIVEKIT_API_SECRET),
   };
+}
+
+function isUsableLivekitUrl(url) {
+  const u = clean(url);
+  if (!u) return false;
+  if (u.includes('your-livekit')) return false;
+  return u.startsWith('wss://') || u.startsWith('ws://');
 }
 
 async function readJsonBody(req) {
@@ -86,11 +93,23 @@ async function requireAuth(req) {
   }
 
   const authUser = userData.user;
-  const { data: profile } = await admin
-    .from('profiles')
-    .select('id, role, email')
-    .or(`auth_id.eq.${authUser.id},id.eq.${authUser.id}`)
-    .maybeSingle();
+  let profile = null;
+  {
+    const { data: byAuth } = await admin
+      .from('profiles')
+      .select('id, role, email')
+      .eq('auth_id', authUser.id)
+      .maybeSingle();
+    profile = byAuth || null;
+  }
+  if (!profile) {
+    const { data: byId } = await admin
+      .from('profiles')
+      .select('id, role, email')
+      .eq('id', authUser.id)
+      .maybeSingle();
+    profile = byId || null;
+  }
 
   const profileId = String((profile && profile.id) || authUser.id);
   const role = String((profile && profile.role) || '').toLowerCase();
@@ -143,32 +162,54 @@ module.exports = async function handler(req, res) {
       return send(res, 403, { error: 'Admin test rooms require admin privileges.' });
     }
 
+    // Non-admin 1:1 rooms: must be a call participant (profile id or auth id).
+    // Do NOT require status=active — accept may race ahead of sync.
     if (!isAdminTestRoom && !isAdmin) {
-      const memberHint =
-        roomName.includes(identity) ||
-        roomName.includes(auth.userId) ||
-        roomName.startsWith('call_') ||
-        roomName.startsWith('lk_');
-
-      let dbMember = false;
-      if (!memberHint && auth.client) {
-        const { data: callRow } = await auth.client
+      let authorized = false;
+      if (auth.client) {
+        const { data: callRow, error: callErr } = await auth.client
           .from('call_logs')
-          .select('caller_id, receiver_id, host_id')
+          .select('id, caller_id, receiver_id, host_id, status')
           .eq('id', roomName)
           .maybeSingle();
-        const ids = [
-          callRow && callRow.caller_id,
-          callRow && callRow.receiver_id,
-          callRow && callRow.host_id,
-        ].map((v) => String(v || ''));
-        dbMember = ids.includes(identity) || ids.includes(auth.userId);
+        if (callErr) {
+          console.warn('[api/livekit/token] call_logs lookup', callErr.message);
+        }
+        if (callRow) {
+          const ids = [callRow.caller_id, callRow.receiver_id, callRow.host_id].map((v) =>
+            String(v || '')
+          );
+          authorized = ids.includes(identity) || ids.includes(String(auth.userId));
+          const st = String(callRow.status || '').toLowerCase();
+          const openStatuses = new Set([
+            'ringing',
+            'active',
+            'accepted',
+            'in_call',
+            'connecting',
+          ]);
+          if (authorized && st && !openStatuses.has(st)) {
+            return send(res, 409, {
+              error: 'This call has already ended.',
+              code: 'CALL_ENDED',
+            });
+          }
+        }
       }
 
-      if (!memberHint && !dbMember) {
+      // Fallback: room name embeds participant id (legacy / admin tooling)
+      if (
+        !authorized &&
+        (roomName.includes(identity) || roomName.includes(String(auth.userId)))
+      ) {
+        authorized = true;
+      }
+
+      if (!authorized) {
         return send(res, 403, {
           error:
             'Not authorized for this LiveKit room. Join only works for calls you participate in.',
+          code: 'NOT_CALL_MEMBER',
         });
       }
     }
@@ -178,14 +219,15 @@ module.exports = async function handler(req, res) {
       !livekit.apiKey ||
       !livekit.apiSecret ||
       livekit.apiKey === 'devkey' ||
-      livekit.apiSecret === 'secret'
+      livekit.apiSecret === 'secret' ||
+      !isUsableLivekitUrl(livekit.wsUrl)
     ) {
       return send(res, 200, {
         configured: false,
         token: null,
-        wsUrl: livekit.wsUrl || null,
+        wsUrl: isUsableLivekitUrl(livekit.wsUrl) ? livekit.wsUrl : null,
         message:
-          'LiveKit credentials missing. Set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET in Vercel env.',
+          'LiveKit is not fully configured. Set LIVEKIT_URL (wss://…), LIVEKIT_API_KEY, and LIVEKIT_API_SECRET in Vercel env.',
       });
     }
 

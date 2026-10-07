@@ -2465,16 +2465,18 @@ async function startServer(): Promise<express.Express> {
           }
         }
 
-        // Mirror busy in memory presence when a live call exists or is being offered
-        if (!memCall && callStatus === 'ringing' && resolvedCallerId && resolvedReceiverId) {
+        // Mirror busy in memory — hydrate activeCalls for ringing OR active
+        // (Accept sync must not 404 LiveKit token when WS initiate was missed)
+        if (!memCall && resolvedCallerId && resolvedReceiverId) {
           activeCalls.set(String(callId), {
             id: String(callId),
             callerId: resolvedCallerId,
             receiverId: resolvedReceiverId,
-            status: 'ringing',
+            status: callStatus === 'ringing' ? 'ringing' : 'active',
             ringingAt: Date.now(),
+            startTime: callStatus === 'ringing' ? undefined : Date.now(),
           });
-        } else if (memCall && (callStatus === 'active' || callStatus === 'accepted')) {
+        } else if (memCall && (callStatus === 'active' || callStatus === 'accepted' || callStatus === 'in_call')) {
           memCall.status = 'active';
           memCall.startTime = memCall.startTime || Date.now();
         }

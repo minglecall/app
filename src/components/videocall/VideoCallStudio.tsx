@@ -442,20 +442,36 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
         setIsPreviewOnly(false);
         setConnectionStatusText('Fetching LiveKit access token…');
 
-        const tokenRes = await authFetch('/api/livekit/token', {
-          method: 'POST',
-          body: JSON.stringify({
-            roomName: activeCall!.id,
-            name: currentUser.name,
-          }),
-          signal: abortController.signal,
-        });
+        const fetchToken = async () => {
+          const tokenRes = await authFetch('/api/livekit/token', {
+            method: 'POST',
+            body: JSON.stringify({
+              roomName: activeCall!.id,
+              name: currentUser.name,
+            }),
+            signal: abortController.signal,
+          });
+          let data: any = null;
+          try {
+            data = await tokenRes.json();
+          } catch {
+            data = null;
+          }
+          return { tokenRes, data };
+        };
 
-        let data: any = null;
-        try {
-          data = await tokenRes.json();
-        } catch {
-          data = null;
+        // Retry once — Accept sync may land a few hundred ms after UI goes active
+        let { tokenRes, data } = await fetchToken();
+        if (
+          (!tokenRes.ok || !data?.configured || !data?.token || !data?.wsUrl) &&
+          (tokenRes.status === 403 ||
+            tokenRes.status === 404 ||
+            tokenRes.status === 409 ||
+            !data?.token)
+        ) {
+          await new Promise((r) => setTimeout(r, 700));
+          if (!isMounted || abortController.signal.aborted) return;
+          ({ tokenRes, data } = await fetchToken());
         }
 
         if (!isMounted || abortController.signal.aborted) return;
@@ -467,14 +483,25 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
               ? 'Not authorized for this call room'
               : tokenRes.status === 404
               ? 'Call room not found'
+              : tokenRes.status === 409
+              ? 'This call has already ended'
               : 'Failed to get LiveKit token');
           await enablePreviewOnly(msg);
           return;
         }
 
-        if (!data?.configured || !data?.token || !data?.wsUrl) {
+        const wsUrl = String(data?.wsUrl || '').trim();
+        const wsOk =
+          Boolean(data?.configured) &&
+          Boolean(data?.token) &&
+          Boolean(wsUrl) &&
+          !wsUrl.includes('your-livekit') &&
+          (wsUrl.startsWith('wss://') || wsUrl.startsWith('ws://'));
+
+        if (!wsOk) {
           await enablePreviewOnly(
-            data?.message || 'LiveKit is not configured on the server'
+            data?.message ||
+              'LiveKit is not configured on the server (missing LIVEKIT_URL / API key)'
           );
           return;
         }
@@ -630,47 +657,15 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
           }
         });
 
-        // Parallelize: warm ICE/signaling path + capture local media
-        const preparePromise = room.prepareConnection(data.wsUrl, data.token);
-        const tracksPromise = createLocalTracks({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            channelCount: 1,
-          },
-          video: {
-            facingMode: facingModeRef.current,
-            ...vConstraints,
-          },
-        });
-
-        const [prepareResult, tracksResult] = await Promise.allSettled([
-          preparePromise,
-          tracksPromise,
-        ]);
-
-        if (tracksResult.status === 'fulfilled') {
-          localTracksRef.current = tracksResult.value;
-        }
-
-        if (!isMounted || abortController.signal.aborted) {
-          stopLocalTracks();
-          return;
-        }
-
-        if (prepareResult.status === 'rejected' || tracksResult.status === 'rejected') {
-          const err =
-            (prepareResult.status === 'rejected' && prepareResult.reason) ||
-            (tracksResult.status === 'rejected' && tracksResult.reason) ||
-            new Error('Failed to prepare media');
-          throw err;
-        }
-
-        const localTracks = tracksResult.value;
+        // Connect to the room first so the peer call works even if camera permission is denied.
         setConnectionStatusText('Connecting to LiveKit…');
+        try {
+          await room.prepareConnection(wsUrl, data.token);
+        } catch (prepErr) {
+          console.warn('[LiveKit] prepareConnection notice:', prepErr);
+        }
 
-        await room.connect(data.wsUrl, data.token, {
+        await room.connect(wsUrl, data.token, {
           autoSubscribe: true,
         });
 
@@ -682,12 +677,49 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
         // Late-join / already-published remote tracks
         attachExistingRemoteTracks(room);
 
-        // Publish ASAP after connect
+        if (isMounted) {
+          setLiveKitConnected(true);
+          setIsPreviewOnly(false);
+          setConnectionStatusText(`${baseStatus} · Connected`);
+        }
+
+        // Capture + publish local media after room join (non-fatal on permission errors)
+        let localTracks: LocalTrack[] = [];
+        try {
+          localTracks = await createLocalTracks({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+            video: {
+              facingMode: facingModeRef.current,
+              ...vConstraints,
+            },
+          });
+          localTracksRef.current = localTracks;
+        } catch (mediaErr: any) {
+          console.warn('[LiveKit] local media unavailable:', mediaErr);
+          if (isMounted && showToast) {
+            showToast(
+              'Camera / Mic blocked',
+              mediaErr?.message ||
+                'Allow camera and microphone permissions, then toggle them in the call controls.',
+              'warning'
+            );
+          }
+        }
+
+        if (!isMounted || abortController.signal.aborted) {
+          stopLocalTracks();
+          return;
+        }
+
         for (const track of localTracks) {
           if (track.kind === Track.Kind.Video) {
             if (track.mediaStreamTrack) {
               try {
-                // Talking-head: prefer motion smoothness over still-detail sharpness
                 (track.mediaStreamTrack as any).contentHint = 'motion';
               } catch {
                 // contentHint unsupported
@@ -715,14 +747,17 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
           }
         }
 
-        // Respect current mute toggles
-        await room.localParticipant.setMicrophoneEnabled(micEnabled);
-        await room.localParticipant.setCameraEnabled(cameraEnabled);
+        if (localTracks.length) {
+          await room.localParticipant.setMicrophoneEnabled(micEnabled);
+          await room.localParticipant.setCameraEnabled(cameraEnabled);
+        }
 
         if (isMounted) {
-          setLiveKitConnected(true);
-          setIsPreviewOnly(false);
-          setConnectionStatusText(`${baseStatus} · Connected`);
+          setConnectionStatusText(
+            localTracks.length
+              ? `${baseStatus} · Connected`
+              : `${baseStatus} · Connected (no local camera/mic)`
+          );
         }
       } catch (err: any) {
         if (abortController.signal.aborted) return;
