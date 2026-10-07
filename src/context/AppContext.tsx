@@ -5754,11 +5754,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           usersRef.current = next;
           return next;
         });
-        showToast(
-          'Create Failed',
-          typeof data?.error === 'string' ? data.error : 'Could not create creator on the server.',
-          'error'
-        );
+        const serverError =
+          (typeof data?.error === 'string' && data.error) ||
+          (typeof data?.error?.message === 'string' && data.error.message) ||
+          (typeof data?.message === 'string' && data.message) ||
+          `Could not create creator on the server${res.status ? ` (${res.status})` : ''}.`;
+        showToast('Create Failed', serverError, 'error');
         return null;
       }
 

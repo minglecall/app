@@ -2749,12 +2749,19 @@ async function startServer(): Promise<express.Express> {
       serverUsers.set(normalizedCreator.id, normalizedCreator);
 
       if (isSupabaseAdminConfigured()) {
-        await upsertProfileAdmin({
+        const firstUpsert = await upsertProfileAdmin({
           ...normalizedCreator,
           role: 'female_creator',
           password_hash: passwordHash,
           has_password_set: true,
         });
+        if (!firstUpsert.success) {
+          serverUsers.delete(normalizedCreator.id);
+          return res.status(500).json({
+            success: false,
+            error: firstUpsert.error || 'Failed to persist creator profile',
+          });
+        }
 
         const pwRes = await updateUserPasswordAdmin(
           normalizedCreator.id,
@@ -2766,39 +2773,54 @@ async function startServer(): Promise<express.Express> {
             name: normalizedCreator.name,
           }
         );
-        if (pwRes.authUserId) {
-          const priorClientId = normalizedCreator.id;
-          normalizedCreator.authId = pwRes.authUserId;
-          // Auth trigger inserts profiles.id = auth.users.id; re-assert ownership on that row
-          // and prefer it as the canonical host id when it differs from the client UUID.
-          try {
-            await upsertProfileAdmin({
-              id: pwRes.authUserId,
-              authId: pwRes.authUserId,
-              name: normalizedCreator.name,
-              email: creatorEmail,
-              gender: 'female',
-              genderLocked: true,
-              role: 'female_creator',
-              teamLeaderId: leaderId,
-              createdById: leaderId,
-              agencyName: leader?.agencyName || null,
-              avatarUrl: normalizedCreator.avatarUrl,
-              gallery: normalizedCreator.gallery,
-              isOnboarded: true,
-              isVerified: true,
-              hasPasswordSet: true,
-              password_hash: passwordHash,
-            });
-            if (pwRes.authUserId !== priorClientId) {
-              serverUsers.delete(priorClientId);
-              normalizedCreator.id = pwRes.authUserId;
-            }
-          } catch (e: any) {
-            console.warn('[teamleader/creators] ownership re-assert notice:', e?.message || e);
-          }
-          serverUsers.set(normalizedCreator.id, normalizedCreator);
+        if (!pwRes.success || !pwRes.authUserId) {
+          serverUsers.delete(normalizedCreator.id);
+          return res.status(500).json({
+            success: false,
+            error: pwRes.error || 'Failed to create Auth account for creator',
+          });
         }
+
+        const priorClientId = normalizedCreator.id;
+        normalizedCreator.authId = pwRes.authUserId;
+        // Auth trigger inserts profiles.id = auth.users.id; re-assert ownership on that row
+        // and prefer it as the canonical host id when it differs from the client UUID.
+        const ownedUpsert = await upsertProfileAdmin({
+          id: pwRes.authUserId,
+          authId: pwRes.authUserId,
+          name: normalizedCreator.name,
+          email: creatorEmail,
+          gender: 'female',
+          genderLocked: true,
+          role: 'female_creator',
+          teamLeaderId: leaderId,
+          createdById: leaderId,
+          agencyName: leader?.agencyName || null,
+          avatarUrl: normalizedCreator.avatarUrl,
+          gallery: normalizedCreator.gallery,
+          spokenLanguages: normalizedCreator.spokenLanguages,
+          tags: normalizedCreator.tags,
+          bio: normalizedCreator.bio,
+          age: normalizedCreator.age,
+          nationality: normalizedCreator.nationality,
+          countryCode: normalizedCreator.countryCode,
+          isOnboarded: true,
+          isVerified: true,
+          hasPasswordSet: true,
+          password_hash: passwordHash,
+        });
+        if (!ownedUpsert.success) {
+          serverUsers.delete(priorClientId);
+          return res.status(500).json({
+            success: false,
+            error: ownedUpsert.error || 'Failed to link creator to Auth account',
+          });
+        }
+        if (pwRes.authUserId !== priorClientId) {
+          serverUsers.delete(priorClientId);
+          normalizedCreator.id = pwRes.authUserId;
+        }
+        serverUsers.set(normalizedCreator.id, normalizedCreator);
       }
 
       broadcastAll({

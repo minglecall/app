@@ -203,11 +203,32 @@ async function requireAuth(req) {
     };
   }
   const authUser = userData.user;
-  const { data: profile } = await client
-    .from('profiles')
-    .select('*')
-    .or(`auth_id.eq.${authUser.id},id.eq.${authUser.id}`)
-    .maybeSingle();
+  // Sequential lookup — avoid .or(...).maybeSingle() which errors when multiple rows match
+  let profile = null;
+  {
+    const { data: byAuth } = await client
+      .from('profiles')
+      .select('*')
+      .eq('auth_id', authUser.id)
+      .maybeSingle();
+    profile = byAuth || null;
+  }
+  if (!profile) {
+    const { data: byId } = await client
+      .from('profiles')
+      .select('*')
+      .eq('id', authUser.id)
+      .maybeSingle();
+    profile = byId || null;
+  }
+  if (!profile && authUser.email) {
+    const { data: byEmail } = await client
+      .from('profiles')
+      .select('*')
+      .ilike('email', String(authUser.email).trim().toLowerCase())
+      .maybeSingle();
+    profile = byEmail || null;
+  }
   const profileId = String((profile && profile.id) || authUser.id);
   const role = String((profile && profile.role) || '').toLowerCase();
   const email = String((profile && profile.email) || authUser.email || '').toLowerCase();

@@ -114,25 +114,27 @@ export async function signUpWithEmailOtp(params: {
         },
       });
 
+      // Supabase AuthResponse narrows data.user to `never` inside some error branches;
+      // keep a stable typed snapshot for recoverable signup paths.
+      const signupUser = (data?.user ?? null) as {
+        id?: string;
+        identities?: unknown[] | null;
+        email?: string | null;
+      } | null;
+
       if ((import.meta as any)?.env?.DEV) {
         console.debug('[signUpWithEmailOtp] signUp result', {
           error: error?.message,
           status: (error as any)?.status,
-          userId: data?.user?.id,
-          identitiesLen: Array.isArray((data?.user as any)?.identities)
-            ? (data?.user as any).identities.length
-            : null,
+          userId: signupUser?.id,
+          identitiesLen: Array.isArray(signupUser?.identities) ? signupUser!.identities!.length : null,
         });
       }
 
       if (error) {
         const lower = (error.message || '').toLowerCase();
-        if (lower.includes('already registered') || lower.includes('already been registered')) {
-          return {
-            success: false,
-            error: 'An account with this email is already registered. Please log in or use Forgot Password.',
-          };
-        }
+        const isAlreadyRegistered =
+          lower.includes('already registered') || lower.includes('already been registered');
 
         const isRateLimit =
           lower.includes('rate limit') ||
@@ -145,13 +147,13 @@ export async function signUpWithEmailOtp(params: {
           lower.includes('database error') ||
           lower.includes('unexpected_failure');
 
-        if (isRateLimit || isDbTriggerError) {
-          // Prefer server bootstrap rather than the confirmation-settings dead-end
-          // Still use user id if Supabase returned one despite the error/rate-limit.
-          if (data?.user?.id && isValidUuid(data.user.id)) {
-            const identities = (data.user as any).identities;
+        // "Already registered" may be an orphan Auth user (profile deleted). Let
+        // register-bootstrap reclaim it when no profile exists; only fail if bootstrap says so.
+        if (isAlreadyRegistered || isRateLimit || isDbTriggerError) {
+          if (signupUser?.id && isValidUuid(signupUser.id)) {
+            const identities = signupUser.identities;
             if (!(Array.isArray(identities) && identities.length === 0)) {
-              createdUserId = data.user.id;
+              createdUserId = signupUser.id;
             }
           }
           if (!createdUserId) {
@@ -166,18 +168,20 @@ export async function signUpWithEmailOtp(params: {
         }
       }
 
-      if (!clientSignUpFailedForBootstrap && data?.user?.id && isValidUuid(data.user.id)) {
+      if (!clientSignUpFailedForBootstrap && signupUser?.id && isValidUuid(signupUser.id)) {
         // Supabase may return a user object without identities when the email is already
-        // registered (anti-enumeration). That path does NOT set the submitted password.
-        const identities = (data.user as any).identities;
+        // registered (anti-enumeration). That path does NOT set the submitted password —
+        // reclaim via register-bootstrap (orphan Auth) or fail if a profile still exists.
+        const identities = signupUser.identities;
         if (Array.isArray(identities) && identities.length === 0) {
-          return {
-            success: false,
-            error: 'An account with this email is already registered. Please log in or use Forgot Password.',
-          };
+          clientSignUpFailedForBootstrap = true;
+          console.warn(
+            '[signUpWithEmailOtp] signUp returned empty identities; trying register-bootstrap'
+          );
+        } else {
+          createdUserId = signupUser.id;
         }
-        createdUserId = data.user.id;
-      } else if (!clientSignUpFailedForBootstrap && !data?.user) {
+      } else if (!clientSignUpFailedForBootstrap && !signupUser) {
         // Empty user without error — treat as already-registered / orphan Auth
         clientSignUpFailedForBootstrap = true;
         console.warn('[signUpWithEmailOtp] signUp returned no user; trying register-bootstrap');

@@ -277,6 +277,7 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
 
       return res.json({
         success: true,
+        authId: authUserId,
         userId: authUserId,
         role: safeRole,
         gender,

@@ -320,24 +320,116 @@ async function registerBootstrap(req, res) {
         : role === 'other_user'
           ? 'other'
           : 'male';
+    const displayName = name || email.split('@')[0] || 'User';
 
-    const { data: created, error } = await client.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: skipOtp,
-      user_metadata: { name, role, gender },
-    });
-    if (error && !/already/i.test(error.message)) {
-      return send(res, 400, { success: false, error: error.message });
+    // Existing profile → must log in (do not reclaim active accounts)
+    const { data: existingProfile } = await client
+      .from('profiles')
+      .select('id, role, auth_id')
+      .ilike('email', email)
+      .maybeSingle();
+    if (existingProfile && existingProfile.id) {
+      return send(res, 409, {
+        success: false,
+        code: 'ALREADY_REGISTERED',
+        error: 'An account with this email is already registered. Please log in or use Forgot Password.',
+      });
     }
 
-    if (skipOtp && created && created.user) {
-      await client.auth.admin.updateUserById(created.user.id, { email_confirm: true }).catch(() => {});
+    async function lookupAuthId() {
+      let page = 1;
+      const perPage = 1000;
+      for (;;) {
+        const { data: list, error: listErr } = await client.auth.admin.listUsers({
+          page,
+          perPage,
+        });
+        if (listErr) {
+          console.warn('[register-bootstrap] listUsers notice:', listErr.message);
+          return null;
+        }
+        const matched = findAuthUserByEmail(list && list.users, email);
+        if (matched && matched.id) return matched.id;
+        if (!list || !list.users || list.users.length < perPage) return null;
+        page += 1;
+        if (page > 50) return null;
+      }
+    }
+
+    const userMetadata = {
+      full_name: displayName,
+      display_name: displayName,
+      name: displayName,
+      role,
+      gender,
+      is_onboarded: false,
+    };
+
+    let authUserId = await lookupAuthId();
+    if (authUserId) {
+      // Orphan Auth (profile deleted) — reclaim with the new password
+      const { error: updErr } = await client.auth.admin.updateUserById(authUserId, {
+        password,
+        email_confirm: skipOtp,
+        user_metadata: userMetadata,
+      });
+      if (updErr) {
+        return send(res, 500, {
+          success: false,
+          error: updErr.message || 'Could not update existing Auth account.',
+        });
+      }
+    } else {
+      const { data: created, error } = await client.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: skipOtp,
+        user_metadata: userMetadata,
+      });
+      if (error) {
+        const lower = String(error.message || '').toLowerCase();
+        if (lower.includes('already') || lower.includes('registered')) {
+          // Race: Auth appeared between lookup and create — reclaim it
+          authUserId = await lookupAuthId();
+          if (authUserId) {
+            const { error: updErr } = await client.auth.admin.updateUserById(authUserId, {
+              password,
+              email_confirm: skipOtp,
+              user_metadata: userMetadata,
+            });
+            if (updErr) {
+              return send(res, 500, {
+                success: false,
+                error: updErr.message || 'Could not update existing Auth account.',
+              });
+            }
+          } else {
+            return send(res, 409, {
+              success: false,
+              code: 'ALREADY_REGISTERED',
+              error:
+                'An account with this email is already registered. Please log in or use Forgot Password.',
+            });
+          }
+        } else {
+          return send(res, 400, { success: false, error: error.message });
+        }
+      } else if (created && created.user && created.user.id) {
+        authUserId = created.user.id;
+      }
+    }
+
+    if (!authUserId) {
+      return send(res, 500, {
+        success: false,
+        error: 'Could not resolve Auth user id.',
+      });
     }
 
     return send(res, 200, {
       success: true,
-      authId: (created && created.user && created.user.id) || null,
+      authId: authUserId,
+      userId: authUserId,
       email,
       role,
       gender,

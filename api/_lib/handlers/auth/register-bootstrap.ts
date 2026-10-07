@@ -1,5 +1,30 @@
 import { sendJson, readJsonBody, createServiceClient, type VercelReq, type VercelRes } from '../../vercelAuth';
-import { isValidEmail, sanitizePublicSignupRole, getPasswordPolicyError } from '../../authHelpers';
+import {
+  isValidEmail,
+  sanitizePublicSignupRole,
+  getPasswordPolicyError,
+  findAuthUserByEmail,
+} from '../../authHelpers';
+
+async function resolveAuthUserId(
+  client: NonNullable<ReturnType<typeof createServiceClient>>,
+  email: string
+): Promise<string | null> {
+  let page = 1;
+  const perPage = 1000;
+  for (;;) {
+    const { data, error } = await client.auth.admin.listUsers({ page, perPage });
+    if (error) {
+      console.warn('[register-bootstrap] listUsers notice:', error.message);
+      return null;
+    }
+    const matched = findAuthUserByEmail(data?.users as any, email);
+    if (matched?.id) return matched.id;
+    if (!data?.users?.length || data.users.length < perPage) return null;
+    page += 1;
+    if (page > 50) return null;
+  }
+}
 
 export default async function handler(req: VercelReq, res: VercelRes) {
   if (req.method === 'OPTIONS') {
@@ -37,22 +62,94 @@ export default async function handler(req: VercelReq, res: VercelRes) {
         : role === 'other_user'
           ? 'other'
           : 'male';
+    const displayName = name || email.split('@')[0] || 'User';
 
-    const { data: created, error } = await client.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: false,
-      user_metadata: { name, role, gender },
-    });
-
-    if (error && !/already/i.test(error.message)) {
-      return sendJson(res, 400, { success: false, error: error.message });
+    const { data: existingProfile } = await client
+      .from('profiles')
+      .select('id, role, auth_id')
+      .ilike('email', email)
+      .maybeSingle();
+    if (existingProfile?.id) {
+      return sendJson(res, 409, {
+        success: false,
+        code: 'ALREADY_REGISTERED',
+        error: 'An account with this email is already registered. Please log in or use Forgot Password.',
+      });
     }
 
-    const authId = created?.user?.id;
+    const userMetadata = {
+      full_name: displayName,
+      display_name: displayName,
+      name: displayName,
+      role,
+      gender,
+      is_onboarded: false,
+    };
+
+    let authUserId = await resolveAuthUserId(client, email);
+    if (authUserId) {
+      // Orphan Auth (profile deleted) — reclaim with the new password
+      const { error: updErr } = await client.auth.admin.updateUserById(authUserId, {
+        password,
+        email_confirm: false,
+        user_metadata: userMetadata,
+      });
+      if (updErr) {
+        return sendJson(res, 500, {
+          success: false,
+          error: updErr.message || 'Could not update existing Auth account.',
+        });
+      }
+    } else {
+      const { data: created, error } = await client.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: false,
+        user_metadata: userMetadata,
+      });
+      if (error) {
+        const lower = String(error.message || '').toLowerCase();
+        if (lower.includes('already') || lower.includes('registered')) {
+          authUserId = await resolveAuthUserId(client, email);
+          if (authUserId) {
+            const { error: updErr } = await client.auth.admin.updateUserById(authUserId, {
+              password,
+              email_confirm: false,
+              user_metadata: userMetadata,
+            });
+            if (updErr) {
+              return sendJson(res, 500, {
+                success: false,
+                error: updErr.message || 'Could not update existing Auth account.',
+              });
+            }
+          } else {
+            return sendJson(res, 409, {
+              success: false,
+              code: 'ALREADY_REGISTERED',
+              error:
+                'An account with this email is already registered. Please log in or use Forgot Password.',
+            });
+          }
+        } else {
+          return sendJson(res, 400, { success: false, error: error.message });
+        }
+      } else if (created?.user?.id) {
+        authUserId = created.user.id;
+      }
+    }
+
+    if (!authUserId) {
+      return sendJson(res, 500, {
+        success: false,
+        error: 'Could not resolve Auth user id.',
+      });
+    }
+
     return sendJson(res, 200, {
       success: true,
-      authId: authId || null,
+      authId: authUserId,
+      userId: authUserId,
       email,
       role,
       gender,

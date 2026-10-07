@@ -27,7 +27,7 @@ const AVAILABLE = [
   'POST /api/users/sync-all, /api/users/me/delete',
   'POST /api/supabase/*',
   'ALL /api/v1/*',
-  'GET /api/storage/config, POST /api/storage/presigned-url',
+  'GET /api/storage/config, POST /api/storage/presigned-url, POST /api/storage/upload',
   'GET|POST /api/admin/* (subset)',
   'GET|POST /api/creator/*, /api/rewards/* (subset)',
   'standalone: health, ping, r2-test, livekit/*, users, create-team-leader',

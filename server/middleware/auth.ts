@@ -223,9 +223,18 @@ export function requireRole(roles: string[]) {
       const authUser = await authenticateRequest(req, res);
       if (!authUser) return;
       const profile = (req as any).profile as ResolvedProfile | undefined;
+      if (!profile?.id) {
+        return sendForbidden(
+          res,
+          'No profile is linked to this login. Sign out and sign in again, or contact support.'
+        );
+      }
       const role = profile?.role || '';
       if (!allowed.has(role) && !isAdminRole(role)) {
-        return sendForbidden(res, 'Insufficient role privileges.');
+        return sendForbidden(
+          res,
+          `Insufficient role privileges (role: ${role || 'none'}). Team leader access required.`
+        );
       }
       return next();
     } catch (err: any) {

@@ -2,7 +2,6 @@
  * /api/teamleader/* — Vercel serverless port of Express team-leader APIs.
  * Paths: creators, stats, ban-creator, unban-creator, delete-creator, override-rate
  */
-import { randomUUID } from 'crypto';
 import {
   sendJson,
   readJsonBody,
@@ -123,29 +122,64 @@ export default async function handler(req: VercelReq, res: VercelRes) {
         return sendJson(res, 409, { success: false, error: 'An account with this email already exists' });
       }
 
-      const id = String(body.id || randomUUID());
+      if (!leaderId) {
+        return sendJson(res, 400, {
+          success: false,
+          error: 'Team leader profile could not be resolved. Sign out and sign in again.',
+        });
+      }
+
+      const userMetadata = { role: 'female_creator', name, gender: 'female', full_name: name };
+      let authUserId: string | null = null;
       const { data: authUser, error: authErr } = await client.auth.admin.createUser({
         email,
         password,
         email_confirm: true,
-        user_metadata: { role: 'female_creator', name, gender: 'female' },
+        user_metadata: userMetadata,
       });
-      if (authErr || !authUser?.user) {
-        return sendJson(res, 500, {
-          success: false,
-          error: authErr?.message || 'Failed to create auth user',
-        });
+      if (!authErr && authUser?.user?.id) {
+        authUserId = authUser.user.id;
+      } else {
+        // Reclaim orphan Auth (profile deleted) instead of failing
+        const { data: list } = await client.auth.admin.listUsers({ perPage: 1000 });
+        const matched = (list?.users || []).find(
+          (u: any) => String(u.email || '').toLowerCase() === email
+        );
+        if (matched?.id) {
+          const { error: updErr } = await client.auth.admin.updateUserById(matched.id, {
+            password,
+            email_confirm: true,
+            user_metadata: userMetadata,
+          });
+          if (updErr) {
+            return sendJson(res, 500, {
+              success: false,
+              error: updErr.message || 'Failed to update existing Auth user',
+            });
+          }
+          authUserId = matched.id;
+        } else {
+          return sendJson(res, 500, {
+            success: false,
+            error: authErr?.message || 'Failed to create auth user',
+          });
+        }
       }
 
+      const avatarUrl =
+        body.avatarUrl ||
+        body.avatar_url ||
+        'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400';
       const row: Record<string, any> = {
-        id,
-        auth_id: authUser.user.id,
+        id: authUserId,
+        auth_id: authUserId,
         name,
         email,
         gender: 'female',
         gender_locked: true,
         role: 'female_creator',
         is_onboarded: true,
+        is_verified: true,
         has_password_set: true,
         team_leader_id: leaderId,
         created_by_id: leaderId,
@@ -154,18 +188,43 @@ export default async function handler(req: VercelReq, res: VercelRes) {
         nationality: body.nationality || 'United States',
         country_code: (body.countryCode || body.country_code || 'US').toString().toUpperCase(),
         bio: body.bio || '',
-        avatar_url: body.avatarUrl || body.avatar_url || '',
+        avatar_url: avatarUrl,
+        gallery: Array.isArray(body.gallery) && body.gallery.length ? body.gallery : [avatarUrl],
         online_status: 'offline',
         updated_at: new Date().toISOString(),
       };
 
-      const { data: inserted, error: insErr } = await client.from('profiles').upsert(row).select('*').single();
+      const { data: inserted, error: insErr } = await client
+        .from('profiles')
+        .upsert(row, { onConflict: 'id' })
+        .select('*')
+        .single();
       if (insErr) {
-        await client.auth.admin.deleteUser(authUser.user.id).catch(() => {});
         return sendJson(res, 500, { success: false, error: insErr.message });
       }
 
-      const creator = mapProfileRow(inserted);
+      await client
+        .from('profiles')
+        .update({
+          team_leader_id: leaderId,
+          created_by_id: leaderId,
+          role: 'female_creator',
+          gender: 'female',
+          gender_locked: true,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', authUserId);
+
+      const creator = mapProfileRow(inserted) || {
+        id: authUserId,
+        authId: authUserId,
+        name,
+        email,
+        gender: 'female',
+        role: 'female_creator',
+        teamLeaderId: leaderId,
+        createdById: leaderId,
+      };
       return sendJson(res, 200, {
         success: true,
         creator,

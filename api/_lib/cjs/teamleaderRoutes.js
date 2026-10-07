@@ -8,6 +8,7 @@ const {
   isValidEmail,
   getPasswordPolicyError,
   mapProfileRow,
+  findAuthUserByEmail,
   requireAuth,
   isTeamLeaderRole,
   isAdminRole,
@@ -64,10 +65,23 @@ async function handleTeamleader(path, req, res) {
   if (auth.ok === false) {
     return send(res, auth.status, { success: false, error: auth.error });
   }
+  if (!auth.profile || !auth.profileId) {
+    return send(res, 403, {
+      success: false,
+      error: {
+        message:
+          'No profile is linked to this login. Sign out and sign in again, or contact support.',
+        code: 'FORBIDDEN',
+      },
+    });
+  }
   if (!isTeamLeaderRole(auth.role, auth.email)) {
     return send(res, 403, {
       success: false,
-      error: { message: 'Team leader role required.', code: 'FORBIDDEN' },
+      error: {
+        message: `Team leader role required (current role: ${auth.role || 'none'}).`,
+        code: 'FORBIDDEN',
+      },
     });
   }
 
@@ -128,9 +142,16 @@ async function handleTeamleader(path, req, res) {
       const pwErr = getPasswordPolicyError(password);
       if (pwErr) return send(res, 400, { success: false, error: pwErr });
 
+      if (!leaderId) {
+        return send(res, 400, {
+          success: false,
+          error: 'Team leader profile could not be resolved. Sign out and sign in again.',
+        });
+      }
+
       const { data: existing } = await client
         .from('profiles')
-        .select('id')
+        .select('id, role, team_leader_id, created_by_id')
         .ilike('email', email)
         .maybeSingle();
       if (existing) {
@@ -140,32 +161,80 @@ async function handleTeamleader(path, req, res) {
         });
       }
 
+      async function lookupAuthIdByEmail() {
+        let page = 1;
+        const perPage = 1000;
+        for (;;) {
+          const { data: list, error: listErr } = await client.auth.admin.listUsers({
+            page,
+            perPage,
+          });
+          if (listErr) {
+            console.warn('[teamleader/creators] listUsers notice:', listErr.message);
+            return null;
+          }
+          const matched = findAuthUserByEmail(list && list.users, email);
+          if (matched && matched.id) return matched.id;
+          if (!list || !list.users || list.users.length < perPage) return null;
+          page += 1;
+          if (page > 50) return null;
+        }
+      }
+
+      const userMetadata = {
+        role: 'female_creator',
+        name,
+        full_name: name,
+        gender: 'female',
+      };
+
+      let authUserId = null;
       const { data: authUser, error: authErr } = await client.auth.admin.createUser({
         email,
         password,
         email_confirm: true,
-        user_metadata: {
-          role: 'female_creator',
-          name,
-          full_name: name,
-          gender: 'female',
-        },
+        user_metadata: userMetadata,
       });
-      if (authErr || !authUser || !authUser.user) {
-        return send(res, 500, {
-          success: false,
-          error: (authErr && authErr.message) || 'Failed to create auth user',
-        });
+
+      if (!authErr && authUser && authUser.user && authUser.user.id) {
+        authUserId = authUser.user.id;
+      } else {
+        // Orphan Auth (profile deleted) or race — reclaim instead of failing hard
+        const existingAuthId = await lookupAuthIdByEmail();
+        if (existingAuthId) {
+          const { error: updErr } = await client.auth.admin.updateUserById(existingAuthId, {
+            password,
+            email_confirm: true,
+            user_metadata: userMetadata,
+          });
+          if (updErr) {
+            return send(res, 500, {
+              success: false,
+              error: updErr.message || 'Failed to update existing Auth user',
+            });
+          }
+          authUserId = existingAuthId;
+        } else {
+          return send(res, 500, {
+            success: false,
+            error: (authErr && authErr.message) || 'Failed to create auth user',
+          });
+        }
       }
 
       // MUST use auth user id — handle_new_auth_user trigger already inserts profiles.id = auth.users.id.
       // Upserting a different id leaves an orphan host with null team_leader_id (empty TL roster).
-      const authUserId = authUser.user.id;
       const agencyName = leader.agency_name || leader.agencyName || null;
       const avatarUrl =
         body.avatarUrl ||
         body.avatar_url ||
         'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400';
+      const gallery =
+        Array.isArray(body.gallery) && body.gallery.length
+          ? body.gallery.filter((u) => typeof u === 'string' && u && !u.startsWith('blob:'))
+          : [];
+      const safeGallery = gallery.length ? gallery : [avatarUrl];
+      const ageNum = body.age != null ? Number(body.age) : 24;
       const row = {
         id: authUserId,
         auth_id: authUserId,
@@ -180,12 +249,20 @@ async function handleTeamleader(path, req, res) {
         team_leader_id: leaderId,
         created_by_id: leaderId,
         agency_name: agencyName,
-        age: body.age != null ? Number(body.age) : 24,
+        age: Number.isFinite(ageNum) && ageNum >= 18 ? ageNum : 24,
         nationality: body.nationality || 'United States',
-        country_code: String(body.countryCode || body.country_code || 'US').toUpperCase(),
+        country_code: String(body.countryCode || body.country_code || 'US')
+          .toUpperCase()
+          .slice(0, 8),
         bio: body.bio || '',
-        avatar_url: avatarUrl,
-        gallery: Array.isArray(body.gallery) && body.gallery.length ? body.gallery : [avatarUrl],
+        avatar_url: typeof avatarUrl === 'string' && !avatarUrl.startsWith('blob:') ? avatarUrl : safeGallery[0],
+        gallery: safeGallery,
+        spoken_languages: Array.isArray(body.spokenLanguages)
+          ? body.spokenLanguages
+          : Array.isArray(body.spoken_languages)
+            ? body.spoken_languages
+            : ['English'],
+        tags: Array.isArray(body.tags) ? body.tags : ['Agency Host'],
         online_status: 'offline',
         updated_at: new Date().toISOString(),
       };
@@ -196,7 +273,7 @@ async function handleTeamleader(path, req, res) {
         .select('*')
         .single();
       if (insErr) {
-        await client.auth.admin.deleteUser(authUserId).catch(() => {});
+        console.error('[teamleader/creators] profile upsert failed:', insErr.message);
         return send(res, 500, { success: false, error: insErr.message });
       }
 
@@ -215,6 +292,21 @@ async function handleTeamleader(path, req, res) {
         .eq('id', authUserId);
 
       const { data: finalRow } = await client.from('profiles').select('*').eq('id', authUserId).maybeSingle();
+      const creator = mapProfileRow(finalRow || inserted) || {
+        id: authUserId,
+        authId: authUserId,
+        name,
+        email,
+        gender: 'female',
+        genderLocked: true,
+        role: 'female_creator',
+        teamLeaderId: leaderId,
+        createdById: leaderId,
+        agencyName: agencyName || undefined,
+        isOnboarded: true,
+        isVerified: true,
+        hasPasswordSet: true,
+      };
 
       try {
         const policy = await getEmailPolicy(client);
@@ -234,7 +326,7 @@ async function handleTeamleader(path, req, res) {
 
       return send(res, 200, {
         success: true,
-        creator: mapProfileRow(finalRow || inserted),
+        creator,
         message: `Successfully created and persisted creator ${name}`,
       });
     }
