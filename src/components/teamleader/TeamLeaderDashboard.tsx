@@ -89,6 +89,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'busy' | 'offline'>('all');
   const [isSyncing, setIsSyncing] = useState(false);
   const [hydratedCreatorIds, setHydratedCreatorIds] = useState<Set<string>>(new Set());
+  const [hydratedCreators, setHydratedCreators] = useState<UserProfile[]>([]);
   const [agencyStats, setAgencyStats] = useState<{
     managedCreatorCount: number;
     totalCalls: number;
@@ -120,6 +121,7 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
 
   const hydrateManagedCreators = useCallback(async () => {
     const creators = await refreshTeamLeaderCreators();
+    setHydratedCreators(creators);
     setHydratedCreatorIds(new Set(creators.map((c) => c.id)));
     await loadAgencyStats();
   }, [refreshTeamLeaderCreators, loadAgencyStats]);
@@ -232,33 +234,40 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?auto=format&fit=crop&q=80&w=400',
   ];
 
-  // Managed Creators: ownership by teamLeaderId / createdById (or API-hydrated IDs).
+  // Managed Creators: ownership by teamLeaderId / createdById (or API-hydrated roster).
   // Do NOT include hosts solely because agencyName string matches — that leaks other agencies into money metrics.
   const managedCreators = useMemo(() => {
-    return users.filter((u) => {
+    const byId = new Map<string, UserProfile>();
+
+    for (const u of users) {
       if (u.id === currentUser.id || (currentUser.authId && u.authId === currentUser.authId)) {
-        return false;
+        continue;
       }
       if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') {
-        return false;
+        continue;
       }
       const isFemale = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
-      if (!isFemale) return false;
+      if (!isFemale) continue;
 
-      if (
+      const owned =
         u.teamLeaderId === currentUser.id ||
         u.createdById === currentUser.id ||
-        (currentUser.authId && (u.teamLeaderId === currentUser.authId || u.createdById === currentUser.authId))
-      ) {
-        return true;
-      }
+        (currentUser.authId &&
+          (u.teamLeaderId === currentUser.authId || u.createdById === currentUser.authId)) ||
+        hydratedCreatorIds.has(u.id);
 
-      // Server-hydrated roster (authoritative ownership from GET /api/teamleader/creators)
-      if (hydratedCreatorIds.has(u.id)) return true;
+      if (owned) byId.set(u.id, u);
+    }
 
-      return false;
-    });
-  }, [users, currentUser, hydratedCreatorIds]);
+    // Authoritative server roster — show even if /api/users sync dropped ownership fields
+    for (const c of hydratedCreators) {
+      if (!c?.id || c.id === currentUser.id) continue;
+      const prior = byId.get(c.id);
+      byId.set(c.id, prior ? { ...prior, ...c, onlineStatus: prior.onlineStatus || c.onlineStatus } : c);
+    }
+
+    return Array.from(byId.values());
+  }, [users, currentUser, hydratedCreatorIds, hydratedCreators]);
 
   // Managed Payout Requests (View Only) — ownership-safe
   const managedCreatorIds = useMemo(() => new Set(managedCreators.map((c) => c.id)), [managedCreators]);
@@ -367,8 +376,12 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
 
     if (!created) return;
 
+    setHydratedCreators((prev) => {
+      const without = prev.filter((c) => c.id !== created.id);
+      return [created, ...without];
+    });
     setHydratedCreatorIds((prev) => new Set([...prev, created.id]));
-    await loadAgencyStats();
+    await hydrateManagedCreators();
 
     setIsAddCreatorOpen(false);
     setNewCreatorForm({

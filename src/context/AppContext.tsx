@@ -1072,23 +1072,57 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN;
   };
 
-  // Live Supabase User Synchronization function (callable from DiscoveryGrid, Admin, and on mount)
+  // Live user directory sync (DiscoveryGrid, Admin, mount).
+  // Prefer union of: service-role /api/users (authoritative on Vercel) + RLS Supabase read + local session.
   const syncUsersFromSupabase = async (showNotification: boolean = false): Promise<{
     success: boolean;
     count: number;
     users?: UserProfile[];
   }> => {
     try {
+      // Backend directory (service role) — critical on Vercel when client RLS/empty reads hide hosts
+      let apiUsers: UserProfile[] | null = null;
+      try {
+        const res = await authFetch('/api/users');
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          if (data?.success && Array.isArray(data.users)) {
+            apiUsers = data.users as UserProfile[];
+          }
+        } else {
+          console.warn('[syncUsersFromSupabase] /api/users HTTP', res.status);
+        }
+      } catch (apiErr: any) {
+        console.warn('[syncUsersFromSupabase] /api/users failed:', apiErr?.message || apiErr);
+      }
+
+      let supabaseProfiles: UserProfile[] | null = null;
       if (isSupabaseConfigured()) {
-        const supabaseProfiles = await fetchProfilesFromSupabase();
-        if (supabaseProfiles !== null) {
-          // Merge Supabase profiles with local users so locally registered users are never wiped
+        supabaseProfiles = await fetchProfilesFromSupabase();
+      }
+
+      const remoteProfiles: UserProfile[] = [];
+      const seenIds = new Set<string>();
+      // API first (complete directory), then Supabase rows not already present
+      for (const p of apiUsers || []) {
+        if (!p?.id || deletedUserIdsRef.current.has(p.id) || seenIds.has(p.id)) continue;
+        seenIds.add(p.id);
+        remoteProfiles.push(p);
+      }
+      for (const p of supabaseProfiles || []) {
+        if (!p?.id || deletedUserIdsRef.current.has(p.id) || seenIds.has(p.id)) continue;
+        seenIds.add(p.id);
+        remoteProfiles.push(p);
+      }
+
+      if (remoteProfiles.length > 0 || supabaseProfiles !== null || apiUsers !== null) {
+          // Merge remote directory with local users so session user is never wiped
           const localUsers = usersRef.current && usersRef.current.length > 0 ? usersRef.current : [];
           const mergedMap = new Map<string, UserProfile>();
           const emailMap = new Map<string, string>(); // lowercase email -> profileId
 
-          // Add Supabase profiles first (strictly preserving live in-memory presence and active user edits)
-          supabaseProfiles.forEach((p) => {
+          // Add remote profiles first (strictly preserving live in-memory presence and active user edits)
+          remoteProfiles.forEach((p) => {
             if (deletedUserIdsRef.current.has(p.id)) {
               return;
             }
@@ -1202,12 +1236,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             mergedMap.delete(deletedId);
           }
 
-          const finalProfiles = mergedMap.size > 0 ? Array.from(mergedMap.values()) : supabaseProfiles;
+          const finalProfiles =
+            mergedMap.size > 0 ? Array.from(mergedMap.values()) : remoteProfiles;
+
+          // Never wipe a non-empty in-memory directory with an empty remote result
+          if (finalProfiles.length === 0 && localUsers.length > 0) {
+            if (showNotification) {
+              showToast(
+                'Directory unchanged',
+                'No remote profiles returned; keeping your current session directory.',
+                'info'
+              );
+            }
+            return { success: true, count: localUsers.length, users: localUsers };
+          }
 
           setUsers(finalProfiles);
           usersRef.current = finalProfiles;
 
-          // Sync with server memory so WebSocket and WebRTC signaling have all live profiles
+          // Optional admin/server memory sync (non-blocking; 403 for non-admins is fine)
           authFetch('/api/users/sync-all', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1216,27 +1263,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
           if (showNotification) {
             showToast(
-              'Supabase Synchronized 🟢',
-              `Synced ${finalProfiles.length} user profiles with Supabase PostgreSQL.`,
+              'Directory Synchronized',
+              `Loaded ${finalProfiles.length} profiles for discovery.`,
               'success'
             );
           }
           return { success: true, count: finalProfiles.length, users: finalProfiles };
-        }
-      }
-
-      // If Supabase not reachable or unconfigured, pull latest from server database
-      const res = await authFetch('/api/users');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.users)) {
-          setUsers(data.users);
-          usersRef.current = data.users;
-          if (showNotification) {
-            showToast('User Directory Synced', `Loaded ${data.users.length} active users from server.`, 'info');
-          }
-          return { success: true, count: data.users.length, users: data.users };
-        }
       }
 
       return { success: false, count: 0 };

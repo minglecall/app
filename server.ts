@@ -2496,7 +2496,7 @@ async function startServer(): Promise<express.Express> {
         if (listAllMode) return true;
         const effectiveLeaderId = scopeLeaderId || String(leader?.id || '');
         if (u.id === effectiveLeaderId) return false;
-        return ownsCreatorByLeaderId(effectiveLeaderId, u);
+        return ownsCreatorByLeaderId(effectiveLeaderId, u, leader?.authId);
       });
 
       return res.json({
@@ -2524,7 +2524,7 @@ async function startServer(): Promise<express.Express> {
         if (!isFemaleHostProfile(u)) return false;
         if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
         if (allMode) return true;
-        return ownsCreatorByLeaderId(scopeLeaderId, u);
+        return ownsCreatorByLeaderId(scopeLeaderId, u, leader?.authId);
       });
       const managedIds = new Set(managedCreators.map((c) => c.id));
 
@@ -2767,7 +2767,36 @@ async function startServer(): Promise<express.Express> {
           }
         );
         if (pwRes.authUserId) {
+          const priorClientId = normalizedCreator.id;
           normalizedCreator.authId = pwRes.authUserId;
+          // Auth trigger inserts profiles.id = auth.users.id; re-assert ownership on that row
+          // and prefer it as the canonical host id when it differs from the client UUID.
+          try {
+            await upsertProfileAdmin({
+              id: pwRes.authUserId,
+              authId: pwRes.authUserId,
+              name: normalizedCreator.name,
+              email: creatorEmail,
+              gender: 'female',
+              genderLocked: true,
+              role: 'female_creator',
+              teamLeaderId: leaderId,
+              createdById: leaderId,
+              agencyName: leader?.agencyName || null,
+              avatarUrl: normalizedCreator.avatarUrl,
+              gallery: normalizedCreator.gallery,
+              isOnboarded: true,
+              isVerified: true,
+              hasPasswordSet: true,
+              password_hash: passwordHash,
+            });
+            if (pwRes.authUserId !== priorClientId) {
+              serverUsers.delete(priorClientId);
+              normalizedCreator.id = pwRes.authUserId;
+            }
+          } catch (e: any) {
+            console.warn('[teamleader/creators] ownership re-assert notice:', e?.message || e);
+          }
           serverUsers.set(normalizedCreator.id, normalizedCreator);
         }
       }

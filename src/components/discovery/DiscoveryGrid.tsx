@@ -128,6 +128,9 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
     // Exclude Team Leaders, Agency Managers, and Admins from callable live stream discovery
     if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
 
+    // Exclude banned accounts
+    if (u.isBanned) return false;
+
     // Exclude current logged in user unless showSelf is checked
     if (!showSelf && u.id === currentUser.id) return false;
 
@@ -238,19 +241,16 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                 />
               </div>
 
-              {/* Sync buried: only when advanced filters open */}
-              {showFilters && (
               <button
                 id="discovery-supabase-sync-btn"
                 onClick={handleManualSync}
                 disabled={isSyncing}
-                title="Refresh profiles"
+                title="Refresh discovery profiles"
                 className="shrink-0 px-3 py-2 rounded-[var(--radius-sm)] border text-xs font-semibold flex items-center space-x-1.5 transition-all whitespace-nowrap cursor-pointer bg-app-card-subtle text-app-muted border-hairline hover:text-app-heading disabled:opacity-50"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
                 <span className="hidden sm:inline">Refresh</span>
               </button>
-              )}
 
               {/* Filter Button */}
               <button
@@ -584,9 +584,12 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                 <button
                   type="button"
                   onClick={() => {
+                    setDiscoveryTab('all');
                     setSearchQuery('');
                     setSelectedCountry('all');
                     setSelectedLanguage('all');
+                    setSelectedZodiac('all');
+                    setSelectedInterest('all');
                     setSelectedStatus('all');
                     setShowSelf(true);
                     setMinAge(18);

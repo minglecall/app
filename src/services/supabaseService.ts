@@ -237,7 +237,8 @@ export async function fetchProfilesFromSupabase(filterRole?: string): Promise<Us
     let query = supabase
       .from('profiles')
       .select('*')
-      .eq('is_banned', false)
+      // Treat NULL is_banned as not banned (eq.false alone drops legacy/null rows)
+      .or('is_banned.eq.false,is_banned.is.null')
       .order('created_at', { ascending: false });
 
     if (filterRole) {

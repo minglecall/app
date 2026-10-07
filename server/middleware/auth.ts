@@ -21,6 +21,7 @@ export type AuthUser = {
 
 export type ResolvedProfile = {
   id: string;
+  authId?: string | null;
   role: string;
   email?: string | null;
   teamLeaderId?: string | null;
@@ -120,7 +121,7 @@ export async function lookupProfileForAuthUser(authUser: AuthUser): Promise<Reso
 
   const { data: byAuthId } = await supabaseAdmin
     .from('profiles')
-    .select('id, role, email, team_leader_id, created_by_id, agency_name')
+    .select('id, auth_id, role, email, team_leader_id, created_by_id, agency_name')
     .eq('auth_id', authUser.id)
     .maybeSingle();
 
@@ -129,7 +130,7 @@ export async function lookupProfileForAuthUser(authUser: AuthUser): Promise<Reso
     (
       await supabaseAdmin
         .from('profiles')
-        .select('id, role, email, team_leader_id, created_by_id, agency_name')
+        .select('id, auth_id, role, email, team_leader_id, created_by_id, agency_name')
         .eq('id', authUser.id)
         .maybeSingle()
     ).data ||
@@ -137,7 +138,7 @@ export async function lookupProfileForAuthUser(authUser: AuthUser): Promise<Reso
       ? (
           await supabaseAdmin
             .from('profiles')
-            .select('id, role, email, team_leader_id, created_by_id, agency_name')
+            .select('id, auth_id, role, email, team_leader_id, created_by_id, agency_name')
             .ilike('email', authUser.email.trim().toLowerCase())
             .maybeSingle()
         ).data
@@ -147,6 +148,7 @@ export async function lookupProfileForAuthUser(authUser: AuthUser): Promise<Reso
 
   return {
     id: String(row.id),
+    authId: row.auth_id ? String(row.auth_id) : authUser.id,
     role: String(row.role || 'male_user'),
     email: row.email,
     teamLeaderId: row.team_leader_id,
@@ -254,15 +256,21 @@ export function callerOwnsCreator(
   creator: { teamLeaderId?: string | null; createdById?: string | null; agencyName?: string | null }
 ) {
   if (leader.role === 'admin') return true;
-  if (creator.teamLeaderId && creator.teamLeaderId === leader.id) return true;
-  if (creator.createdById && creator.createdById === leader.id) return true;
+  const leaderIds = [leader.id, leader.authId].filter(Boolean);
+  if (creator.teamLeaderId && leaderIds.includes(creator.teamLeaderId)) return true;
+  if (creator.createdById && leaderIds.includes(creator.createdById)) return true;
   return false;
 }
 
 export function ownsCreatorByLeaderId(
   leaderId: string,
-  creator: { teamLeaderId?: string | null; createdById?: string | null }
+  creator: { teamLeaderId?: string | null; createdById?: string | null },
+  leaderAuthId?: string | null
 ) {
-  if (!leaderId) return false;
-  return creator.teamLeaderId === leaderId || creator.createdById === leaderId;
+  if (!leaderId && !leaderAuthId) return false;
+  const ids = [leaderId, leaderAuthId].filter(Boolean) as string[];
+  return (
+    (Boolean(creator.teamLeaderId) && ids.includes(String(creator.teamLeaderId))) ||
+    (Boolean(creator.createdById) && ids.includes(String(creator.createdById)))
+  );
 }

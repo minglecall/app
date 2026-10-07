@@ -1,7 +1,6 @@
 /**
  * /api/teamleader/* — CommonJS for Vercel Hobby router.
  */
-const { randomUUID } = require('crypto');
 const {
   send,
   readJsonBody,
@@ -24,10 +23,11 @@ function isFemaleHost(u) {
   );
 }
 
-function ownsCreator(leaderId, u) {
+function ownsCreator(leaderId, u, leaderAuthId) {
   const tl = String((u && (u.teamLeaderId || u.team_leader_id)) || '');
   const created = String((u && (u.createdById || u.created_by_id)) || '');
-  return tl === leaderId || created === leaderId;
+  const ids = [leaderId, leaderAuthId].filter(Boolean).map(String);
+  return ids.includes(tl) || ids.includes(created);
 }
 
 function parseQuery(url) {
@@ -71,6 +71,7 @@ async function handleTeamleader(path, req, res) {
 
   const leader = auth.profile || {};
   const leaderId = String(leader.id || auth.profileId);
+  const leaderAuthId = String(leader.auth_id || auth.userId || '');
   const isAdmin = isAdminRole(auth.role, auth.email);
   const action = actionFromPath(path);
   const q = parseQuery(req.url);
@@ -92,8 +93,8 @@ async function handleTeamleader(path, req, res) {
             return false;
           }
           if (listAllMode) return true;
-          if (u.id === scopeLeaderId) return false;
-          return ownsCreator(scopeLeaderId || leaderId, u);
+          if (u.id === scopeLeaderId || u.id === leaderId) return false;
+          return ownsCreator(scopeLeaderId || leaderId, u, leaderAuthId);
         });
       return send(res, 200, {
         success: true,
@@ -137,12 +138,16 @@ async function handleTeamleader(path, req, res) {
         });
       }
 
-      const id = String((body && body.id) || randomUUID());
       const { data: authUser, error: authErr } = await client.auth.admin.createUser({
         email,
         password,
         email_confirm: true,
-        user_metadata: { role: 'female_creator', name, gender: 'female' },
+        user_metadata: {
+          role: 'female_creator',
+          name,
+          full_name: name,
+          gender: 'female',
+        },
       });
       if (authErr || !authUser || !authUser.user) {
         return send(res, 500, {
@@ -151,41 +156,67 @@ async function handleTeamleader(path, req, res) {
         });
       }
 
+      // MUST use auth user id — handle_new_auth_user trigger already inserts profiles.id = auth.users.id.
+      // Upserting a different id leaves an orphan host with null team_leader_id (empty TL roster).
+      const authUserId = authUser.user.id;
+      const agencyName = leader.agency_name || leader.agencyName || null;
+      const avatarUrl =
+        body.avatarUrl ||
+        body.avatar_url ||
+        'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400';
       const row = {
-        id,
-        auth_id: authUser.user.id,
+        id: authUserId,
+        auth_id: authUserId,
         name,
         email,
         gender: 'female',
         gender_locked: true,
         role: 'female_creator',
         is_onboarded: true,
+        is_verified: true,
         has_password_set: true,
         team_leader_id: leaderId,
         created_by_id: leaderId,
-        agency_name: leader.agency_name || leader.agencyName || null,
+        agency_name: agencyName,
         age: body.age != null ? Number(body.age) : 24,
         nationality: body.nationality || 'United States',
         country_code: String(body.countryCode || body.country_code || 'US').toUpperCase(),
         bio: body.bio || '',
-        avatar_url: body.avatarUrl || body.avatar_url || '',
+        avatar_url: avatarUrl,
+        gallery: Array.isArray(body.gallery) && body.gallery.length ? body.gallery : [avatarUrl],
         online_status: 'offline',
         updated_at: new Date().toISOString(),
       };
 
       const { data: inserted, error: insErr } = await client
         .from('profiles')
-        .upsert(row)
+        .upsert(row, { onConflict: 'id' })
         .select('*')
         .single();
       if (insErr) {
-        await client.auth.admin.deleteUser(authUser.user.id).catch(() => {});
+        await client.auth.admin.deleteUser(authUserId).catch(() => {});
         return send(res, 500, { success: false, error: insErr.message });
       }
 
+      // Belt-and-suspenders: re-assert ownership in case a concurrent trigger write raced
+      await client
+        .from('profiles')
+        .update({
+          team_leader_id: leaderId,
+          created_by_id: leaderId,
+          agency_name: agencyName,
+          role: 'female_creator',
+          gender: 'female',
+          gender_locked: true,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', authUserId);
+
+      const { data: finalRow } = await client.from('profiles').select('*').eq('id', authUserId).maybeSingle();
+
       return send(res, 200, {
         success: true,
-        creator: mapProfileRow(inserted),
+        creator: mapProfileRow(finalRow || inserted),
         message: `Successfully created and persisted creator ${name}`,
       });
     }
@@ -200,7 +231,7 @@ async function handleTeamleader(path, req, res) {
             return false;
           }
           if (allMode && isAdmin) return true;
-          return ownsCreator(scopeLeaderId || leaderId, u);
+          return ownsCreator(scopeLeaderId || leaderId, u, leaderAuthId);
         });
       const managedIds = new Set(managed.map((c) => c.id));
       let totalCalls = 0;
@@ -322,7 +353,7 @@ async function handleTeamleader(path, req, res) {
         .maybeSingle();
       if (!targetRow) return send(res, 404, { success: false, error: 'Creator not found' });
       const target = mapProfileRow(targetRow);
-      if (!isAdmin && !ownsCreator(leaderId, target)) {
+      if (!isAdmin && !ownsCreator(leaderId, target, leaderAuthId)) {
         return send(res, 403, {
           success: false,
           error: 'Not authorized for this creator.',
