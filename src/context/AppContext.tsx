@@ -2328,13 +2328,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               let hasChanged = false;
               const next = prev.map((u) => {
                 if (u.id === currentUserIdRef.current && isLoggedInRef.current) {
-                  const liveCallStatus = getUserCallStatus(u.id, data.status || presence[u.id] || myStatus);
+                  const liveCallStatus = getUserCallStatus(
+                    u.id,
+                    data.status || presence[u.id] || myStatus
+                  );
                   if (u.onlineStatus !== liveCallStatus) {
                     hasChanged = true;
                     return { ...u, onlineStatus: liveCallStatus };
                   }
                   return u;
                 }
+                // Heartbeat map is authority. Missing key ⇒ keep previous (avoid mass-offline flicker).
+                if (!(u.id in presence)) return u;
                 const liveStatus = getUserCallStatus(u.id, presence[u.id] || 'offline');
                 if (u.onlineStatus !== liveStatus) {
                   hasChanged = true;
@@ -2407,11 +2412,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
                 const sUser = serverUsersMap.get(u.id);
                 if (sUser) {
-                  // Prefer server onlineStatus (DB/heartbeat); getUserCallStatus may elevate to in_call
+                  // Directory sync must NOT overwrite live presence (causes online/offline flicker).
+                  // Keep in-memory status; heartbeat/Realtime own presence.
                   return {
                     ...u,
                     ...sUser,
-                    onlineStatus: getUserCallStatus(u.id, sUser.onlineStatus || u.onlineStatus || 'offline'),
+                    onlineStatus: getUserCallStatus(u.id, u.onlineStatus || 'offline'),
                   };
                 }
                 return u;
@@ -2486,21 +2492,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   });
                   const next = prev.map((u) => {
                     if (u.id === currentUserIdRef.current) return u;
-                    // Presence channel = realtime membership. Prefer busy/in_call from DB/heartbeat
-                    // when peer is still in the channel; only force offline when they leave AND
-                    // were not busy (busy is cleared by calls/sync + heartbeat map).
-                    let base: 'online' | 'busy' | 'offline' | 'in_call';
-                    if (onlineIds.has(u.id)) {
-                      base =
-                        u.onlineStatus === 'busy' || u.onlineStatus === 'in_call'
-                          ? u.onlineStatus
-                          : 'online';
-                    } else if (u.onlineStatus === 'busy' || u.onlineStatus === 'in_call') {
-                      // Keep busy briefly — HTTP heartbeat will authoritative-clear if stale
-                      base = u.onlineStatus;
-                    } else {
-                      base = 'offline';
-                    }
+                    // Realtime presence is an UPGRADE-only signal (join → online).
+                    // Never demote to offline here — HTTP /api/presence/heartbeat is
+                    // the authority for offline/stale (avoids badge flicker).
+                    if (!onlineIds.has(u.id)) return u;
+                    const base: 'online' | 'busy' | 'offline' | 'in_call' =
+                      u.onlineStatus === 'busy' || u.onlineStatus === 'in_call'
+                        ? u.onlineStatus
+                        : 'online';
                     const live = getUserCallStatus(u.id, base);
                     if (u.onlineStatus !== live) {
                       changed = true;
@@ -2678,7 +2677,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     };
                   }
                   if (!serverUser) return u;
-                  const callStatus = getUserCallStatus(u.id, serverUser.onlineStatus || u.onlineStatus || 'offline');
+                  // Preserve live presence from heartbeat — directory payloads are often stale
+                  const callStatus = getUserCallStatus(u.id, u.onlineStatus || 'offline');
                   return { ...u, ...serverUser, onlineStatus: callStatus };
                 });
                 data.users.forEach((su: UserProfile) => {
@@ -2691,7 +2691,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                       (suEmail && u.email && u.email.toLowerCase().trim() === suEmail)
                   );
                   if (!alreadyPresent) {
-                    merged.push({ ...su, onlineStatus: getUserCallStatus(su.id, 'offline') });
+                    merged.push({
+                      ...su,
+                      onlineStatus: getUserCallStatus(su.id, su.onlineStatus || 'offline'),
+                    });
                   }
                 });
                 return merged;
@@ -4564,8 +4567,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return {
         ...prev,
         billedMinutes: Math.max(prev.billedMinutes || 0, billingMinute || 0),
-        coinsSpent: typeof callCoinsSpent === 'number' ? callCoinsSpent : prev.coinsSpent,
-        coinsEarned: typeof callCoinsEarned === 'number' ? callCoinsEarned : prev.coinsEarned,
+        coinsSpent:
+          typeof callCoinsSpent === 'number'
+            ? Math.max(prev.coinsSpent || 0, callCoinsSpent)
+            : prev.coinsSpent,
+        coinsEarned:
+          typeof callCoinsEarned === 'number'
+            ? Math.max(prev.coinsEarned || 0, callCoinsEarned)
+            : prev.coinsEarned,
       };
     });
   }, [systemSettings.coinUsdPeg, systemSettings.femalePayoutRatioUSD]);
@@ -4637,19 +4646,80 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           return;
         }
 
-        const res = await authFetch('/api/calls/burn', {
+        const rateNeeded = getEffectiveCallRate(activeCall.receiverId, activeCall.callerId);
+        const callerRow = usersRef.current.find((u) => u.id === activeCall.callerId);
+        const localBalance = Number(callerRow?.coinBalance);
+        if (Number.isFinite(localBalance) && localBalance < rateNeeded) {
+          burnInFlightRef.current.delete(billingMinute);
+          showToast(
+            'Call Auto-Terminated',
+            `Need ${rateNeeded} coins for the next minute (friend ${systemSettings.coinBurnRateFriendPerMin ?? 80} / standard ${systemSettings.coinBurnRatePerMin ?? 120}).`,
+            'error'
+          );
+          endCallRef.current();
+          return;
+        }
+
+        // Ensure call_logs row is active before burn (Vercel has no in-memory activeCalls)
+        await authFetch('/api/calls/sync', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${accessToken}`,
           },
-          body: JSON.stringify({ callId, billingMinute }),
-        });
+          body: JSON.stringify({
+            callId,
+            callerId: activeCall.callerId,
+            receiverId: activeCall.receiverId,
+            status: 'active',
+            startTime: new Date(activeCall.startTime || Date.now()).toISOString(),
+          }),
+        }).catch(() => {});
 
-        const json = await res.json().catch(() => ({}));
-        const code = json?.error?.code || json?.status || json?.code;
+        const postBurn = () =>
+          authFetch('/api/calls/burn', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({ callId, billingMinute }),
+          });
 
-        if (code === 'INSUFFICIENT_BALANCE' || res.status === 402) {
+        let res = await postBurn();
+        let json = await res.json().catch(() => ({}));
+        let code = json?.error?.code || json?.status || json?.code;
+
+        // One retry if sync race left call not active / not found yet
+        if (
+          !res.ok &&
+          (code === 'CALL_NOT_ACTIVE' || code === 'CALL_NOT_FOUND' || res.status === 404 || res.status === 409)
+        ) {
+          await new Promise((r) => setTimeout(r, 500));
+          await authFetch('/api/calls/sync', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({
+              callId,
+              callerId: activeCall.callerId,
+              receiverId: activeCall.receiverId,
+              status: 'active',
+              startTime: new Date(activeCall.startTime || Date.now()).toISOString(),
+            }),
+          }).catch(() => {});
+          res = await postBurn();
+          json = await res.json().catch(() => ({}));
+          code = json?.error?.code || json?.status || json?.code;
+        }
+
+        if (
+          code === 'INSUFFICIENT_BALANCE' ||
+          res.status === 402 ||
+          (res.status === 400 && String(code || '').includes('INSUFFICIENT'))
+        ) {
           // Do not mark minute as billed — unpaid minute must not increment coinsSpent
           burnInFlightRef.current.delete(billingMinute);
           showToast(
@@ -4686,6 +4756,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           hostCoinsEarned: data.hostCoinsEarned,
           duplicate: data.duplicate,
         });
+
+        // End before next minute if remaining balance cannot cover the rate
+        const nextBalance = Number(data.newCallerBalance);
+        const ratePerMin = Number(data.ratePerMin) || rateNeeded;
+        if (Number.isFinite(nextBalance) && nextBalance < ratePerMin) {
+          showToast(
+            'Call Ending',
+            'Not enough coins for another minute. Ending call.',
+            'warning'
+          );
+          // Allow current minute to finish visually; end shortly so peer gets signal
+          window.setTimeout(() => {
+            const still = activeCallRef.current;
+            if (still && still.id === callId && still.status === 'active') {
+              endCallRef.current();
+            }
+          }, 800);
+        }
       } catch (err) {
         burnInFlightRef.current.delete(billingMinute);
         console.warn('[billing] burn request error:', err);

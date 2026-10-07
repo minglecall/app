@@ -12,8 +12,20 @@ const {
   mapProfileRow,
 } = require('./helpers');
 
-/** Offline if no heartbeat / last_seen within this window (heartbeat is ~15s). */
-const PRESENCE_STALE_MS = 45_000;
+/** Offline if no heartbeat / last_seen within this window (client heartbeat ~15s). */
+const PRESENCE_STALE_MS = 90_000;
+
+function toIsoTimestamp(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
+  const s = String(value).trim();
+  if (!s) return null;
+  const ms = Date.parse(s);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
 
 function normalizePresenceStatus(raw) {
   const s = String(raw || 'offline').toLowerCase();
@@ -341,23 +353,6 @@ async function handleCalls(path, req, res) {
     const callerId = String((body && body.callerId) || auth.profileId || '').trim();
     const receiverId = String((body && body.receiverId) || '').trim();
     const callStatus = String((body && body.status) || 'completed').toLowerCase();
-    const payload = {
-      id: callId,
-      caller_id: callerId || auth.profileId,
-      receiver_id: receiverId || undefined,
-      status: callStatus,
-      duration_seconds: Number((body && (body.durationSeconds || body.duration)) || 0),
-      coins_spent: Number((body && body.coinsSpent) || 0),
-      coins_earned: Number((body && body.coinsEarned) || 0),
-      started_at: (body && (body.startedAt || body.startTime)) || undefined,
-      ended_at: (body && (body.endedAt || body.endTime)) || new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    Object.keys(payload).forEach((k) => payload[k] == null && delete payload[k]);
-    const { error } = await auth.client.from('call_logs').upsert(payload, { onConflict: 'id' });
-    if (error) console.warn('[api/calls/sync]', error.message);
-
-    // Authoritative presence: busy while ringing/active; online when call ends
     const busyStatuses = new Set(['ringing', 'active', 'accepted', 'in_call', 'connecting']);
     const endStatuses = new Set([
       'completed',
@@ -369,6 +364,45 @@ async function handleCalls(path, req, res) {
       'ended',
       'rejected',
     ]);
+    const startedAt =
+      toIsoTimestamp(body && (body.startedAt || body.startTime)) ||
+      (busyStatuses.has(callStatus) ? new Date().toISOString() : undefined);
+    const endedAt = endStatuses.has(callStatus)
+      ? toIsoTimestamp(body && (body.endedAt || body.endTime)) || new Date().toISOString()
+      : null;
+    const payload = {
+      id: callId,
+      caller_id: callerId || auth.profileId,
+      receiver_id: receiverId || undefined,
+      host_id: receiverId || undefined,
+      status: callStatus,
+      duration_seconds: Number((body && (body.durationSeconds || body.duration)) || 0),
+      coins_spent: Number((body && body.coinsSpent) || 0),
+      coins_earned: Number((body && body.coinsEarned) || 0),
+      started_at: startedAt,
+      start_time: startedAt,
+      updated_at: new Date().toISOString(),
+      end_reason: body && body.reason ? String(body.reason).slice(0, 120) : undefined,
+    };
+    if (endStatuses.has(callStatus)) {
+      payload.ended_at = endedAt;
+      payload.end_time = endedAt;
+    } else if (busyStatuses.has(callStatus)) {
+      // Keep call open — never stamp ended_at while ringing/active
+      payload.ended_at = null;
+      payload.end_time = null;
+    }
+    Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+    const { error } = await auth.client.from('call_logs').upsert(payload, { onConflict: 'id' });
+    if (error) {
+      console.warn('[api/calls/sync]', error.message);
+      return send(res, 500, {
+        success: false,
+        error: { message: 'Call sync failed', code: 'CALL_SYNC_FAILED', detail: error.message },
+      });
+    }
+
+    // Authoritative presence: busy while ringing/active; online when call ends
     try {
       if (busyStatuses.has(callStatus)) {
         await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'busy');
@@ -419,7 +453,9 @@ async function handleCalls(path, req, res) {
       // Resolve call participants from call_logs (no in-memory activeCalls on Vercel)
       const { data: callRow, error: callErr } = await auth.client
         .from('call_logs')
-        .select('id, caller_id, receiver_id, host_id, status, team_leader_id')
+        .select(
+          'id, caller_id, receiver_id, host_id, status, team_leader_id, coins_spent, coins_earned, duration_seconds'
+        )
         .eq('id', callId)
         .maybeSingle();
       if (callErr) {
@@ -441,7 +477,26 @@ async function handleCalls(path, req, res) {
           error: { message: 'Only the call caller may trigger billing', code: 'FORBIDDEN' },
         });
       }
-      const callStatus = String(callRow.status || '').toLowerCase();
+      let callStatus = String(callRow.status || '').toLowerCase();
+      // Caller only bills after local accept — promote ringing → active if race with sync
+      if (['ringing', 'connecting'].includes(callStatus)) {
+        const nowIso = new Date().toISOString();
+        const { error: promoteErr } = await auth.client
+          .from('call_logs')
+          .update({
+            status: 'active',
+            ended_at: null,
+            end_time: null,
+            updated_at: nowIso,
+          })
+          .eq('id', callId)
+          .eq('caller_id', callerId);
+        if (promoteErr) {
+          console.warn('[api/calls/burn] promote active', promoteErr.message);
+        } else {
+          callStatus = 'active';
+        }
+      }
       if (!['active', 'accepted', 'in_call', 'connecting'].includes(callStatus)) {
         return send(res, 409, {
           success: false,
@@ -584,7 +639,37 @@ async function handleCalls(path, req, res) {
           (String(result.error_message || '').includes('INSUFFICIENT')
             ? 'INSUFFICIENT_BALANCE'
             : 'BURN_FAILED');
-        return send(res, code === 'INSUFFICIENT_BALANCE' ? 400 : 500, {
+        if (code === 'INSUFFICIENT_BALANCE') {
+          const endIso = new Date().toISOString();
+          await auth.client
+            .from('call_logs')
+            .update({
+              status: 'failed',
+              end_reason: 'INSUFFICIENT_BALANCE',
+              ended_at: endIso,
+              end_time: endIso,
+              updated_at: endIso,
+            })
+            .eq('id', callId);
+          await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'online').catch(
+            () => {}
+          );
+          return send(res, 402, {
+            success: false,
+            status: 'INSUFFICIENT_BALANCE',
+            error: {
+              message: 'Insufficient coin balance for next billing minute',
+              code: 'INSUFFICIENT_BALANCE',
+            },
+            data: {
+              newCallerBalance: Number(result.new_caller_balance) || 0,
+              callId,
+              billingMinute,
+            },
+            coinBalance: result.new_caller_balance,
+          });
+        }
+        return send(res, 500, {
           success: false,
           error: {
             message: result.error_message || 'Burn failed',
@@ -600,7 +685,40 @@ async function handleCalls(path, req, res) {
       const newCallerBalance = Number(result.new_caller_balance) || 0;
       const newHostEarnings = Number(result.new_host_earnings) || 0;
       const newTlEarnings = Number(result.new_tl_earnings) || 0;
-      // Match Express: { success, data: { newCallerBalance, ... } }
+      const isDuplicate = Boolean(result.duplicate);
+
+      let callCoinsSpent = Number(callRow.coins_spent) || 0;
+      let callCoinsEarned = Number(callRow.coins_earned) || 0;
+      if (!isDuplicate) {
+        callCoinsSpent += burned;
+        callCoinsEarned += hostEarned;
+        const { data: updatedCall } = await auth.client
+          .from('call_logs')
+          .update({
+            status: 'active',
+            coins_spent: callCoinsSpent,
+            coins_earned: callCoinsEarned,
+            duration_seconds: Math.max(
+              Number(callRow.duration_seconds) || 0,
+              (billingMinute - 1) * 60
+            ),
+            burn_rate_per_min: coinsBurned,
+            was_friend_call: isFriendPair,
+            team_leader_id: tlId || undefined,
+            ended_at: null,
+            end_time: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', callId)
+          .select('coins_spent, coins_earned')
+          .maybeSingle();
+        if (updatedCall) {
+          callCoinsSpent = Number(updatedCall.coins_spent) || callCoinsSpent;
+          callCoinsEarned = Number(updatedCall.coins_earned) || callCoinsEarned;
+        }
+      }
+
+      // Match Express: { success, data: { newCallerBalance, callCoinsSpent cumulative, ... } }
       return send(res, 200, {
         success: true,
         data: {
@@ -613,13 +731,14 @@ async function handleCalls(path, req, res) {
           newCallerBalance,
           newHostEarnings,
           newTlEarnings,
-          callCoinsSpent: burned,
-          callCoinsEarned: hostEarned,
+          callCoinsSpent,
+          callCoinsEarned,
           billedMinutes: billingMinute,
-          duplicate: Boolean(result.duplicate),
+          duplicate: isDuplicate,
           isFriendRate: isFriendPair,
           isFemaleCreator: isCreator,
           tlId,
+          ratePerMin: coinsBurned,
         },
       });
     } catch (err) {
