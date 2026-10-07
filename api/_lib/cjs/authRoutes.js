@@ -553,16 +553,77 @@ async function loginPassword(req, res) {
         error: 'Account not found or was deleted. Please register again.',
       });
     }
+
+    // Single-device login: replace any prior active_session_id
+    const sessionId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+    try {
+      await client
+        .from('profiles')
+        .update({
+          active_session_id: sessionId,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', row.id);
+    } catch (claimErr) {
+      console.warn('[api/auth/login-password] claim session notice:', claimErr);
+    }
+
     return send(res, 200, {
       success: true,
       user: mapProfileRow(row),
       session: data.session,
+      activeSessionId: sessionId,
     });
   } catch (err) {
     console.error('[api/auth/login-password]', err);
     return send(res, 500, {
       success: false,
       error: (err && err.message) || 'Authentication error',
+    });
+  }
+}
+
+async function claimSession(req, res) {
+  if (req.method !== 'POST') return send(res, 405, { success: false, error: 'Method not allowed' });
+  const auth = await requireAuth(req);
+  if (auth.ok === false) {
+    return send(res, auth.status, {
+      success: false,
+      error: (auth.error && auth.error.message) || 'Unauthorized',
+    });
+  }
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : null) || (await readJsonBody(req));
+    const preferred = String(
+      (body && (body.sessionId || body.activeSessionId)) || ''
+    ).trim();
+    const sessionIdRe =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const sessionId =
+      preferred && (sessionIdRe.test(preferred) || preferred.startsWith('sess_'))
+        ? preferred
+        : typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+    const { error } = await auth.client
+      .from('profiles')
+      .update({
+        active_session_id: sessionId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', auth.profileId);
+    if (error) {
+      return send(res, 500, { success: false, error: error.message || 'Failed to claim session' });
+    }
+    return send(res, 200, { success: true, activeSessionId: sessionId });
+  } catch (err) {
+    console.error('[api/auth/claim-session]', err);
+    return send(res, 500, {
+      success: false,
+      error: (err && err.message) || 'Failed to claim session',
     });
   }
 }
@@ -644,6 +705,7 @@ async function handleAuth(path, req, res) {
   if (path === 'auth/verify-otp') return verifyOtp(req, res);
   if (path === 'auth/register-bootstrap') return registerBootstrap(req, res);
   if (path === 'auth/login-password') return loginPassword(req, res);
+  if (path === 'auth/claim-session') return claimSession(req, res);
   if (path === 'auth/reset-password') return resetPassword(req, res);
   if (path === 'auth/update-password') return updatePassword(req, res);
   return null;

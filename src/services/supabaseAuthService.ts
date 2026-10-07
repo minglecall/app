@@ -3,6 +3,13 @@ import { UserProfile, UserRole, OnboardingFormData } from '../types';
 import { mapDbProfileToUserProfile, upsertProfileToSupabase, isValidUuid } from './supabaseService';
 import { getPasswordPolicyError } from '../../shared/passwordPolicy';
 import { authFetch, getAccessToken, apiFetch } from '../utils/apiClient';
+import {
+  setStoredActiveSessionId,
+  clearStoredActiveSessionId,
+  getStoredActiveSessionId,
+  newActiveSessionId,
+  markSessionClaimGrace,
+} from '../utils/singleSession';
 
 export interface SupabaseAuthResult {
   success: boolean;
@@ -15,6 +22,91 @@ export interface SupabaseAuthResult {
   showOtpInForm?: boolean;
   /** Admin policy: create accounts without email OTP */
   skipOtp?: boolean;
+  activeSessionId?: string;
+}
+
+/** Deduplicate concurrent claims (login + auth hydrate race). */
+let claimInFlight: Promise<string | null> | null = null;
+
+/**
+ * Claim exclusive single-device session on the backend and persist locally.
+ * Stores the session id BEFORE the DB write so Realtime/heartbeat cannot self-kick.
+ */
+export async function claimExclusiveLoginSession(opts?: {
+  accessToken?: string | null;
+  knownSessionId?: string | null;
+  /** When false, skip revoking other Supabase refresh sessions (safer during hydrate). */
+  revokeOthers?: boolean;
+}): Promise<string | null> {
+  if (claimInFlight) return claimInFlight;
+
+  claimInFlight = (async () => {
+    const revokeOthers = opts?.revokeOthers !== false;
+    markSessionClaimGrace(10000);
+
+    if (opts?.knownSessionId && opts.knownSessionId.trim()) {
+      const known = opts.knownSessionId.trim();
+      setStoredActiveSessionId(known);
+      if (revokeOthers) {
+        try {
+          if (isSupabaseConfigured()) {
+            await supabase.auth.signOut({ scope: 'others' });
+          }
+        } catch (err) {
+          console.warn('[single-session] revoke other auth sessions notice:', err);
+        }
+      }
+      return known;
+    }
+
+    // Persist first so presence X-Session-Id and Realtime comparisons stay consistent
+    const sessionId = newActiveSessionId();
+    setStoredActiveSessionId(sessionId);
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = opts?.accessToken || (await getAccessToken());
+      if (token) headers.Authorization = `Bearer ${token}`;
+      headers['X-Session-Id'] = sessionId;
+
+      const res = await authFetch('/api/auth/claim-session', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ sessionId, activeSessionId: sessionId }),
+      });
+      const data = await res.json().catch(() => null);
+      const confirmed =
+        data?.success && typeof data.activeSessionId === 'string'
+          ? data.activeSessionId.trim()
+          : '';
+      if (!res.ok || !confirmed) {
+        console.warn('[single-session] claim-session failed:', data?.error || res.status);
+        // Keep locally stored id — presence checks tolerate DB null; retry later on next login
+        return getStoredActiveSessionId();
+      }
+      if (confirmed !== sessionId) {
+        setStoredActiveSessionId(confirmed);
+      }
+      if (revokeOthers) {
+        try {
+          if (isSupabaseConfigured()) {
+            await supabase.auth.signOut({ scope: 'others' });
+          }
+        } catch (err) {
+          console.warn('[single-session] revoke other auth sessions notice:', err);
+        }
+      }
+      markSessionClaimGrace(5000);
+      return getStoredActiveSessionId();
+    } catch (err) {
+      console.warn('[single-session] claim-session exception:', err);
+      return getStoredActiveSessionId();
+    }
+  })().finally(() => {
+    claimInFlight = null;
+  });
+
+  return claimInFlight;
 }
 
 const PUBLIC_SIGNUP_ROLES: UserRole[] = [
@@ -726,11 +818,16 @@ export async function signInWithEmailPassword(
           }
         }
 
+        const activeSessionId = await claimExclusiveLoginSession({
+          accessToken: data.session?.access_token || null,
+        });
+
         return {
           success: true,
           user: profile,
           needsOnboarding: !profile.isOnboarded,
           session: data.session,
+          activeSessionId: activeSessionId || undefined,
         };
       }
 
@@ -768,11 +865,16 @@ export async function signInWithEmailPassword(
           console.warn('Could not persist auth session after password login:', sessionError.message);
         }
       }
+      const activeSessionId = await claimExclusiveLoginSession({
+        accessToken: data.session?.access_token || null,
+        knownSessionId: typeof data.activeSessionId === 'string' ? data.activeSessionId : null,
+      });
       return {
         success: true,
         user: data.user,
         needsOnboarding: !data.user.isOnboarded,
         session: data.session,
+        activeSessionId: activeSessionId || undefined,
       };
     }
     return {
@@ -1080,6 +1182,7 @@ export async function completeUserProfileOnboarding(
  * Sign Out
  */
 export async function signOutSupabase(): Promise<void> {
+  clearStoredActiveSessionId();
   if (isSupabaseConfigured()) {
     try {
       await supabase.auth.signOut();

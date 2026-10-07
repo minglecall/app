@@ -48,7 +48,7 @@ import {
   INITIAL_HOME_QUICK_LINKS,
   INITIAL_CREATOR_REVIEWS,
 } from '../constants/appDefaults';
-import { authFetch, getAccessToken, apiUrl, getWsUrl } from '../utils/apiClient';
+import { authFetch, getAccessToken, apiUrl, getWsUrl, SESSION_REPLACED_EVENT } from '../utils/apiClient';
 import { RealtimeSignaling, shouldUseRealtimeSignaling } from '../services/realtimeSignaling';
 import {
   fetchProfilesFromSupabase,
@@ -100,12 +100,21 @@ import {
   fetchUserDailyRewardsFromSupabase,
   mapDbProfileToUserProfile,
 } from '../services/supabaseService';
-import { updateUserPassword, signOutSupabase } from '../services/supabaseAuthService';
+import {
+  updateUserPassword,
+  signOutSupabase,
+  claimExclusiveLoginSession,
+} from '../services/supabaseAuthService';
 import { getUserEffectiveLocation } from '../utils/location';
 import { supabase } from '../lib/supabase';
 import type { Session, User as SupabaseAuthUser } from '@supabase/supabase-js';
 import { getPasswordPolicyError } from '../../shared/passwordPolicy';
 import { DEFAULT_CURRENCIES, type CurrencyItem } from '../utils/taxonomies';
+import {
+  getStoredActiveSessionId,
+  clearStoredActiveSessionId,
+  shouldIgnoreSessionKick,
+} from '../utils/singleSession';
 
 
 const DEFAULT_FALLBACK_USER: UserProfile = {
@@ -194,7 +203,7 @@ interface AppContextType {
   completeAuthenticatedLogin: (profile: UserProfile) => void;
   switchRolePersona: (role: UserRole) => void;
   loginUser: (identifier: string) => boolean;
-  logoutUser: () => void;
+  logoutUser: (opts?: { reason?: 'manual' | 'other_device' }) => void;
   registerUser: (userData: Partial<UserProfile>) => UserProfile;
   updateUserProfile: (userId: string, updates: Partial<UserProfile>) => void;
   changeUserPassword: (userId: string, currentPassword: string, newPassword: string) => { success: boolean; message: string };
@@ -830,6 +839,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const showToastRef = useRef<(title: string, message: string, type?: 'success' | 'error' | 'info' | 'warning') => void>(
     () => {}
   );
+  const logoutUserRef = useRef<(opts?: { reason?: 'manual' | 'other_device' }) => void>(() => {});
+  const sessionKickInFlightRef = useRef(false);
+  const sessionKickPendingRef = useRef(false);
   const usersRef = useRef<UserProfile[]>(users);
   /** IDs hard-deleted this session — blocks sync/upsert resurrection. */
   const deletedUserIdsRef = useRef<Set<string>>(new Set());
@@ -907,6 +919,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCurrentUserId('');
     localStorage.setItem('livecall_logged_in', 'false');
     localStorage.removeItem('livecall_current_user_id');
+    clearStoredActiveSessionId();
 
     if (clearedId) {
       setUsers((prev) =>
@@ -931,6 +944,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // Always prefer DB profile on hydrate so we never flash a stub "Member" name
       // from an empty in-memory users list or incomplete auth metadata.
       let profile: UserProfile | undefined;
+      let dbActiveSessionId = '';
 
       if (isSupabaseConfigured()) {
         try {
@@ -960,6 +974,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
           }
           if (dbProfile) {
+            dbActiveSessionId = dbProfile.active_session_id
+              ? String(dbProfile.active_session_id).trim()
+              : '';
             profile = mapDbProfileToUserProfile(dbProfile);
             if (!profile.authId) profile.authId = authUserId;
           }
@@ -1031,6 +1048,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (token) accessTokenRef.current = token;
       } catch {
         // WS connect will retry token fetch
+      }
+
+      // Single-device gate: if another device claimed the session, sign out here.
+      // If this browser has no claimed id yet (upgrade / first visit), claim one.
+      try {
+        const localSid = getStoredActiveSessionId();
+        if (dbActiveSessionId && localSid && dbActiveSessionId !== localSid) {
+          await signOutSupabase().catch(() => {});
+          clearLocalAuthState(activeId);
+          showToastRef.current?.(
+            'Signed out',
+            'Your account was signed in on another device. Only one login is allowed at a time.',
+            'warning'
+          );
+          return;
+        }
+        if (!localSid) {
+          // Hydrate-only claim: do not revoke other refresh tokens here (login path does that).
+          await claimExclusiveLoginSession({
+            accessToken: accessTokenRef.current,
+            revokeOthers: false,
+          });
+        }
+      } catch (err) {
+        console.warn('[Auth Rehydrate] single-session gate notice:', err);
       }
 
       isLoggedInRef.current = true;
@@ -1149,6 +1191,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   useEffect(() => {
     activeCallRef.current = activeCall;
+    // Apply deferred single-session kick after ringing/active call ends
+    if (!activeCall && sessionKickPendingRef.current && isLoggedInRef.current) {
+      sessionKickPendingRef.current = false;
+      if (!shouldIgnoreSessionKick() && !sessionKickInFlightRef.current) {
+        sessionKickInFlightRef.current = true;
+        logoutUserRef.current({ reason: 'other_device' });
+      }
+    }
   }, [activeCall]);
 
   // Local call lock → busy ONLY while this client still has a live CallSession.
@@ -4071,7 +4121,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     showToast('Sign in required', 'Use email and password to log in.', 'error');
     return false;
   };
-  const logoutUser = () => {
+  const logoutUser = (opts?: { reason?: 'manual' | 'other_device' }) => {
     const prevId = currentUserId;
     const prevAuthId = currentUser?.authId || supabaseAuthUserIdRef.current || '';
     const cachedToken = accessTokenRef.current;
@@ -4097,6 +4147,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setIsLoggedIn(false);
     localStorage.setItem('livecall_logged_in', 'false');
     localStorage.removeItem('livecall_current_user_id');
+    clearStoredActiveSessionId();
 
     // Notify peers via Realtime or native WS
     try {
@@ -4190,8 +4241,71 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       await signOutSupabase().catch(() => { });
     })();
 
-    showToast('Logged Out 👋', 'You have been safely logged out of your session.', 'info');
+    if (opts?.reason === 'other_device') {
+      showToast(
+        'Signed out',
+        'Your account was signed in on another device. Only one login is allowed at a time.',
+        'warning'
+      );
+    } else {
+      showToast('Logged Out 👋', 'You have been safely logged out of your session.', 'info');
+    }
+    sessionKickInFlightRef.current = false;
   };
+  logoutUserRef.current = logoutUser;
+
+  // Single-device login: Realtime + API 409 both force-logout the previous device
+  useEffect(() => {
+    if (!isLoggedIn || !currentUserId || !isSupabaseConfigured()) return;
+
+    const kickIfReplaced = () => {
+      if (shouldIgnoreSessionKick()) return;
+      if (sessionKickInFlightRef.current || !isLoggedInRef.current) return;
+      // Never tear down an in-progress incoming/outgoing ring due to a false session race
+      const call = activeCallRef.current;
+      if (call && (call.status === 'ringing' || call.status === 'active')) {
+        sessionKickPendingRef.current = true;
+        console.warn('[single-session] deferring kick until call ends');
+        return;
+      }
+      sessionKickPendingRef.current = false;
+      sessionKickInFlightRef.current = true;
+      logoutUserRef.current({ reason: 'other_device' });
+    };
+
+    const onSessionReplaced = () => kickIfReplaced();
+    window.addEventListener(SESSION_REPLACED_EVENT, onSessionReplaced);
+
+    const channel = supabase
+      .channel(`single_session_${currentUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'profiles',
+          filter: `id=eq.${currentUserId}`,
+        },
+        (payload) => {
+          if (shouldIgnoreSessionKick()) return;
+          const nextId = (payload.new as { active_session_id?: string | null } | null)?.active_session_id;
+          const mine = getStoredActiveSessionId();
+          if (nextId && mine && String(nextId).trim() !== mine) {
+            kickIfReplaced();
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      window.removeEventListener(SESSION_REPLACED_EVENT, onSessionReplaced);
+      try {
+        supabase.removeChannel(channel);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [isLoggedIn, currentUserId]);
 
   const registerUser = (userData: Partial<UserProfile>): UserProfile => {
     const cleanEmail = userData.email ? userData.email.toLowerCase().trim() : null;

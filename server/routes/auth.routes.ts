@@ -18,6 +18,7 @@ import {
   getSupabaseAdmin,
   upsertProfileAdmin,
   linkProfileAuthIdAdmin,
+  claimExclusiveSessionAdmin,
 } from '../supabaseAdmin';
 import { requireAuth, requireAdmin, sanitizePublicSignupRole } from '../middleware/auth';
 import {
@@ -579,10 +580,13 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
         const normalized = normalizeUserProfile(authRes.user);
         serverUsers.set(normalized.id, normalized);
         clearAuthBackoff('auth_strict', req);
+        // Kick every other device for this account
+        const claimed = await claimExclusiveSessionAdmin(normalized.id);
         return res.json({
           success: true,
           user: normalized,
           session: authRes.session,
+          activeSessionId: claimed.sessionId || null,
         });
       }
       if (authRes.error && (authRes.error.includes('suspended') || authRes.error.includes('banned'))) {
@@ -603,6 +607,33 @@ export function createAuthRouter(ctx: ServerRuntime): Router {
       return res
         .status(500)
         .json({ success: false, error: safeClientError(err, 'Authentication error') });
+    }
+  });
+
+  // POST Claim exclusive login session (single-device). Call after password login / hydrate.
+  router.post('/claim-session', requireAuth, async (req, res) => {
+    try {
+      const profileId = String((req as any).profileId || (req as any).user?.id || '');
+      if (!profileId) {
+        return res.status(400).json({ success: false, error: 'Authenticated profile required' });
+      }
+      const preferred =
+        (typeof req.body?.sessionId === 'string' && req.body.sessionId) ||
+        (typeof req.body?.activeSessionId === 'string' && req.body.activeSessionId) ||
+        null;
+      const claimed = await claimExclusiveSessionAdmin(profileId, preferred);
+      if (!claimed.success || !claimed.sessionId) {
+        return res.status(500).json({
+          success: false,
+          error: claimed.error || 'Failed to claim exclusive session',
+        });
+      }
+      return res.json({ success: true, activeSessionId: claimed.sessionId });
+    } catch (err: any) {
+      console.error('Error in /api/auth/claim-session:', err);
+      return res
+        .status(500)
+        .json({ success: false, error: safeClientError(err, 'Failed to claim session') });
     }
   });
 

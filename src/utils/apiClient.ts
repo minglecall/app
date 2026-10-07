@@ -1,7 +1,32 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { apiUrl } from './apiBase';
+import {
+  getStoredActiveSessionId,
+  isSessionReplacedResponse,
+  shouldIgnoreSessionKick,
+} from './singleSession';
 
 export { apiUrl, getApiBaseUrl, getWsUrl, isSplitDeploy, getDeployModeLabel } from './apiBase';
+
+export const SESSION_REPLACED_EVENT = 'livecall:session-replaced';
+
+function notifyIfSessionReplaced(res: Response): void {
+  if (res.status !== 409) return;
+  if (shouldIgnoreSessionKick()) return;
+  void res
+    .clone()
+    .json()
+    .then((data) => {
+      if (
+        isSessionReplacedResponse(data) &&
+        typeof window !== 'undefined' &&
+        !shouldIgnoreSessionKick()
+      ) {
+        window.dispatchEvent(new CustomEvent(SESSION_REPLACED_EVENT));
+      }
+    })
+    .catch(() => {});
+}
 
 export async function getAccessToken(): Promise<string | null> {
   if (!isSupabaseConfigured()) return null;
@@ -17,6 +42,8 @@ export async function authHeaders(extra?: Record<string, string>): Promise<Recor
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(extra || {}) };
   const token = await getAccessToken();
   if (token) headers.Authorization = `Bearer ${token}`;
+  const sessionId = getStoredActiveSessionId();
+  if (sessionId) headers['X-Session-Id'] = sessionId;
   return headers;
 }
 
@@ -33,10 +60,16 @@ export async function authFetch(input: RequestInfo | URL, init?: RequestInit): P
     const token = await getAccessToken();
     if (token) headers.set('Authorization', `Bearer ${token}`);
   }
+  if (!headers.has('X-Session-Id')) {
+    const sessionId = getStoredActiveSessionId();
+    if (sessionId) headers.set('X-Session-Id', sessionId);
+  }
   if (init?.body && !headers.has('Content-Type') && typeof init.body === 'string') {
     headers.set('Content-Type', 'application/json');
   }
-  return fetch(resolveInput(input), { ...init, headers });
+  const res = await fetch(resolveInput(input), { ...init, headers });
+  notifyIfSessionReplaced(res);
+  return res;
 }
 
 /** Same-origin or split-deploy fetch without forcing auth (OTP, setup, public probes). */

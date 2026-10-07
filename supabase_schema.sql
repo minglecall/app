@@ -106,6 +106,19 @@ ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS commission_percent NUMERIC 
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS team_leader_note TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS has_password_set BOOLEAN DEFAULT false;
+-- Single-device login: only the device holding this id may stay authenticated
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS active_session_id TEXT;
+-- Clients must not self-assign session ids; only service-role (backend claim) may write
+REVOKE UPDATE (active_session_id) ON public.profiles FROM anon, authenticated;
+
+-- Realtime kick for exclusive login (idempotent)
+DO $$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.profiles;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN undefined_object THEN NULL;
+END $$;
 
 -- Allow female_user alongside female_creator (idempotent for existing DBs)
 DO $$
@@ -404,7 +417,7 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     show_dev_persona_bar BOOLEAN DEFAULT false,
     enable_regular_female_coin_earning BOOLEAN DEFAULT false,
     -- Fixed Peg / Economy (Phase 1): ONE coin?USD rate for host, TL, and platform.
-    -- Example: coin_usd_peg = 0.003 ? 1000 coins = $3. Package price_usd stays purchase amount (not coinsùpeg).
+    -- Example: coin_usd_peg = 0.003 ? 1000 coins = $3. Package price_usd stays purchase amount (not coins?peg).
     coin_usd_peg NUMERIC DEFAULT 0.003,
     -- LEGACY (kept for backward compat; synced to coin_usd_peg on admin save ? do not use in new code paths):
     coin_to_usd_ratio NUMERIC DEFAULT 0.003,
@@ -506,15 +519,15 @@ COMMENT ON COLUMN public.system_configs.coin_burn_rate_per_min IS
 COMMENT ON COLUMN public.system_configs.coin_burn_rate_friend_per_min IS
   'Caller burn coins/min (friends). Economy hub only.';
 COMMENT ON COLUMN public.system_configs.female_earning_rate_per_min IS
-  'LEGACY derived display (burn ù host%). Not used by burn_call_coins_atomic / call burn path.';
+  'LEGACY derived display (burn ? host%). Not used by burn_call_coins_atomic / call burn path.';
 COMMENT ON COLUMN public.system_configs.gift_female_host_share_percent IS
-  'Gift/tip host share % of gift coin cost. Editable only in Admin ? Coin Burn & Economy ùC. Catalog SKUs do not edit this.';
+  'Gift/tip host share % of gift coin cost. Editable only in Admin ? Coin Burn & Economy ?C. Catalog SKUs do not edit this.';
 COMMENT ON COLUMN public.system_configs.gift_team_leader_share_percent IS
-  'Gift/tip TL share % of gift coin cost when host has linked TL. Economy ùC only. Platform = 100 ? host ? TL.';
+  'Gift/tip TL share % of gift coin cost when host has linked TL. Economy ?C only. Platform = 100 ? host ? TL.';
 -- Fixed Peg (Phase 1): canonical coin?USD for host/TL/platform. Legacy ratios kept & synced.
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS coin_usd_peg NUMERIC DEFAULT 0.003;
 COMMENT ON COLUMN public.system_configs.coin_usd_peg IS
-  'Fixed Peg: USD per coin for host/TL payables and platform retained FX. 0.003 = 1000 coins = $3. Package price_usd is purchase amount, not forced to coinsùpeg.';
+  'Fixed Peg: USD per coin for host/TL payables and platform retained FX. 0.003 = 1000 coins = $3. Package price_usd is purchase amount, not forced to coins?peg.';
 COMMENT ON COLUMN public.system_configs.female_payout_ratio_usd IS
   'LEGACY: was host/TL payout FX. Synced to coin_usd_peg; prefer coin_usd_peg in application code.';
 COMMENT ON COLUMN public.system_configs.coin_to_usd_ratio IS
@@ -1819,7 +1832,7 @@ CREATE TABLE IF NOT EXISTS public.coin_purchases (
     status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
     amount_coins NUMERIC NOT NULL CHECK (amount_coins > 0),
     amount_usd NUMERIC,
-    -- Phase 4 Fixed Peg: snapshot at purchase (package price is NOT forced to coinsùpeg)
+    -- Phase 4 Fixed Peg: snapshot at purchase (package price is NOT forced to coins?peg)
     coin_usd_peg_at_purchase NUMERIC,
     peg_value_usd NUMERIC,
     load_margin_usd NUMERIC,
@@ -1847,7 +1860,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS coin_purchases_gateway_external_ref_idx
     WHERE channel = 'GATEWAY' AND external_ref IS NOT NULL AND status = 'completed';
 
 COMMENT ON TABLE public.coin_purchases IS
-  'Coin funding intents/records. pending ? checkout-intent; completed via completeCoinPurchase (ADMIN_MANUAL or GATEWAY). amount_usd = cash paid (retail). peg_value_usd = amount_coins ù coin_usd_peg_at_purchase. load_margin_usd = amount_usd ? peg_value_usd. Same PURCHASE wallet_ledger type for both channels.';
+  'Coin funding intents/records. pending ? checkout-intent; completed via completeCoinPurchase (ADMIN_MANUAL or GATEWAY). amount_usd = cash paid (retail). peg_value_usd = amount_coins ? coin_usd_peg_at_purchase. load_margin_usd = amount_usd ? peg_value_usd. Same PURCHASE wallet_ledger type for both channels.';
 
 ALTER TABLE public.coin_purchases
   ADD COLUMN IF NOT EXISTS coin_usd_peg_at_purchase NUMERIC;
@@ -1857,11 +1870,11 @@ ALTER TABLE public.coin_purchases
   ADD COLUMN IF NOT EXISTS load_margin_usd NUMERIC;
 
 COMMENT ON COLUMN public.coin_purchases.amount_usd IS
-  'Cash paid / retail package pay price (USD). Not forced to coinsùpeg.';
+  'Cash paid / retail package pay price (USD). Not forced to coins?peg.';
 COMMENT ON COLUMN public.coin_purchases.coin_usd_peg_at_purchase IS
   'Fixed Peg snapshot ($/coin) at purchase time from system_configs.coin_usd_peg.';
 COMMENT ON COLUMN public.coin_purchases.peg_value_usd IS
-  'amount_coins ù coin_usd_peg_at_purchase ? liability / peg value of coins loaded.';
+  'amount_coins ? coin_usd_peg_at_purchase ? liability / peg value of coins loaded.';
 COMMENT ON COLUMN public.coin_purchases.load_margin_usd IS
   'amount_usd ? peg_value_usd when paid USD known; positive = retail above peg.';
 
@@ -2787,11 +2800,11 @@ ON CONFLICT (code) DO UPDATE SET
 -- 2. Seed All Spoken Languages
 INSERT INTO public.language_configs (code, name, native_name, popular, region, enabled) VALUES
 ('en', 'English', 'English', true, 'Global', true),
-('es', 'Spanish', 'Espaùol', true, 'Europe & Americas', true),
-('fr', 'French', 'Franùais', true, 'Europe & Africa', true),
+('es', 'Spanish', 'Espa?ol', true, 'Europe & Americas', true),
+('fr', 'French', 'Fran?ais', true, 'Europe & Africa', true),
 ('de', 'German', 'Deutsch', true, 'Europe', true),
 ('it', 'Italian', 'Italiano', true, 'Europe', true),
-('pt', 'Portuguese', 'Portuguùs', true, 'Europe & Americas', true),
+('pt', 'Portuguese', 'Portugu?s', true, 'Europe & Americas', true),
 ('ru', 'Russian', '???????', true, 'Eurasia', true),
 ('zh', 'Chinese (Mandarin)', '?? (???)', true, 'East Asia', true),
 ('zh-yue', 'Chinese (Cantonese)', '??', true, 'East Asia', true),
@@ -2800,7 +2813,7 @@ INSERT INTO public.language_configs (code, name, native_name, popular, region, e
 ('ar', 'Arabic', '???????', true, 'Middle East & North Africa', true),
 ('hi', 'Hindi', '??????', true, 'South Asia', true),
 ('ur', 'Urdu', '????', true, 'South Asia', true),
-('tr', 'Turkish', 'Tùrkùe', true, 'Middle East & Europe', true),
+('tr', 'Turkish', 'T?rk?e', true, 'Middle East & Europe', true),
 ('vi', 'Vietnamese', 'Ti?ng Vi?t', true, 'Southeast Asia', true),
 ('th', 'Thai', '???', true, 'Southeast Asia', true),
 ('tl', 'Tagalog (Filipino)', 'Tagalog', true, 'Southeast Asia', true),
@@ -2815,7 +2828,7 @@ INSERT INTO public.language_configs (code, name, native_name, popular, region, e
 ('fi', 'Finnish', 'Suomi', false, 'Europe', true),
 ('el', 'Greek', '????????', false, 'Europe', true),
 ('cs', 'Czech', '?e?tina', false, 'Europe', true),
-('ro', 'Romanian', 'Romùn?', false, 'Europe', true),
+('ro', 'Romanian', 'Rom?n?', false, 'Europe', true),
 ('hu', 'Hungarian', 'Magyar', false, 'Europe', true),
 ('bg', 'Bulgarian', '?????????', false, 'Europe', true),
 ('hr', 'Croatian', 'Hrvatski', false, 'Europe', true),
@@ -2844,7 +2857,7 @@ INSERT INTO public.language_configs (code, name, native_name, popular, region, e
 ('uz', 'Uzbek', 'O?zbek', false, 'Central Asia', true),
 ('sw', 'Swahili', 'Kiswahili', false, 'Africa', true),
 ('am', 'Amharic', '????', false, 'Africa', true),
-('yo', 'Yoruba', 'ùdù Yorùbù', false, 'Africa', true),
+('yo', 'Yoruba', '?d? Yor?b?', false, 'Africa', true),
 ('ig', 'Igbo', 'As?s? Igbo', false, 'Africa', true),
 ('ha', 'Hausa', 'Harshen Hausa', false, 'Africa', true),
 ('zu', 'Zulu', 'isiZulu', false, 'Africa', true),
@@ -2934,17 +2947,17 @@ INSERT INTO public.currency_configs (code, name, symbol, rate_from_usd, enabled,
 ('USD', 'US Dollar', '$', 1, true, 0),
 ('AED', 'UAE Dirham', '?.?', 3.6725, true, 1),
 ('EUR', 'Euro', '?', 0.92, true, 2),
-('GBP', 'British Pound', 'ù', 0.79, true, 3),
+('GBP', 'British Pound', '?', 0.79, true, 3),
 ('SAR', 'Saudi Riyal', '?', 3.75, true, 4),
 ('PKR', 'Pakistani Rupee', 'Rs', 278, true, 5),
 ('INR', 'Indian Rupee', '?', 83, true, 6),
 ('CAD', 'Canadian Dollar', 'C$', 1.36, true, 7),
 ('AUD', 'Australian Dollar', 'A$', 1.52, true, 8),
 ('TRY', 'Turkish Lira', '?', 32, true, 9),
-('EGP', 'Egyptian Pound', 'Eù', 48, true, 10),
+('EGP', 'Egyptian Pound', 'E?', 48, true, 10),
 ('BRL', 'Brazilian Real', 'R$', 5.0, true, 11),
-('JPY', 'Japanese Yen', 'ù', 150, true, 12),
-('CNY', 'Chinese Yuan', 'ù', 7.2, false, 13)
+('JPY', 'Japanese Yen', '?', 150, true, 12),
+('CNY', 'Chinese Yuan', '?', 7.2, false, 13)
 ON CONFLICT (code) DO UPDATE SET
     name = EXCLUDED.name,
     symbol = EXCLUDED.symbol,
@@ -3528,7 +3541,7 @@ CREATE TABLE IF NOT EXISTS public.auth_pending_signups (
 ALTER TABLE public.auth_pending_signups ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================================
--- EMAIL POLICY + DISPATCH LOG (Admin Email tab ù credentials stay in Vercel env)
+-- EMAIL POLICY + DISPATCH LOG (Admin Email tab ? credentials stay in Vercel env)
 -- ============================================================================
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS email_register_enabled BOOLEAN DEFAULT true;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS email_account_create_enabled BOOLEAN DEFAULT true;
@@ -3554,4 +3567,4 @@ CREATE INDEX IF NOT EXISTS idx_email_dispatch_log_created ON public.email_dispat
 CREATE INDEX IF NOT EXISTS idx_email_dispatch_log_recipient ON public.email_dispatch_log(recipient_email);
 ALTER TABLE public.email_dispatch_log ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "deny all email_dispatch_log" ON public.email_dispatch_log;
--- No anon/authenticated policies ù service_role only (admin APIs).
+-- No anon/authenticated policies ? service_role only (admin APIs).

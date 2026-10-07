@@ -5,7 +5,41 @@ import {
   upsertProfileAdmin,
   isSupabaseAdminConfigured,
   upsertCreatorMetricsAdmin,
+  assertActiveSessionAdmin,
 } from '../supabaseAdmin';
+
+function readClientSessionId(req: { headers: Record<string, unknown>; body?: any }): string | null {
+  const header = req.headers['x-session-id'] || req.headers['X-Session-Id'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  if (Array.isArray(header) && typeof header[0] === 'string' && header[0].trim()) {
+    return header[0].trim();
+  }
+  const fromBody = req.body?.sessionId || req.body?.activeSessionId;
+  return typeof fromBody === 'string' && fromBody.trim() ? fromBody.trim() : null;
+}
+
+async function rejectIfSessionReplaced(req: any, res: any, profileId: string): Promise<boolean> {
+  const clientSessionId = readClientSessionId(req);
+  // Only reject when the client sends a session id that no longer matches
+  if (!clientSessionId) return false;
+  const check = await assertActiveSessionAdmin({
+    profileId,
+    clientSessionId,
+    enforceMissing: false,
+  });
+  if (check.ok === false) {
+    res.status(409).json({
+      success: false,
+      code: 'SESSION_REPLACED',
+      error: {
+        message: 'Your account was signed in on another device. Please sign in again.',
+        code: 'SESSION_REPLACED',
+      },
+    });
+    return true;
+  }
+  return false;
+}
 
 export function createPresenceRouter(ctx: ServerRuntime): Router {
   const router = Router();
@@ -25,6 +59,7 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
       if (!userId) {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
+      if (await rejectIfSessionReplaced(req, res, userId)) return;
 
       const requested =
         status === 'offline'
@@ -62,13 +97,14 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
   });
 
   // Lightweight liveness ping — status transitions only hit DB
-  router.post('/heartbeat', requireAuth, (req, res) => {
+  router.post('/heartbeat', requireAuth, async (req, res) => {
     try {
       const userId = String((req as any).profileId || (req as any).user?.id || '');
       const { status } = req.body;
       if (!userId) {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
+      if (await rejectIfSessionReplaced(req, res, userId)) return;
 
       const requested =
         status === 'offline'

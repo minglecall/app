@@ -31,6 +31,33 @@ export default async function handler(req: VercelReq, res: VercelRes) {
   }
 
   const body = await readJsonBody(req);
+  const headerSession = (req.headers as any)?.['x-session-id'] || (req.headers as any)?.['X-Session-Id'];
+  const clientSessionId = String(
+    (typeof headerSession === 'string' && headerSession) ||
+      body?.sessionId ||
+      body?.activeSessionId ||
+      ''
+  ).trim();
+
+  if (clientSessionId) {
+    const { data: sessionRow } = await client
+      .from('profiles')
+      .select('active_session_id')
+      .eq('id', auth.profileId)
+      .maybeSingle();
+    const active = sessionRow?.active_session_id ? String(sessionRow.active_session_id).trim() : '';
+    if (active && active !== clientSessionId) {
+      return sendJson(res, 409, {
+        success: false,
+        code: 'SESSION_REPLACED',
+        error: {
+          message: 'Your account was signed in on another device. Please sign in again.',
+          code: 'SESSION_REPLACED',
+        },
+      });
+    }
+  }
+
   const status = String(body?.status || 'online').toLowerCase();
   const allowed = status === 'online' || status === 'busy' || status === 'offline';
   const onlineStatus = allowed ? status : 'online';

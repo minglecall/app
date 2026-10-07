@@ -72,6 +72,7 @@ export interface Database {
           team_leader_note: string | null;
           password_hash: string | null;
           has_password_set: boolean | null;
+          active_session_id: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -137,6 +138,7 @@ export interface Database {
           team_leader_note?: string | null;
           password_hash?: string | null;
           has_password_set?: boolean | null;
+          active_session_id?: string | null;
           created_at?: string;
           updated_at?: string;
         };

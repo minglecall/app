@@ -2382,4 +2382,86 @@ export async function upsertCallLogAdmin(log: {
   }
 }
 
+const SESSION_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Claim exclusive login for a profile — invalidates every other device. */
+export async function claimExclusiveSessionAdmin(
+  profileId: string,
+  preferredSessionId?: string | null
+): Promise<{ success: boolean; sessionId?: string; error?: string }> {
+  const client = getSupabaseAdmin();
+  if (!client) return { success: false, error: 'Supabase not configured' };
+  const id = String(profileId || '').trim();
+  if (!id) return { success: false, error: 'profileId required' };
+
+  const preferred = typeof preferredSessionId === 'string' ? preferredSessionId.trim() : '';
+  const sessionId =
+    preferred && (SESSION_ID_RE.test(preferred) || preferred.startsWith('sess_'))
+      ? preferred
+      : typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+
+  try {
+    const { error } = await client
+      .from('profiles')
+      .update({
+        active_session_id: sessionId,
+        updated_at: new Date().toISOString(),
+      } as any)
+      .eq('id', id);
+
+    if (error) {
+      console.warn('[Supabase Admin] claimExclusiveSessionAdmin error:', error.message);
+      return { success: false, error: error.message };
+    }
+    return { success: true, sessionId };
+  } catch (err: any) {
+    console.error('[Supabase Admin] claimExclusiveSessionAdmin exception:', err);
+    return { success: false, error: err?.message || 'Failed to claim session' };
+  }
+}
+
+/**
+ * Returns ok:false when a non-empty client session id does not match the profile's
+ * active_session_id. Missing client header is treated as ok (legacy / first hydrate)
+ * unless enforceMissing is true.
+ */
+export async function assertActiveSessionAdmin(opts: {
+  profileId: string;
+  clientSessionId?: string | null;
+  enforceMissing?: boolean;
+}): Promise<{ ok: true } | { ok: false; code: 'SESSION_REPLACED' }> {
+  const client = getSupabaseAdmin();
+  if (!client) return { ok: true };
+
+  const profileId = String(opts.profileId || '').trim();
+  if (!profileId) return { ok: true };
+
+  const clientSessionId =
+    typeof opts.clientSessionId === 'string' ? opts.clientSessionId.trim() : '';
+
+  try {
+    const { data } = await client
+      .from('profiles')
+      .select('active_session_id')
+      .eq('id', profileId)
+      .maybeSingle();
+
+    const active = data?.active_session_id ? String(data.active_session_id).trim() : '';
+    if (!active) return { ok: true };
+    if (!clientSessionId) {
+      return opts.enforceMissing ? { ok: false, code: 'SESSION_REPLACED' } : { ok: true };
+    }
+    if (clientSessionId !== active) {
+      return { ok: false, code: 'SESSION_REPLACED' };
+    }
+    return { ok: true };
+  } catch (err: any) {
+    console.warn('[Supabase Admin] assertActiveSessionAdmin notice:', err?.message || err);
+    return { ok: true };
+  }
+}
+
 
