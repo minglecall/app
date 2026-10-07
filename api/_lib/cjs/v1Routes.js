@@ -1,7 +1,22 @@
 /**
  * /api/v1/* social routes — CommonJS port of api/_lib/handlers/v1.ts
+ *
+ * Only claims known social prefixes. Other v1 modules (e.g. finance) must return null
+ * so later router handlers can serve them — never swallow with "Unimplemented v1 path".
  */
 const { send, readJsonBody, requireAuth, isAdminRole } = require('./helpers');
+
+/** Prefixes owned by this social v1 handler (must match Express mounts under /api/v1). */
+const SOCIAL_V1_PREFIXES = [
+  'matches',
+  'favorites',
+  'friends',
+  'blocks',
+  'feed',
+  'reviews',
+  'reports',
+  'admin/reports',
+];
 
 function v1Path(fullPath, req) {
   if (String(fullPath || '').startsWith('v1/')) {
@@ -13,6 +28,12 @@ function v1Path(fullPath, req) {
   } catch {
     return '';
   }
+}
+
+function isSocialV1Path(path) {
+  const p = String(path || '').split('?')[0];
+  if (!p) return false;
+  return SOCIAL_V1_PREFIXES.some((prefix) => p === prefix || p.startsWith(prefix + '/'));
 }
 
 function mapMatchRow(row, me) {
@@ -117,10 +138,13 @@ function mapReviewRow(row) {
 async function handleV1(fullPath, req, res) {
   if (!String(fullPath || '').startsWith('v1')) return null;
 
+  const path = v1Path(fullPath, req);
+  // Only claim social namespaces — finance and future v1 modules pass through.
+  if (!isSocialV1Path(path)) return null;
+
   const auth = await requireAuth(req);
   if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
   const client = auth.client;
-  const path = v1Path(fullPath, req);
   const method = req.method || 'GET';
   const me = auth.profileId;
   const body = method !== 'GET' ? await readJsonBody(req) : {};
@@ -436,6 +460,10 @@ async function handleV1(fullPath, req, res) {
       });
     }
 
+    if ((path === 'blocks/me' || path.startsWith('blocks/me?')) && method === 'GET') {
+      const blocks = await loadBlocksPayload(client, me);
+      return send(res, 200, { success: true, data: blocks });
+    }
     if (path === 'blocks' && method === 'POST') {
       const blockedUserId = String(
         (body && (body.blockedUserId || body.targetUserId || body.userId)) || ''
@@ -450,17 +478,41 @@ async function handleV1(fullPath, req, res) {
           { onConflict: 'user_id,blocked_user_id' }
         );
       const blocks = await loadBlocksPayload(client, me);
-      return send(res, 200, { success: true, data: blocks });
+      return send(res, 200, { success: true, data: { blocked: true, targetUserId: blockedUserId, ...blocks } });
     }
-    if (path.startsWith('blocks/') && method === 'DELETE') {
-      const blockedUserId = decodeURIComponent(path.replace('blocks/', ''));
+    if (path === 'blocks/remove' && method === 'POST') {
+      const blockedUserId = String(
+        (body && (body.blockedUserId || body.targetUserId || body.userId)) || ''
+      );
+      if (!blockedUserId || blockedUserId === me) {
+        return send(res, 400, { success: false, error: { message: 'Invalid target' } });
+      }
       await client
         .from('blocked_users')
         .delete()
         .eq('user_id', me)
         .eq('blocked_user_id', blockedUserId);
       const blocks = await loadBlocksPayload(client, me);
-      return send(res, 200, { success: true, data: blocks });
+      return send(res, 200, {
+        success: true,
+        data: { blocked: false, targetUserId: blockedUserId, ...blocks },
+      });
+    }
+    if (path.startsWith('blocks/') && method === 'DELETE') {
+      const blockedUserId = decodeURIComponent(path.replace('blocks/', '').split('?')[0]);
+      if (!blockedUserId || blockedUserId === 'me' || blockedUserId === 'remove') {
+        return send(res, 400, { success: false, error: { message: 'Invalid target' } });
+      }
+      await client
+        .from('blocked_users')
+        .delete()
+        .eq('user_id', me)
+        .eq('blocked_user_id', blockedUserId);
+      const blocks = await loadBlocksPayload(client, me);
+      return send(res, 200, {
+        success: true,
+        data: { blocked: false, targetUserId: blockedUserId, ...blocks },
+      });
     }
 
     if ((path === 'feed' || path.startsWith('feed?')) && method === 'GET') {
@@ -543,6 +595,30 @@ async function handleV1(fullPath, req, res) {
       }
       await client.from('feed_posts').update({ likes }).eq('id', postId);
       return send(res, 200, { success: true, data: { postId, liked, likes } });
+    }
+    if (/^feed\/[^/]+$/.test(path) && method === 'DELETE') {
+      const postId = decodeURIComponent(path.split('/')[1]);
+      if (!postId || postId === 'user') {
+        return send(res, 400, { success: false, error: { message: 'postId required' } });
+      }
+      const { data: post, error: postErr } = await client
+        .from('feed_posts')
+        .select('id, creator_id')
+        .eq('id', postId)
+        .maybeSingle();
+      if (postErr) throw postErr;
+      if (!post) {
+        return send(res, 404, { success: false, error: { message: 'Post not found' } });
+      }
+      if (String(post.creator_id) !== me && !isAdminRole(auth.role, auth.email)) {
+        return send(res, 403, {
+          success: false,
+          error: { message: 'You can only delete your own moments', code: 'FORBIDDEN' },
+        });
+      }
+      const { error: delErr } = await client.from('feed_posts').delete().eq('id', postId);
+      if (delErr) throw delErr;
+      return send(res, 200, { success: true, data: { deleted: true, postId } });
     }
     if (/^feed\/[^/]+\/tip$/.test(path) && method === 'POST') {
       const postId = decodeURIComponent(path.split('/')[1]);
@@ -770,6 +846,18 @@ async function handleV1(fullPath, req, res) {
           },
         },
       });
+    }
+    if ((path === 'reports/me' || path.startsWith('reports/me?')) && method === 'GET') {
+      const { data, error } = await client
+        .from('moderation_reports')
+        .select(
+          'id, reporter_id, reported_user_id, reason, details, evidence_snapshot_url, status, action_taken, admin_notes, resolved_by, resolved_at, created_at'
+        )
+        .eq('reporter_id', me)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (error) throw error;
+      return send(res, 200, { success: true, data: { reports: data || [] } });
     }
     if (path === 'reports' && method === 'POST') {
       const { error } = await client.from('moderation_reports').insert({

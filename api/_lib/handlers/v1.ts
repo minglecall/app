@@ -1,6 +1,8 @@
 /**
  * Catch-all for /api/v1/* social routes on Vercel.
  * Handles matches, favorites, friends, blocks, feed, reviews, reports minimally.
+ * Only claims known social prefixes — finance and other v1 modules must not get
+ * "Unimplemented v1 path" from this handler.
  */
 import {
   sendJson,
@@ -11,6 +13,17 @@ import {
   type VercelRes,
 } from '../vercelAuth';
 
+const SOCIAL_V1_PREFIXES = [
+  'matches',
+  'favorites',
+  'friends',
+  'blocks',
+  'feed',
+  'reviews',
+  'reports',
+  'admin/reports',
+] as const;
+
 function pathOf(req: VercelReq): string {
   try {
     return new URL(req.url || '', 'http://localhost').pathname.replace(/^\/api\/v1\/?/, '');
@@ -19,11 +32,28 @@ function pathOf(req: VercelReq): string {
   }
 }
 
+function isSocialV1Path(path: string): boolean {
+  const p = String(path || '').split('?')[0];
+  if (!p) return false;
+  return SOCIAL_V1_PREFIXES.some((prefix) => p === prefix || p.startsWith(`${prefix}/`));
+}
+
 export default async function handler(req: VercelReq, res: VercelRes) {
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.end();
     return;
+  }
+
+  const path = pathOf(req);
+  if (!isSocialV1Path(path)) {
+    return sendJson(res, 404, {
+      success: false,
+      error: {
+        message: 'Not a social v1 route',
+        code: 'USE_OTHER_V1_HANDLER',
+      },
+    });
   }
 
   const auth = await requireAuthFromBearer(req);
@@ -36,7 +66,6 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     return sendJson(res, 503, { success: false, error: { message: 'Supabase not configured' } });
   }
 
-  const path = pathOf(req);
   const method = req.method || 'GET';
   const me = auth.profileId;
   const body = method !== 'GET' ? await readJsonBody(req) : {};
@@ -254,16 +283,34 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     }
 
     // ---- blocks ----
+    if ((path === 'blocks/me' || path.startsWith('blocks/me?')) && method === 'GET') {
+      const [iBlocked, blockedMe] = await Promise.all([
+        client.from('blocked_users').select('blocked_user_id').eq('user_id', me),
+        client.from('blocked_users').select('user_id').eq('blocked_user_id', me),
+      ]);
+      return sendJson(res, 200, {
+        success: true,
+        data: {
+          blockedUserIds: (iBlocked.data || []).map((r: any) => String(r.blocked_user_id)),
+          blockedByUserIds: (blockedMe.data || []).map((r: any) => String(r.user_id)),
+        },
+      });
+    }
     if (path === 'blocks' && method === 'POST') {
-      const blockedUserId = String(body?.blockedUserId || body?.userId || '');
+      const blockedUserId = String(body?.blockedUserId || body?.targetUserId || body?.userId || '');
       await client.from('blocked_users').upsert(
         { user_id: me, blocked_user_id: blockedUserId } as any,
         { onConflict: 'user_id,blocked_user_id' }
       );
       return sendJson(res, 200, { success: true });
     }
+    if (path === 'blocks/remove' && method === 'POST') {
+      const blockedUserId = String(body?.blockedUserId || body?.targetUserId || body?.userId || '');
+      await client.from('blocked_users').delete().eq('user_id', me).eq('blocked_user_id', blockedUserId);
+      return sendJson(res, 200, { success: true, data: { blocked: false, targetUserId: blockedUserId } });
+    }
     if (path.startsWith('blocks/') && method === 'DELETE') {
-      const blockedUserId = decodeURIComponent(path.replace('blocks/', ''));
+      const blockedUserId = decodeURIComponent(path.replace('blocks/', '').split('?')[0]);
       await client.from('blocked_users').delete().eq('user_id', me).eq('blocked_user_id', blockedUserId);
       return sendJson(res, 200, { success: true });
     }
@@ -295,6 +342,25 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     if (path.match(/^feed\/[^/]+\/like$/) && method === 'POST') {
       return sendJson(res, 200, { success: true, liked: true });
     }
+    if (path.match(/^feed\/[^/]+$/) && method === 'DELETE') {
+      const postId = decodeURIComponent(path.split('/')[1] || '');
+      if (!postId || postId === 'user') {
+        return sendJson(res, 400, { success: false, error: { message: 'postId required' } });
+      }
+      const { data: post } = await client
+        .from('feed_posts')
+        .select('id, creator_id')
+        .eq('id', postId)
+        .maybeSingle();
+      if (!post) {
+        return sendJson(res, 404, { success: false, error: { message: 'Post not found' } });
+      }
+      if (String((post as any).creator_id) !== me) {
+        return sendJson(res, 403, { success: false, error: { message: 'Forbidden', code: 'FORBIDDEN' } });
+      }
+      await client.from('feed_posts').delete().eq('id', postId);
+      return sendJson(res, 200, { success: true, data: { deleted: true, postId } });
+    }
     if (path.match(/^feed\/[^/]+\/tip$/) && method === 'POST') {
       return sendJson(res, 200, { success: true, tipped: true });
     }
@@ -318,6 +384,16 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     }
     if (path === 'reviews/request' && method === 'POST') {
       return sendJson(res, 200, { success: true });
+    }
+    if ((path === 'reports/me' || path.startsWith('reports/me?')) && method === 'GET') {
+      const { data, error } = await client
+        .from('moderation_reports')
+        .select('*')
+        .eq('reporter_id', me)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (error) throw error;
+      return sendJson(res, 200, { success: true, data: { reports: data || [] } });
     }
     if (path === 'reports' && method === 'POST') {
       const { error } = await client.from('moderation_reports').insert({

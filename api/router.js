@@ -93,12 +93,13 @@ module.exports = async function handler(req, res) {
     }
 
     // Dispatch: first non-null handler wins (handlers return null when path unmatched)
+    // handleFinance before handleV1 so /api/v1/finance/* is not swallowed as unimplemented social v1.
     const chain = [
       handleAuth,
       handleTeamleader,
       handleCore,
-      handleV1,
       handleFinance,
+      handleV1,
       handleStorage,
       handleAdmin,
       handleAppExtras,
