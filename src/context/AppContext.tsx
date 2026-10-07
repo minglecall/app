@@ -1151,7 +1151,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     activeCallRef.current = activeCall;
   }, [activeCall]);
 
-  // Local call lock → busy (matches DB/heartbeat vocabulary: online | busy | offline)
+  // Local call lock → busy ONLY while this client still has a live CallSession.
+  // Server presence is authoritative for everyone else (and for self when not in a call).
   const getUserCallStatus = (
     uid: string,
     fallbackStatus: 'online' | 'busy' | 'offline' | 'in_call'
@@ -1163,30 +1164,58 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     ) {
       return 'busy';
     }
-    if (
-      adminActiveCallsRef.current.some(
-        (ac) => (ac.hostId === uid || ac.callerId === uid) && ac.status === 'active'
-      )
-    ) {
-      return 'busy';
-    }
     // Normalize legacy in_call from any payload to busy
     if (fallbackStatus === 'in_call') return 'busy';
     return fallbackStatus;
   };
 
-  /** Apply a presence map from the server, respecting local active-call lock. */
+  /** Resolve presence for a user id or auth_id alias. */
+  const presenceFor = (
+    presence: Record<string, 'online' | 'busy' | 'offline'>,
+    u: { id: string; authId?: string }
+  ): 'online' | 'busy' | 'offline' | undefined => {
+    if (u.id && u.id in presence) return presence[u.id];
+    if (u.authId && u.authId in presence) return presence[u.authId];
+    return undefined;
+  };
+
+  /** Apply a presence map from the server — single source of truth for discovery + profile. */
   const applyPresenceMap = useCallback(
     (presence: Record<string, 'online' | 'busy' | 'offline'>, selfStatus?: string) => {
+      const selfId = currentUserIdRef.current;
+      const resolvedSelf =
+        (selfStatus as 'online' | 'busy' | 'offline' | undefined) ||
+        (selfId ? presence[selfId] : undefined);
+
+      // Server says self is not busy → drop stale local call lock (was sticking Busy on profile)
+      if (
+        resolvedSelf &&
+        resolvedSelf !== 'busy' &&
+        activeCallRef.current &&
+        activeCallRef.current.status !== 'ended'
+      ) {
+        activeCallRef.current = null;
+        setActiveCall(null);
+      }
+      if (resolvedSelf && resolvedSelf !== 'busy') {
+        setAdminActiveCalls((prev) =>
+          prev.filter((ac) => ac.hostId !== selfId && ac.callerId !== selfId)
+        );
+      }
+      if (resolvedSelf === 'online' || resolvedSelf === 'offline' || resolvedSelf === 'busy') {
+        preferredStatusRef.current = resolvedSelf;
+      }
+
       setUsers((prev) => {
         let changed = false;
         const next = prev.map((u) => {
-          if (!(u.id in presence) && u.id !== currentUserIdRef.current) return u;
           const fromMap =
-            u.id === currentUserIdRef.current
-              ? (selfStatus as any) || presence[u.id] || preferredStatusRef.current
-              : presence[u.id] || 'offline';
-          const liveStatus = getUserCallStatus(u.id, fromMap || 'offline');
+            u.id === selfId
+              ? resolvedSelf || presenceFor(presence, u) || preferredStatusRef.current
+              : presenceFor(presence, u);
+          if (fromMap == null) return u;
+          // Trust server presence; only force busy if THIS client still has an active call UI
+          const liveStatus = getUserCallStatus(u.id, fromMap);
           if (u.onlineStatus !== liveStatus) {
             changed = true;
             return { ...u, onlineStatus: liveStatus };
@@ -1400,13 +1429,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 mockLocationCity: localUser.mockLocationCity ?? p.mockLocationCity,
                 mockLocationCountry: localUser.mockLocationCountry ?? p.mockLocationCountry,
                 mockLocationCountryCode: localUser.mockLocationCountryCode ?? p.mockLocationCountryCode,
-                onlineStatus: getUserCallStatus(p.id, localUser.onlineStatus),
+                onlineStatus: localUser.onlineStatus || 'offline',
               });
             } else {
-              const liveStatus = localUser ? localUser.onlineStatus : (p.onlineStatus || 'offline');
+              const liveStatus = localUser
+                ? localUser.onlineStatus || 'offline'
+                : p.onlineStatus === 'busy' || p.onlineStatus === 'in_call'
+                  ? 'online'
+                  : p.onlineStatus || 'offline';
               mergedMap.set(p.id, {
                 ...p,
-                onlineStatus: getUserCallStatus(p.id, liveStatus),
+                onlineStatus: liveStatus,
               });
             }
             if (p.email) {
@@ -2108,20 +2141,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     liveProfile.coinBalance !== undefined ? liveProfile.coinBalance : u.coinBalance,
                   earningsCoins:
                     liveProfile.earningsCoins !== undefined ? liveProfile.earningsCoins : u.earningsCoins,
-                  onlineStatus: getUserCallStatus(
-                    u.id,
-                    (liveProfile.onlineStatus as any) || u.onlineStatus || 'offline'
-                  ),
+                  // Presence heartbeat owns onlineStatus — never re-stick Busy from raw DB
+                  onlineStatus: u.onlineStatus || 'offline',
                 };
               });
             }
             return [
               {
                 ...liveProfile,
-                onlineStatus: getUserCallStatus(
-                  liveProfile.id,
-                  (liveProfile.onlineStatus as any) || 'offline'
-                ),
+                // New row: prefer non-busy until presence map confirms
+                onlineStatus:
+                  liveProfile.onlineStatus === 'busy' || liveProfile.onlineStatus === 'in_call'
+                    ? 'online'
+                    : liveProfile.onlineStatus || 'offline',
               },
               ...prev,
             ];
@@ -2593,12 +2625,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
                 const sUser = serverUsersMap.get(u.id);
                 if (sUser) {
-                  // Directory sync must NOT overwrite live presence (causes online/offline flicker).
-                  // Keep in-memory status; heartbeat/Realtime own presence.
+                  // Directory sync must NOT overwrite live presence (raw DB busy sticks wrongly).
                   return {
                     ...u,
                     ...sUser,
-                    onlineStatus: getUserCallStatus(u.id, u.onlineStatus || 'offline'),
+                    onlineStatus: u.onlineStatus || 'offline',
                   };
                 }
                 return u;
@@ -2606,14 +2637,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               data.users.forEach((su: UserProfile) => {
                 if (!su?.id || deletedUserIdsRef.current.has(su.id)) return;
                 if (!updated.some((u) => u.id === su.id)) {
+                  // New discovery cards: do not seed Busy from sticky DB — presence will confirm
+                  const seeded =
+                    su.onlineStatus === 'busy' || su.onlineStatus === 'in_call'
+                      ? 'online'
+                      : su.onlineStatus || 'offline';
                   updated.push({
                     ...su,
-                    onlineStatus: getUserCallStatus(su.id, su.onlineStatus || 'offline'),
+                    onlineStatus: seeded,
                   });
                 }
               });
               return updated;
             });
+            // Refresh presence so discovery badges match server (not sticky DB busy)
+            void syncPresenceDirect();
           }
         }
       } catch (e) {
@@ -2857,9 +2895,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     };
                   }
                   if (!serverUser) return u;
-                  // Preserve live presence from heartbeat — directory payloads are often stale
-                  const callStatus = getUserCallStatus(u.id, u.onlineStatus || 'offline');
-                  return { ...u, ...serverUser, onlineStatus: callStatus };
+                  // Preserve live presence from heartbeat — never take raw DB busy from users:all
+                  return { ...u, ...serverUser, onlineStatus: u.onlineStatus || 'offline' };
                 });
                 data.users.forEach((su: UserProfile) => {
                   if (!su?.id || deletedUserIdsRef.current.has(su.id)) return;
@@ -2871,9 +2908,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                       (suEmail && u.email && u.email.toLowerCase().trim() === suEmail)
                   );
                   if (!alreadyPresent) {
+                    const seeded =
+                      su.onlineStatus === 'busy' || su.onlineStatus === 'in_call'
+                        ? 'online'
+                        : su.onlineStatus || 'offline';
                     merged.push({
                       ...su,
-                      onlineStatus: getUserCallStatus(su.id, su.onlineStatus || 'offline'),
+                      onlineStatus: seeded,
                     });
                   }
                 });
@@ -2898,7 +2939,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 for (const su of data.users as UserProfile[]) {
                   if (!su?.id || deletedUserIdsRef.current.has(su.id)) continue;
                   const prior = map.get(su.id);
-                  map.set(su.id, prior ? { ...prior, ...su, onlineStatus: getUserCallStatus(su.id, su.onlineStatus || prior.onlineStatus) } : { ...su, onlineStatus: getUserCallStatus(su.id, su.onlineStatus || 'offline') });
+                  map.set(
+                    su.id,
+                    prior
+                      ? { ...prior, ...su, onlineStatus: prior.onlineStatus || 'offline' }
+                      : {
+                          ...su,
+                          onlineStatus:
+                            su.onlineStatus === 'busy' || su.onlineStatus === 'in_call'
+                              ? 'online'
+                              : su.onlineStatus || 'offline',
+                        }
+                  );
                 }
                 if (deletedId) map.delete(deletedId);
                 next = Array.from(map.values());
@@ -2973,10 +3025,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     incoming.earningsCoins !== undefined
                       ? incoming.earningsCoins
                       : prior?.earningsCoins ?? 0,
-                  onlineStatus:
-                    (refersToLoggedInUser
-                      ? prior?.onlineStatus || incoming.onlineStatus
-                      : incoming.onlineStatus ?? prior?.onlineStatus) ?? 'offline',
+                  // Presence map owns status — ignore sticky busy on user broadcast payloads
+                  onlineStatus: prior?.onlineStatus || 'offline',
                 };
                 return [...remaining, mergedUser];
               });
@@ -3750,7 +3800,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       authFetch('/api/presence/heartbeat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'online' }),
+        body: JSON.stringify({ status: 'online', clearCalls: true }),
       })
         .then(async (res) => {
           if (!res.ok) return;
@@ -6088,19 +6138,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     if (isSelf) {
       preferredStatusRef.current = requested;
+      // Explicit Online/Offline from profile menu clears a stale local call lock
+      if (requested !== 'busy' && activeCallRef.current) {
+        activeCallRef.current = null;
+        setActiveCall(null);
+      }
     }
 
-    // Optimistic UI — if self is in an active call, keep showing busy until hangup
-    const displayStatus: 'online' | 'busy' | 'offline' =
-      isSelf &&
-      activeCallRef.current &&
-      activeCallRef.current.status !== 'ended' &&
-      (activeCallRef.current.callerId === userId || activeCallRef.current.receiverId === userId)
-        ? 'busy'
-        : requested;
-
     setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, onlineStatus: displayStatus } : u))
+      prev.map((u) => (u.id === userId ? { ...u, onlineStatus: requested } : u))
     );
 
     try {
@@ -6116,10 +6162,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     void (async () => {
       try {
+        const inLiveCall =
+          !!activeCallRef.current && activeCallRef.current.status !== 'ended';
         const res = await authFetch('/api/presence', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: requested }),
+          body: JSON.stringify({
+            status: requested,
+            // Clear zombie call_logs when going Online/Offline (not while a live call UI is open)
+            clearCalls:
+              !inLiveCall && (requested === 'online' || requested === 'offline'),
+          }),
         });
         const data = await res.json().catch(() => null);
         if (data?.presence) {
@@ -6127,9 +6180,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } else if (data?.status) {
           setUsers((prev) =>
             prev.map((u) =>
-              u.id === userId
-                ? { ...u, onlineStatus: getUserCallStatus(u.id, data.status) }
-                : u
+              u.id === userId ? { ...u, onlineStatus: data.status } : u
             )
           );
         } else if (!res.ok) {

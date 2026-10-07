@@ -36,6 +36,33 @@ function normalizePresenceStatus(raw) {
 
 const ACTIVE_CALL_STATUSES = ['ringing', 'active', 'accepted', 'in_call', 'connecting'];
 
+async function closeOpenCallLogsForUsers(client, userIds, reason) {
+  const ids = Array.from(
+    new Set((userIds || []).map((id) => String(id || '').trim()).filter(Boolean))
+  );
+  if (!ids.length) return;
+  const endedAt = new Date().toISOString();
+  // Close any open row where this user is caller, receiver, or host
+  for (const col of ['caller_id', 'receiver_id', 'host_id']) {
+    try {
+      const { error } = await client
+        .from('call_logs')
+        .update({
+          status: 'completed',
+          ended_at: endedAt,
+          end_time: endedAt,
+          updated_at: endedAt,
+          end_reason: reason || 'presence_online_clear',
+        })
+        .in(col, ids)
+        .in('status', ACTIVE_CALL_STATUSES);
+      if (error) console.warn('[presence] closeOpenCallLogs', col, error.message);
+    } catch (e) {
+      console.warn('[presence] closeOpenCallLogs', col, e && e.message);
+    }
+  }
+}
+
 /**
  * Participants in open calls → busy.
  * Stale ringing / abandoned active rows are closed so busy cannot stick.
@@ -60,10 +87,10 @@ async function fetchActiveCallParticipantIds(client) {
       const updatedMs = Date.parse(row.updated_at || row.started_at || '') || 0;
       const ageMs = Math.max(startedMs, updatedMs) ? now - Math.max(startedMs, updatedMs) : 0;
       // Drop abandoned ringing / zombie active rows so busy cannot stick forever
-      const isZombieRinging = st === 'ringing' && ageMs > 90_000;
+      const isZombieRinging = st === 'ringing' && ageMs > 60_000;
       const isZombieActive =
         (st === 'active' || st === 'accepted' || st === 'in_call' || st === 'connecting') &&
-        ageMs > 30 * 60_000;
+        ageMs > 10 * 60_000;
       if (isZombieRinging || isZombieActive) {
         if (row.id) zombieIds.push(String(row.id));
         continue;
@@ -99,25 +126,32 @@ async function fetchActiveCallParticipantIds(client) {
 async function buildPresenceMap(client) {
   const presence = {};
   const [profilesRes, busyIds] = await Promise.all([
-    client.from('profiles').select('id, online_status, last_seen_at').limit(2000),
+    client.from('profiles').select('id, auth_id, online_status, last_seen_at').limit(2000),
     fetchActiveCallParticipantIds(client),
   ]);
   const now = Date.now();
   for (const row of profilesRes.data || []) {
     const id = String(row.id);
+    const authId = row.auth_id ? String(row.auth_id) : '';
     let status = normalizePresenceStatus(row.online_status);
     const last = row.last_seen_at ? Date.parse(row.last_seen_at) : NaN;
     const fresh = Number.isFinite(last) && now - last <= PRESENCE_STALE_MS;
-    if (busyIds.has(id)) {
-      // In an open call → always busy (even if last_seen briefly stale)
+    // Match call_logs against profile id OR auth_id (IDs can differ)
+    const inOpenCall = busyIds.has(id) || (authId && busyIds.has(authId));
+    if (inOpenCall) {
       status = 'busy';
     } else if (status === 'busy' || status === 'in_call') {
-      // Manual Busy (DND) or leftover after hangup — keep while heartbeat is fresh
+      // Manual Busy (DND) while heartbeat is fresh. Leftover call-busy is cleared when
+      // the user heartbeats/toggles online (which also closes open call_logs).
       status = fresh ? 'busy' : 'offline';
     } else if (status !== 'offline') {
       if (!fresh) status = 'offline';
     }
     presence[id] = status;
+    // Also expose auth_id key so clients keyed by either id stay in sync
+    if (authId && authId !== id) {
+      presence[authId] = status;
+    }
   }
   return presence;
 }
@@ -161,14 +195,28 @@ async function handlePresence(path, req, res) {
       error: 'status must be online, busy, or offline',
     });
   }
-  const busyIds = await fetchActiveCallParticipantIds(auth.client);
-  const inActiveCall = busyIds.has(String(auth.profileId));
+  // Only clear open call_logs on logout or explicit clearCalls (login / Online toggle).
+  // Regular heartbeats must NOT end a live call.
+  const clearCalls = Boolean(body && body.clearCalls) || status === 'offline';
+  if (clearCalls) {
+    await closeOpenCallLogsForUsers(
+      auth.client,
+      [auth.profileId, auth.userId],
+      status === 'offline' ? 'presence_offline_clear' : 'presence_online_clear'
+    );
+  }
 
-  // offline wins; open call forces busy; otherwise honor online | busy (manual DND)
+  const busyIds = await fetchActiveCallParticipantIds(auth.client);
+  const inActiveCall =
+    busyIds.has(String(auth.profileId)) || busyIds.has(String(auth.userId));
+
+  // offline wins; real open call forces busy; otherwise honor online | busy
   let writeStatus = 'online';
   if (status === 'offline') {
     writeStatus = 'offline';
-  } else if (inActiveCall || status === 'busy' || status === 'in_call') {
+  } else if (inActiveCall) {
+    writeStatus = 'busy';
+  } else if (status === 'busy' || status === 'in_call') {
     writeStatus = 'busy';
   } else {
     writeStatus = 'online';
@@ -183,9 +231,26 @@ async function handlePresence(path, req, res) {
       updated_at: nowIso,
     })
     .eq('id', auth.profileId);
+
+  // If we just wrote busy (manual) but no open call, keep it in the response map.
+  // If we wrote online/offline, rebuild map — no self-only overwrite (was causing
+  // "I see X, others see Y").
   const presence = await buildPresenceMap(auth.client);
-  // Own row is always fresh after this write
-  presence[auth.profileId] = writeStatus;
+  if (writeStatus === 'busy' && !inActiveCall) {
+    presence[auth.profileId] = 'busy';
+    if (auth.userId) presence[String(auth.userId)] = 'busy';
+  } else {
+    presence[auth.profileId] = writeStatus;
+    if (auth.userId) presence[String(auth.userId)] = writeStatus;
+  }
+
+  // Persist cleared leftover busy → online in DB when map says online after cleanup
+  if (writeStatus === 'online' || writeStatus === 'offline') {
+    // already written above
+  } else if (writeStatus === 'busy' && !inActiveCall) {
+    // manual busy already written
+  }
+
   return send(res, 200, {
     success: true,
     userId: auth.profileId,
@@ -1066,9 +1131,16 @@ async function handleSupabase(path, req, res) {
     } else {
       onlineStatus = 'online';
     }
+    if (onlineStatus === 'offline' || body?.forceOnline || body?.clearCalls) {
+      await closeOpenCallLogsForUsers(
+        auth.client,
+        [auth.profileId, auth.userId],
+        body?.forceOnline ? 'force_online_clear' : 'update_status_clear'
+      );
+    }
     if (onlineStatus !== 'offline' && !body?.forceOnline) {
       const busyIds = await fetchActiveCallParticipantIds(auth.client);
-      if (busyIds.has(String(auth.profileId))) {
+      if (busyIds.has(String(auth.profileId)) || busyIds.has(String(auth.userId))) {
         onlineStatus = 'busy';
       }
     } else if (body?.forceOnline && onlineStatus !== 'offline') {
