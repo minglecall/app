@@ -1420,6 +1420,12 @@ export async function updateSystemConfigsInSupabase(
     if (updates.allowedInterests !== undefined) payload.allowed_interests = updates.allowedInterests;
     if (updates.flagSizes !== undefined) payload.flag_sizes_json = JSON.stringify(updates.flagSizes);
     if (updates.flag_sizes_json !== undefined) payload.flag_sizes_json = updates.flag_sizes_json;
+    if (updates.discoveryCardLayout !== undefined) {
+      payload.discovery_card_layout_json = JSON.stringify(updates.discoveryCardLayout);
+    }
+    if (updates.discovery_card_layout_json !== undefined) {
+      payload.discovery_card_layout_json = updates.discovery_card_layout_json;
+    }
     if (updates.dailyStreakRewards !== undefined) payload.daily_streak_rewards_json = JSON.stringify(updates.dailyStreakRewards);
     if (updates.daily_streak_rewards_json !== undefined) payload.daily_streak_rewards_json = updates.daily_streak_rewards_json;
     if (updates.dailyMissionsConfig !== undefined) payload.daily_missions_config_json = JSON.stringify(updates.dailyMissionsConfig);
@@ -1508,6 +1514,7 @@ export async function updateSystemConfigsInSupabase(
       'allowed_zodiac_signs',
       'allowed_interests',
       'flag_sizes_json',
+      'discovery_card_layout_json',
       'r2_bucket_name',
       'smtp_host',
       'smtp_port',

@@ -100,6 +100,7 @@ import {
   fetchUserDailyRewardsFromSupabase,
   mapDbProfileToUserProfile,
 } from '../services/supabaseService';
+import { parseDiscoveryCardLayout } from '../../shared/discoveryCardLayout';
 import {
   updateUserPassword,
   signOutSupabase,
@@ -2852,6 +2853,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     ? JSON.parse((data as any).flag_sizes_json)
                     : (data as any).flag_sizes_json)
                 : prev.flagSizes,
+              discoveryCardLayout: (data as any).discovery_card_layout_json
+                ? parseDiscoveryCardLayout((data as any).discovery_card_layout_json)
+                : prev.discoveryCardLayout,
               creatorTargetCycle: (data as any).creator_target_cycle ?? prev.creatorTargetCycle,
               periodCloseUtcTime: (data as any).period_close_utc_time ?? prev.periodCloseUtcTime,
               settlementEnabled: (data as any).settlement_enabled !== undefined ? (data as any).settlement_enabled : prev.settlementEnabled,

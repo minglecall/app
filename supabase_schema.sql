@@ -416,6 +416,7 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     allowed_zodiac_signs TEXT[] DEFAULT '{}',
     allowed_interests TEXT[] DEFAULT '{}',
     flag_sizes_json TEXT DEFAULT '',
+    discovery_card_layout_json TEXT DEFAULT '',
     show_dev_persona_bar BOOLEAN DEFAULT false,
     enable_regular_female_coin_earning BOOLEAN DEFAULT false,
     -- Fixed Peg / Economy (Phase 1): ONE coin?USD rate for host, TL, and platform.
@@ -484,6 +485,7 @@ ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS allowed_languages TEX
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS allowed_zodiac_signs TEXT[] DEFAULT '{}';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS allowed_interests TEXT[] DEFAULT '{}';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS flag_sizes_json TEXT DEFAULT '';
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS discovery_card_layout_json TEXT DEFAULT '';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_streak_rewards_json TEXT DEFAULT '[10,15,20,25,35,50,100]';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS daily_missions_config_json TEXT DEFAULT '{"chat_friends":{"target":3,"reward":25},"quick_matches":{"target":10,"reward":30},"video_call_min":{"target":60,"reward":35},"moment_interactions":{"target":3,"reward":15},"send_gift":{"target":1,"reward":20},"master_chest":{"target":4,"reward":50}}';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS creator_target_cycle TEXT DEFAULT 'weekly';

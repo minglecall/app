@@ -357,6 +357,8 @@ export interface Database {
           show_dev_persona_bar?: boolean;
           enable_regular_female_coin_earning?: boolean;
           allowed_country_codes?: string[];
+          flag_sizes_json?: string;
+          discovery_card_layout_json?: string;
           daily_streak_rewards_json?: string;
           daily_missions_config_json?: string;
           creator_target_cycle?: string;

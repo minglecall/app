@@ -1,11 +1,16 @@
 import React, { useEffect, useState } from 'react';
 
-export type MediaCardAspect = '3/4' | '9/16';
+export type MediaCardAspect = '3/4' | '9/16' | '2/3';
 
 export interface MediaCardProps extends React.HTMLAttributes<HTMLDivElement> {
   src: string;
   alt: string;
+  /** Single aspect when responsive pair not provided */
   aspect?: MediaCardAspect;
+  /** Mobile aspect (default 9/16). Used with aspectDesktop for responsive cards. */
+  aspectMobile?: MediaCardAspect;
+  /** sm+ aspect (default 3/4) */
+  aspectDesktop?: MediaCardAspect;
   /** Used when primary src fails or is empty — kept in React state so re-renders cannot wipe it. */
   fallbackSrc?: string;
   statusSlot?: React.ReactNode;
@@ -14,10 +19,18 @@ export interface MediaCardProps extends React.HTMLAttributes<HTMLDivElement> {
   onImageError?: React.ReactEventHandler<HTMLImageElement>;
 }
 
+function aspectToClass(a: MediaCardAspect): string {
+  if (a === '9/16') return 'aspect-[9/16]';
+  if (a === '2/3') return 'aspect-[2/3]';
+  return 'aspect-[3/4]';
+}
+
 export const MediaCard: React.FC<MediaCardProps> = ({
   src,
   alt,
   aspect = '3/4',
+  aspectMobile,
+  aspectDesktop,
   fallbackSrc,
   statusSlot,
   metadata,
@@ -27,9 +40,16 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   onClick,
   ...rest
 }) => {
-  // Mobile: tall phone portrait; sm+: classic 3/4
-  const aspectClass =
-    aspect === '9/16' ? 'aspect-[9/16]' : 'aspect-[9/16] sm:aspect-[3/4]';
+  const mobile = aspectMobile || (aspect === '9/16' || aspect === '2/3' ? aspect : '9/16');
+  const desktop = aspectDesktop || (aspect === '3/4' || aspect === '2/3' ? aspect : '3/4');
+  // Full class strings required for Tailwind JIT
+  const dMap: Record<MediaCardAspect, string> = {
+    '3/4': 'sm:aspect-[3/4]',
+    '2/3': 'sm:aspect-[2/3]',
+    '9/16': 'sm:aspect-[9/16]',
+  };
+  const resolvedAspectClass = `${aspectToClass(mobile)} ${dMap[desktop]}`;
+
   const resolvedSrc = (src && String(src).trim()) || fallbackSrc || '';
   const [imgSrc, setImgSrc] = useState(resolvedSrc);
   const [loaded, setLoaded] = useState(false);
@@ -65,8 +85,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
       onClick={onClick}
       {...rest}
     >
-      <div className={`relative w-full ${aspectClass} overflow-hidden bg-app`}>
-        {/* Soft placeholder while the real image decodes */}
+      <div className={`relative w-full ${resolvedAspectClass} overflow-hidden bg-app`}>
         {!loaded && (
           <div
             className="absolute inset-0 animate-pulse bg-gradient-to-br from-slate-800 via-slate-750 to-slate-900"

@@ -110,6 +110,7 @@ export const INITIAL_SYSTEM_SETTINGS: SystemSettings = {
     xl: 36,
     '2xl': 48,
   },
+  discoveryCardLayout: undefined, // Resolved via DEFAULT_DISCOVERY_CARD_LAYOUT / parseDiscoveryCardLayout
   dailyStreakRewards: [10, 15, 20, 25, 35, 50, 100],
   dailyMissionsConfig: {
     chatFriends: { target: 3, reward: 25, enabled: true },

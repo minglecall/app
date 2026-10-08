@@ -6,6 +6,7 @@ export interface BadgeProps {
   children: React.ReactNode;
   tone?: BadgeTone;
   className?: string;
+  style?: React.CSSProperties;
 }
 
 const toneClasses: Record<BadgeTone, string> = {
@@ -18,9 +19,10 @@ const toneClasses: Record<BadgeTone, string> = {
   skuTag: 'bg-coin text-slate-950 border-transparent font-display font-bold uppercase tracking-wide text-[9px]',
 };
 
-export const Badge: React.FC<BadgeProps> = ({ children, tone = 'neutral', className = '' }) => {
+export const Badge: React.FC<BadgeProps> = ({ children, tone = 'neutral', className = '', style }) => {
   return (
     <span
+      style={style}
       className={[
         'inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded-md border',
         toneClasses[tone],

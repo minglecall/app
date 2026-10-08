@@ -14,9 +14,11 @@ import {
   ShieldCheck,
   Layers,
   Zap,
+  LayoutTemplate,
 } from 'lucide-react';
 import { HomeBanner, PolicyDocument, HomeQuickLink } from '../../types';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
+import { AdminDiscoveryCardDesigner } from './AdminDiscoveryCardDesigner';
 
 export const AdminHomeCMS: React.FC = () => {
   const {
@@ -34,7 +36,7 @@ export const AdminHomeCMS: React.FC = () => {
     seedHomeCmsDefaults,
   } = useApp();
 
-  const [cmsSection, setCmsSection] = useState<'banners' | 'policies' | 'shortcuts'>('banners');
+  const [cmsSection, setCmsSection] = useState<'banners' | 'policies' | 'shortcuts' | 'discovery_card'>('banners');
   const [isSaving, setIsSaving] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
 
@@ -182,9 +184,20 @@ export const AdminHomeCMS: React.FC = () => {
             <Zap className="w-3.5 h-3.5" />
             <span>Quick Shortcuts ({homeQuickLinks.length})</span>
           </button>
+          <button
+            onClick={() => setCmsSection('discovery_card')}
+            className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
+              cmsSection === 'discovery_card' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <LayoutTemplate className="w-3.5 h-3.5" />
+            <span>Discovery Card</span>
+          </button>
           </div>
         </div>
       </div>
+
+      {cmsSection === 'discovery_card' && <AdminDiscoveryCardDesigner />}
 
       {/* 1. HERO BANNERS SECTION */}
       {cmsSection === 'banners' && (

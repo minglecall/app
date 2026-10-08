@@ -2,9 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Search,
-  Video,
-  PhoneCall,
-  ShieldCheck,
   Globe,
   Languages,
   Sparkles,
@@ -18,11 +15,8 @@ import {
   Users,
 } from 'lucide-react';
 import { UserProfile } from '../../types';
-import { rankCreatorsForDiscovery, isCurrentlyPeakHour } from '../../utils/discoveryAlgorithm';
+import { rankCreatorsForDiscovery } from '../../utils/discoveryAlgorithm';
 import { ProfileDetailModal } from './ProfileDetailModal';
-import { getUserEffectiveLocation } from '../../utils/location';
-import { normalizeMediaUrl } from '../../utils/r2Storage';
-import { getFallbackAvatar } from '../../utils/avatars';
 import { QuickMatchRoulette } from './QuickMatchRoulette';
 import {
   getAllowedCountries,
@@ -33,7 +27,7 @@ import {
 import { SvgFlag } from '../common/SvgFlag';
 import { ZodiacIcon } from '../common/ZodiacIcon';
 import { SearchableFilterDropdown } from '../common/SearchableFilterDropdown';
-import { Badge, MediaCard } from '../ui';
+import { DiscoveryCard } from './DiscoveryCard';
 
 interface DiscoveryGridProps {
   onStartCall: (userId: string) => void;
@@ -493,107 +487,18 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
 
           {/* Profile Cards Grid - 2 Cards per row on mobile */}
           <div id="discovery-user-cards-grid" className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-6">
-            {populatedDiscoveryUsers.map((user) => {
-              const isUserOnline = user.onlineStatus === 'online';
-              const isUserBusy = user.onlineStatus === 'busy' || user.onlineStatus === 'in_call';
-
-              const metrics = creatorMetricsMap[user.id];
-              const isReadyNow = Boolean(metrics?.isReadyNowActive) && isUserOnline && isCurrentlyPeakHour(systemSettings.peakHoursStart, systemSettings.peakHoursEnd);
-              const countryName = getUserEffectiveLocation(user).country || user.nationality || '';
-
-              const fallbackAvatar = getFallbackAvatar(user.name, user.gender, user.role);
-              const primaryAvatar =
-                normalizeMediaUrl(user.avatarUrl) ||
-                normalizeMediaUrl(user.gallery?.[0]) ||
-                fallbackAvatar;
-
-              const statusBadgeClass =
-                'backdrop-blur-md shadow-md shadow-black/50 font-bold text-white border';
-
-              return (
-                <MediaCard
-                  key={user.id}
-                  src={primaryAvatar}
-                  fallbackSrc={fallbackAvatar}
-                  alt={user.name}
-                  aspect="3/4"
-                  onClick={() => setSelectedUserProfile(user)}
-                  statusSlot={
-                    <>
-                      {isReadyNow ? (
-                        <Badge tone="brand" className={`${statusBadgeClass} !bg-orange-500 !text-white !border-orange-200/70`}>
-                          <Flame className="w-2.5 h-2.5" /> Ready
-                        </Badge>
-                      ) : isUserOnline ? (
-                        <Badge tone="neutral" className={`${statusBadgeClass} !bg-emerald-500 !text-white !border-emerald-200/70`}>
-                          <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
-                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/80" />
-                            <span className="relative inline-flex h-2 w-2 rounded-full bg-white shadow-sm" />
-                          </span>
-                          Online
-                        </Badge>
-                      ) : isUserBusy ? (
-                        <Badge tone="warning" className={`${statusBadgeClass} !bg-amber-500 !text-white !border-amber-200/70`}>
-                          Busy
-                        </Badge>
-                      ) : (
-                        <Badge tone="neutral" className={`${statusBadgeClass} !bg-slate-900/85 !text-white !border-white/40`}>
-                          Offline
-                        </Badge>
-                      )}
-                      {user.isVerified && (
-                        <span title="Verified" aria-label="Verified" className="ml-auto drop-shadow-md">
-                          <ShieldCheck className="w-4 h-4 text-emerald-400" strokeWidth={2.5} />
-                        </span>
-                      )}
-                    </>
-                  }
-                  metadata={
-                    <div className="space-y-0.5 text-on-media">
-                      <h3 className="font-display font-bold text-sm sm:text-base drop-shadow-md truncate leading-tight">
-                        {user.name}
-                      </h3>
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <SvgFlag
-                          countryCode={user.countryCode}
-                          nationality={countryName}
-                          size="sm"
-                          rounded={true}
-                        />
-                        <span className="text-[11px] sm:text-xs text-white/90 font-medium truncate drop-shadow-sm">
-                          {countryName}
-                        </span>
-                      </div>
-                    </div>
-                  }
-                  footer={
-                    <div className="flex justify-center">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onStartCall(user.id);
-                        }}
-                        title={isUserBusy ? 'Busy' : 'Call'}
-                        aria-label={isUserBusy ? 'Busy' : 'Call'}
-                        className={`w-11 h-11 sm:w-12 sm:h-12 rounded-full flex items-center justify-center transition-all cursor-pointer ${
-                          isUserOnline
-                            ? 'bg-flirt text-white shadow-brand active:scale-95'
-                            : isUserBusy
-                            ? 'bg-amber-500 text-white shadow-md'
-                            : 'bg-black/55 text-white/80 border border-white/25 backdrop-blur-md'
-                        }`}
-                      >
-                        {isUserBusy ? (
-                          <PhoneCall className="w-5 h-5" />
-                        ) : (
-                          <Video className="w-5 h-5" />
-                        )}
-                      </button>
-                    </div>
-                  }
-                />
-              );
-            })}
+            {populatedDiscoveryUsers.map((user) => (
+              <DiscoveryCard
+                key={user.id}
+                user={user}
+                layout={systemSettings.discoveryCardLayout}
+                metrics={creatorMetricsMap[user.id]}
+                peakHoursStart={systemSettings.peakHoursStart}
+                peakHoursEnd={systemSettings.peakHoursEnd}
+                onStartCall={onStartCall}
+                onOpenProfile={setSelectedUserProfile}
+              />
+            ))}
           </div>
 
           {populatedDiscoveryUsers.length === 0 && (

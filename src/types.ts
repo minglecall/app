@@ -1,3 +1,5 @@
+import type { DiscoveryCardLayout } from '../shared/discoveryCardLayout';
+
 export type UserGender = 'male' | 'female' | 'other';
 export type UserRole = 'male_user' | 'female_user' | 'female_creator' | 'female_host' | 'other_user' | 'admin' | 'team_leader' | 'agency_manager';
 export type OnlineStatus = 'online' | 'busy' | 'offline' | 'in_call';
@@ -493,6 +495,8 @@ export interface SystemSettings {
   allowedZodiacSigns?: string[]; // Admin configurable enabled zodiac keys (e.g. ['aries', 'taurus', ...])
   allowedInterests?: string[]; // Admin configurable enabled interest keys/names (e.g. ['travel', 'gaming', ...])
   flagSizes?: Partial<FlagSizesConfig>; // Dynamic SVG flag height settings (width automatically computed 1.5x)
+  /** Admin-designed discovery grid card layout (bounded slots + sizes). Parsed via shared/discoveryCardLayout. */
+  discoveryCardLayout?: DiscoveryCardLayout;
   // Quick Match Configuration
   quickMatchFreeEnabled?: boolean; // Quick Match is free to discover & match (default true)
   quickMatchTimerSeconds?: number; // Decision timer duration in seconds (default 5, configurable 5-15)
