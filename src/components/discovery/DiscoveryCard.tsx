@@ -15,6 +15,7 @@ import {
   groupWidgetsBySlot,
   parseDiscoveryCardLayout,
   splitSlotIntoLines,
+  widgetBoxAlignClasses,
   widgetPaddingStyle,
 } from '../../../shared/discoveryCardLayout';
 
@@ -71,7 +72,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     return (
       <span
         key={w.id}
-        className={`inline-flex items-center max-w-full ${full ? 'w-full min-w-0' : 'shrink-0'}`}
+        className={`inline-flex items-center max-w-full leading-none ${full ? 'w-full min-w-0' : 'shrink-0'}`}
         style={widgetPaddingStyle(w)}
       >
         {node}
@@ -162,7 +163,10 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       case 'age':
         return wrapPad(
           w,
-          <span className="font-medium text-white/90 drop-shadow-sm shrink-0" style={{ fontSize: layout.metaFontPx }}>
+          <span
+            className="font-medium text-white/90 drop-shadow-sm shrink-0 leading-none"
+            style={{ fontSize: layout.metaFontPx }}
+          >
             {user.age}
           </span>
         );
@@ -175,6 +179,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             nationality={countryName}
             size={layout.flagSize}
             rounded={true}
+            className="block"
           />
         );
 
@@ -182,7 +187,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         return wrapPad(
           w,
           <span
-            className={`text-white/90 font-medium drop-shadow-sm ${
+            className={`text-white/90 font-medium drop-shadow-sm leading-none ${
               w.widthPercent >= 100 ? 'block w-full truncate whitespace-nowrap' : 'truncate'
             }`}
             style={{ fontSize: layout.metaFontPx }}
@@ -253,7 +258,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
                   }
                 : { flex: '0 1 auto', minWidth: 0, maxWidth: '100%' };
             return (
-              <div key={w.id} className="min-w-0" style={style}>
+              <div key={w.id} className={`min-w-0 ${widgetBoxAlignClasses(w)}`} style={style}>
                 {node}
               </div>
             );

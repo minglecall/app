@@ -45,6 +45,22 @@ export const H_ALIGN_LABELS: Record<DiscoveryHAlign, string> = {
   right: 'Right',
 };
 
+/** Position inside the widget’s width-% bounding box. */
+export type DiscoveryBoxAlignH = 'start' | 'center' | 'end';
+export type DiscoveryBoxAlignV = 'top' | 'center' | 'bottom';
+
+export const BOX_ALIGN_H_LABELS: Record<DiscoveryBoxAlignH, string> = {
+  start: 'Left',
+  center: 'Center',
+  end: 'Right',
+};
+
+export const BOX_ALIGN_V_LABELS: Record<DiscoveryBoxAlignV, string> = {
+  top: 'Top',
+  center: 'Middle',
+  bottom: 'Bottom',
+};
+
 export const WIDGET_DEFAULT_SLOT: Record<DiscoveryCardWidgetId, DiscoveryCardSlotId> = {
   statusBadge: 'topLeft',
   verifiedIcon: 'topRight',
@@ -71,8 +87,11 @@ export const SIZE_BOUNDS = {
   callIconPx: { min: 14, max: 24, default: 20 },
 } as const;
 
-/** Per-widget padding (px), clamped so layout cannot blow out the card. */
-export const PAD_BOUNDS = { min: 0, max: 16, default: 0 } as const;
+/**
+ * Per-widget edge offset (px). Applied as margin so negatives nudge inward/outward.
+ * Negative = pull toward neighbor (fix flag/country optical align); positive = push away.
+ */
+export const PAD_BOUNDS = { min: -12, max: 16, default: 0 } as const;
 
 /**
  * Share of the line width (10–100). 0 = auto (content-sized).
@@ -101,7 +120,11 @@ export interface DiscoveryCardWidgetConfig {
   nextLine: boolean;
   /** Align the line that contains this widget (used from the first widget on that line). */
   hAlign: DiscoveryHAlign;
-  /** Outer padding around the widget (px), each side clamped 0–16. */
+  /** Horizontal position inside the width-% cell. */
+  boxAlignH: DiscoveryBoxAlignH;
+  /** Vertical position inside the width-% cell / on the line. */
+  boxAlignV: DiscoveryBoxAlignV;
+  /** Edge offsets (px), each side clamped PAD_BOUNDS; negatives allowed for fine nudge. */
   padT: number;
   padR: number;
   padB: number;
@@ -177,6 +200,8 @@ function defaultWidgets(): DiscoveryCardWidgetConfig[] {
     // Flag then country: each can start a line; country is full width by default
     nextLine: id === 'flag' || id === 'country',
     hAlign: id === 'verifiedIcon' || id === 'callButton' ? 'right' : 'left',
+    boxAlignH: 'start',
+    boxAlignV: 'center',
     padT: PAD_BOUNDS.default,
     padR: PAD_BOUNDS.default,
     padB: PAD_BOUNDS.default,
@@ -236,6 +261,14 @@ function coerceHAlign(v: unknown, fallback: DiscoveryHAlign): DiscoveryHAlign {
   return v === 'left' || v === 'right' ? v : fallback;
 }
 
+function coerceBoxAlignH(v: unknown, fallback: DiscoveryBoxAlignH): DiscoveryBoxAlignH {
+  return v === 'start' || v === 'center' || v === 'end' ? v : fallback;
+}
+
+function coerceBoxAlignV(v: unknown, fallback: DiscoveryBoxAlignV): DiscoveryBoxAlignV {
+  return v === 'top' || v === 'center' || v === 'bottom' ? v : fallback;
+}
+
 /** Split ordered widgets into lines using nextLine flags. */
 export function splitSlotIntoLines(
   widgets: DiscoveryCardWidgetConfig[]
@@ -271,6 +304,8 @@ function normalizeWidgets(raw: unknown): DiscoveryCardWidgetConfig[] {
       const order = clampInt((item as any).order, 0, 999, idx);
       const nextLine = (item as any).nextLine !== undefined ? Boolean((item as any).nextLine) : def.nextLine;
       const hAlign = coerceHAlign((item as any).hAlign, def.hAlign);
+      const boxAlignH = coerceBoxAlignH((item as any).boxAlignH, def.boxAlignH);
+      const boxAlignV = coerceBoxAlignV((item as any).boxAlignV, def.boxAlignV);
       const padT = clampInt((item as any).padT, PAD_BOUNDS.min, PAD_BOUNDS.max, def.padT);
       const padR = clampInt((item as any).padR, PAD_BOUNDS.min, PAD_BOUNDS.max, def.padR);
       const padB = clampInt((item as any).padB, PAD_BOUNDS.min, PAD_BOUNDS.max, def.padB);
@@ -281,7 +316,21 @@ function normalizeWidgets(raw: unknown): DiscoveryCardWidgetConfig[] {
         WIDTH_BOUNDS.max,
         def.widthPercent
       );
-      byId.set(id, { id, enabled, slot, order, nextLine, hAlign, padT, padR, padB, padL, widthPercent });
+      byId.set(id, {
+        id,
+        enabled,
+        slot,
+        order,
+        nextLine,
+        hAlign,
+        boxAlignH,
+        boxAlignV,
+        padT,
+        padR,
+        padB,
+        padL,
+        widthPercent,
+      });
     });
   }
 
@@ -296,19 +345,33 @@ function normalizeWidgets(raw: unknown): DiscoveryCardWidgetConfig[] {
   return list.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 }
 
-/** Build CSS padding style from widget pad fields. */
+/**
+ * Build CSS margin offsets from widget pad fields (negatives allowed for nudge).
+ * Named for backward compatibility with existing padT/R/B/L config keys.
+ */
 export function widgetPaddingStyle(w: Pick<DiscoveryCardWidgetConfig, 'padT' | 'padR' | 'padB' | 'padL'>): {
-  paddingTop: number;
-  paddingRight: number;
-  paddingBottom: number;
-  paddingLeft: number;
+  marginTop: number;
+  marginRight: number;
+  marginBottom: number;
+  marginLeft: number;
 } {
   return {
-    paddingTop: clampInt(w.padT, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
-    paddingRight: clampInt(w.padR, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
-    paddingBottom: clampInt(w.padB, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
-    paddingLeft: clampInt(w.padL, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
+    marginTop: clampInt(w.padT, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
+    marginRight: clampInt(w.padR, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
+    marginBottom: clampInt(w.padB, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
+    marginLeft: clampInt(w.padL, PAD_BOUNDS.min, PAD_BOUNDS.max, 0),
   };
+}
+
+/** Tailwind-friendly classes for in-box alignment. */
+export function widgetBoxAlignClasses(w: Pick<DiscoveryCardWidgetConfig, 'boxAlignH' | 'boxAlignV'>): string {
+  const h =
+    w.boxAlignH === 'center' ? 'justify-center' : w.boxAlignH === 'end' ? 'justify-end' : 'justify-start';
+  const v =
+    w.boxAlignV === 'top' ? 'items-start' : w.boxAlignV === 'bottom' ? 'items-end' : 'items-center';
+  const self =
+    w.boxAlignV === 'top' ? 'self-start' : w.boxAlignV === 'bottom' ? 'self-end' : 'self-center';
+  return `flex ${h} ${v} ${self}`;
 }
 
 /**

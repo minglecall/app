@@ -21,7 +21,11 @@ import {
   WIDTH_BOUNDS,
   SLOT_LABELS,
   H_ALIGN_LABELS,
+  BOX_ALIGN_H_LABELS,
+  BOX_ALIGN_V_LABELS,
   DiscoveryHAlign,
+  DiscoveryBoxAlignH,
+  DiscoveryBoxAlignV,
   WIDGET_ALLOWED_SLOTS,
   WIDGET_LABELS,
   discoveryCardLayoutBlocksSave,
@@ -87,6 +91,8 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
       order: number;
       nextLine: boolean;
       hAlign: DiscoveryHAlign;
+      boxAlignH: DiscoveryBoxAlignH;
+      boxAlignV: DiscoveryBoxAlignV;
       padT: number;
       padR: number;
       padB: number;
@@ -108,6 +114,8 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
           order: patch.order !== undefined ? patch.order : w.order,
           nextLine: patch.nextLine !== undefined ? patch.nextLine : w.nextLine,
           hAlign: patch.hAlign !== undefined ? patch.hAlign : w.hAlign,
+          boxAlignH: patch.boxAlignH !== undefined ? patch.boxAlignH : w.boxAlignH,
+          boxAlignV: patch.boxAlignV !== undefined ? patch.boxAlignV : w.boxAlignV,
           padT: patch.padT !== undefined ? patch.padT : w.padT,
           padR: patch.padR !== undefined ? patch.padR : w.padR,
           padB: patch.padB !== undefined ? patch.padB : w.padB,
@@ -292,20 +300,61 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                       />
                     </label>
                     <div
+                      className={`flex flex-wrap items-center gap-2 ${
+                        w.enabled ? '' : 'opacity-40 pointer-events-none'
+                      }`}
+                    >
+                      <label className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                        <span className="font-bold uppercase shrink-0">In box</span>
+                        <select
+                          disabled={!w.enabled}
+                          value={w.boxAlignH}
+                          onChange={(e) =>
+                            updateWidget(id, { boxAlignH: e.target.value as DiscoveryBoxAlignH })
+                          }
+                          className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 disabled:opacity-40"
+                          title="Horizontal position inside width box"
+                        >
+                          {(Object.keys(BOX_ALIGN_H_LABELS) as DiscoveryBoxAlignH[]).map((a) => (
+                            <option key={a} value={a}>
+                              {BOX_ALIGN_H_LABELS[a]}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          disabled={!w.enabled}
+                          value={w.boxAlignV}
+                          onChange={(e) =>
+                            updateWidget(id, { boxAlignV: e.target.value as DiscoveryBoxAlignV })
+                          }
+                          className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 disabled:opacity-40"
+                          title="Vertical position inside width box / on the line"
+                        >
+                          {(Object.keys(BOX_ALIGN_V_LABELS) as DiscoveryBoxAlignV[]).map((a) => (
+                            <option key={a} value={a}>
+                              {BOX_ALIGN_V_LABELS[a]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <div
                       className={`grid grid-cols-4 gap-2 ${w.enabled ? '' : 'opacity-40 pointer-events-none'}`}
                     >
                       {(
                         [
-                          ['padT', 'Top', w.padT],
-                          ['padR', 'Right', w.padR],
-                          ['padB', 'Bottom', w.padB],
-                          ['padL', 'Left', w.padL],
+                          ['padT', 'Off T', w.padT],
+                          ['padR', 'Off R', w.padR],
+                          ['padB', 'Off B', w.padB],
+                          ['padL', 'Off L', w.padL],
                         ] as const
                       ).map(([key, label, value]) => (
                         <label key={key} className="space-y-0.5">
                           <span className="text-[9px] font-bold text-slate-500 uppercase flex justify-between">
                             <span>{label}</span>
-                            <span className="font-mono text-slate-400">{value}px</span>
+                            <span className="font-mono text-slate-400">
+                              {value > 0 ? `+${value}` : value}px
+                            </span>
                           </span>
                           <input
                             type="range"
@@ -315,7 +364,7 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                             disabled={!w.enabled}
                             onChange={(e) => updateWidget(id, { [key]: Number(e.target.value) })}
                             className="w-full accent-pink-500"
-                            title={`Padding ${label} (0–${PAD_BOUNDS.max}px)`}
+                            title={`Offset ${label} (${PAD_BOUNDS.min}…${PAD_BOUNDS.max}px). Negative pulls; positive pushes.`}
                           />
                         </label>
                       ))}
