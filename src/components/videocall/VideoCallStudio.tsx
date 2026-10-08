@@ -1866,23 +1866,17 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
           </div>
         </div>
 
-        {/* Center Clock & Creator Earning Badge */}
-        <div className="flex items-center gap-1.5 sm:gap-3 bg-app-card/90 border border-app backdrop-blur-md px-2.5 sm:px-4 py-1.5 rounded-app shadow-app-sm shrink-0">
-          <div className="flex items-center gap-1.5 text-slate-100 text-xs font-ticker font-bold">
-            <span className="w-2 h-2 rounded-full bg-rose-500" />
-            <span>{formatTime(activeCall.durationSeconds)}</span>
+        {/* Creator earning badge only — single call clock lives in the bottom bar */}
+        {!isMaleCaller && canEarnCoins ? (
+          <div className="flex items-center gap-1.5 sm:gap-3 bg-app-card/90 border border-app backdrop-blur-md px-2.5 sm:px-4 py-1.5 rounded-app shadow-app-sm shrink-0">
+            <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-ticker font-bold">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span>+{(activeCall.coinsEarned || 0)}</span>
+            </div>
           </div>
-
-          {!isMaleCaller && canEarnCoins && (
-            <>
-              <div className="h-4 w-px bg-slate-800 hidden sm:block" />
-              <div className="hidden sm:flex items-center gap-1.5 text-emerald-400 text-xs font-ticker font-bold">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                <span>+{(activeCall.coinsEarned || 0)}</span>
-              </div>
-            </>
-          )}
-        </div>
+        ) : (
+          <div className="shrink-0 w-0 sm:w-auto" aria-hidden />
+        )}
 
         {/* Right Badges & Screen Protection & Quality Setting */}
         <div className="flex items-center gap-1.5 sm:gap-2 font-mono shrink-0 min-w-0">

@@ -819,6 +819,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     billedMinutesRef.current.clear();
     burnInFlightRef.current.clear();
     insufficientEndToastShownRef.current = false;
+    billingCapSecondsRef.current = null;
     const accepted = activeCallRef.current;
     setActiveCall((prev) => {
       if (!prev) return null;
@@ -867,6 +868,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const burnInFlightRef = useRef<Set<number>>(new Set());
   /** Prevents stacked insufficient-balance end toasts for the same call. */
   const insufficientEndToastShownRef = useRef(false);
+  /** Max call seconds from balance at media-connect (floor(coins/rate)*60). Cleared when call ends. */
+  const billingCapSecondsRef = useRef<number | null>(null);
   const endCallRef = useRef<() => void>(() => {});
   const syncCallEndAndPresenceRef = useRef<
     (payload: Record<string, unknown>, restoreIds: string[]) => Promise<void>
@@ -1529,6 +1532,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       clearRingTimeout();
       billedMinutesRef.current.clear();
       burnInFlightRef.current.clear();
+      billingCapSecondsRef.current = null;
       activeCallRef.current = null;
       setActiveCall(null);
 
@@ -4907,6 +4911,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       billedMinutesRef.current.clear();
       burnInFlightRef.current.clear();
       insufficientEndToastShownRef.current = false;
+      billingCapSecondsRef.current = null;
       setActiveCall({
         id: callId,
         callerId: currentUser.id,
@@ -5152,6 +5157,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       billedMinutesRef.current.clear();
       burnInFlightRef.current.clear();
       insufficientEndToastShownRef.current = false;
+      billingCapSecondsRef.current = null;
       setActiveCall((prev) => {
         if (!prev) return null;
         return {
@@ -5412,6 +5418,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
     billedMinutesRef.current.clear();
     burnInFlightRef.current.clear();
+    billingCapSecondsRef.current = null;
     // Keep insufficientEndToastShownRef so remote call:ended does not double-toast
     setActiveCall(null);
 
@@ -5497,8 +5504,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } = payload;
 
     if (typeof newCallerBalance === 'number' || typeof newHostEarnings === 'number' || typeof newTlEarnings === 'number') {
-      setUsers((prev) =>
-        prev.map((u) => {
+      setUsers((prev) => {
+        const next = prev.map((u) => {
           if (callerId && u.id === callerId && typeof newCallerBalance === 'number') {
             return { ...u, coinBalance: newCallerBalance };
           }
@@ -5517,8 +5524,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             };
           }
           return u;
-        })
-      );
+        });
+        usersRef.current = next;
+        return next;
+      });
     }
 
     if (billingMinute && billingMinute > 0) {
@@ -5578,6 +5587,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         billedMinutesRef.current.clear();
         burnInFlightRef.current.clear();
         insufficientEndToastShownRef.current = false;
+        billingCapSecondsRef.current = null;
       }
       return;
     }
@@ -5601,6 +5611,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const callId = activeCall.id;
     const tickCheckSeconds = 60;
+    const rateAtStart = getEffectiveCallRate(activeCall.receiverId, activeCall.callerId);
+
+    // Lock max call length from balance at connect: floor(coins/rate)*60
+    if (billingCapSecondsRef.current == null) {
+      const callerRow = usersRef.current.find((u) => u.id === activeCall.callerId);
+      const bal = Number(callerRow?.coinBalance);
+      const fullMinutes = Number.isFinite(bal) && rateAtStart > 0 ? Math.floor(bal / rateAtStart) : 0;
+      billingCapSecondsRef.current = Math.max(0, fullMinutes) * tickCheckSeconds;
+      if (billingCapSecondsRef.current < tickCheckSeconds) {
+        showInsufficientEndToastOnce(
+          'Call Auto-Terminated',
+          `Need ${rateAtStart} coins for 1 minute. Please recharge.`
+        );
+        endCallRef.current();
+        return;
+      }
+    }
+
+    const endForInsufficient = (message: string) => {
+      showInsufficientEndToastOnce('Call Auto-Terminated', message);
+      endCallRef.current();
+    };
 
     const requestBurn = async (billingMinute: number) => {
       if (billedMinutesRef.current.has(billingMinute) || burnInFlightRef.current.has(billingMinute)) {
@@ -5613,7 +5645,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const accessToken = sessionRes.data.session?.access_token;
         if (!accessToken) {
           burnInFlightRef.current.delete(billingMinute);
-          showToast('Billing Error', 'Authentication required for call billing.', 'error');
+          endForInsufficient('Authentication required for call billing.');
           return;
         }
 
@@ -5622,11 +5654,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const localBalance = Number(callerRow?.coinBalance);
         if (Number.isFinite(localBalance) && localBalance < rateNeeded) {
           burnInFlightRef.current.delete(billingMinute);
-          showInsufficientEndToastOnce(
-            'Call Auto-Terminated',
+          endForInsufficient(
             `Need ${rateNeeded} coins for the next minute. Please recharge.`
           );
-          endCallRef.current();
           return;
         }
 
@@ -5692,17 +5722,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ) {
           // Do not mark minute as billed — unpaid minute must not increment coinsSpent
           burnInFlightRef.current.delete(billingMinute);
-          showInsufficientEndToastOnce(
-            'Call Auto-Terminated',
-            'Insufficient coin balance for the next minute. Please recharge.'
-          );
-          endCallRef.current();
+          endForInsufficient('Insufficient coin balance for the next minute. Please recharge.');
           return;
         }
 
         if (!res.ok || !json?.success) {
           burnInFlightRef.current.delete(billingMinute);
           console.warn('[billing] burn failed:', json?.error || res.statusText);
+          // Do not leave the call running unpaid — end after failed billing
+          endForInsufficient('Billing failed. Call ended. Please try again or recharge.');
           return;
         }
 
@@ -5726,17 +5754,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           duplicate: data.duplicate,
         });
 
-        // Do NOT end here when remaining balance < next minute rate.
-        // The paid minute must run the full 60s; disconnect only on the next-minute pre-check.
+        // Paid minute runs the full 60s; hard cap / next-minute pre-check ends the call.
       } catch (err) {
         burnInFlightRef.current.delete(billingMinute);
         console.warn('[billing] burn request error:', err);
+        endForInsufficient('Billing error. Call ended. Please try again.');
       }
     };
 
     // Bill minute 1 immediately when LiveKit peer is connected
     if (!billedMinutesRef.current.has(1)) {
-      requestBurn(1);
+      void requestBurn(1);
     }
 
     const interval = setInterval(() => {
@@ -5744,10 +5772,43 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (!prev || prev.status !== 'active' || !prev.mediaConnected) return prev;
 
         const newDuration = prev.durationSeconds + 1;
-        const expectedMinute = Math.floor(newDuration / tickCheckSeconds) + 1;
+        const cap = billingCapSecondsRef.current;
 
-        if (expectedMinute > (prev.billedMinutes || 0) && expectedMinute > 1) {
-          // Fire-and-forget; billedMinutes updated when server responds
+        // Hard auto-end: floor(startBalance/rate)*60 seconds elapsed
+        if (cap != null && cap > 0 && newDuration >= cap) {
+          window.setTimeout(() => {
+            const still = activeCallRef.current;
+            if (still && still.id === callId && still.status === 'active') {
+              endForInsufficient('Coin time finished. Please recharge to continue calling.');
+            }
+          }, 0);
+          return {
+            ...prev,
+            durationSeconds: cap,
+          };
+        }
+
+        const expectedMinute = Math.floor(newDuration / tickCheckSeconds) + 1;
+        const billedMax = Math.max(prev.billedMinutes || 0, ...Array.from(billedMinutesRef.current), 0);
+
+        if (expectedMinute > billedMax && expectedMinute > 1) {
+          const rateNeeded = getEffectiveCallRate(prev.receiverId, prev.callerId);
+          const callerRow = usersRef.current.find((u) => u.id === prev.callerId);
+          const localBalance = Number(callerRow?.coinBalance);
+          if (Number.isFinite(localBalance) && localBalance < rateNeeded) {
+            window.setTimeout(() => {
+              const still = activeCallRef.current;
+              if (still && still.id === callId && still.status === 'active') {
+                endForInsufficient(
+                  `Need ${rateNeeded} coins for the next minute. Please recharge.`
+                );
+              }
+            }, 0);
+            return {
+              ...prev,
+              durationSeconds: newDuration,
+            };
+          }
           void requestBurn(expectedMinute);
         }
 
@@ -5764,6 +5825,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     activeCall?.status,
     activeCall?.mediaConnected,
     activeCall?.callerId,
+    activeCall?.receiverId,
     currentUser.id,
     applyBurnBalances,
     showInsufficientEndToastOnce,
