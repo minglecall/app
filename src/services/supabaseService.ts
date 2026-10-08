@@ -1408,8 +1408,6 @@ export async function updateSystemConfigsInSupabase(
     if (updates.minPayoutThresholdUSD !== undefined) payload.min_payout_threshold_usd = updates.minPayoutThresholdUSD;
     if (updates.platformFeePercent !== undefined) payload.platform_fee_percent = updates.platformFeePercent;
     if (updates.freeMinutesTrial !== undefined) payload.free_minutes_trial = updates.freeMinutesTrial;
-    if (updates.defaultTheme !== undefined) payload.default_theme = updates.defaultTheme;
-    if (updates.allowThemeToggle !== undefined) payload.allow_theme_toggle = updates.allowThemeToggle;
     if (updates.showDevPersonaBar !== undefined) payload.show_dev_persona_bar = updates.showDevPersonaBar;
     if (updates.enableRegularFemaleCoinEarning !== undefined) payload.enable_regular_female_coin_earning = updates.enableRegularFemaleCoinEarning;
     if (updates.aiNudityShieldEnabled !== undefined) payload.ai_nudity_shield_enabled = updates.aiNudityShieldEnabled;

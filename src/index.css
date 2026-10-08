@@ -73,31 +73,6 @@
   --elev-brand: 0 8px 24px rgba(255, 51, 102, 0.4);
 }
 
-html[data-theme='light'],
-html.light,
-body.light {
-  --app-bg: #F7F5F8;
-  --app-surface: #FFFFFF;
-  --app-card: #FFFFFF;
-  --app-card-subtle: #F1EDF1;
-  --app-input: #F5F2F5;
-  --app-border: rgba(26, 18, 28, 0.1);
-  --app-text: #3A3238;
-  --app-text-muted: #857880;
-  --app-heading: #160E14;
-  --app-overlay: rgba(22, 14, 20, 0.45);
-  --app-nav-bg: rgba(255, 255, 255, 0.92);
-  --app-chrome-bg: rgba(255, 255, 255, 0.92);
-  --app-hairline: rgba(22, 14, 20, 0.1);
-  --app-glass-bg: rgba(22, 14, 20, 0.06);
-  --app-glass-border: rgba(22, 14, 20, 0.12);
-  --app-scrollbar-thumb: rgba(22, 14, 20, 0.18);
-  --elev-sm: 0 2px 8px rgba(22, 14, 20, 0.06);
-  --elev-md: 0 8px 28px rgba(22, 14, 20, 0.1);
-  --elev-lg: 0 16px 48px rgba(22, 14, 20, 0.14);
-  --elev-brand: 0 8px 24px rgba(255, 51, 102, 0.28);
-}
-
 html {
   font-family: var(--font-sans);
 }
@@ -154,7 +129,7 @@ body {
   -webkit-backdrop-filter: blur(12px);
 }
 
-/* White-on-media helpers — never remapped in light mode */
+/* White-on-media helpers (photo overlays / CTAs) */
 .text-on-media { color: #ffffff; }
 .text-on-media-muted { color: rgba(255, 255, 255, 0.85); }
 
@@ -213,185 +188,6 @@ body {
   }
 }
 
-/* =========================================================================
-   LIGHT THEME — legacy hex remaps (admin + older screens). Do NOT remap
-   global .text-white — that breaks photo scrims and flirt/coin CTAs.
-   ========================================================================= */
-
-html[data-theme='light'] #main-app-header {
-  background-color: var(--app-chrome-bg) !important;
-  border-color: var(--app-hairline) !important;
-  color: var(--app-heading) !important;
-  box-shadow: var(--elev-sm) !important;
-}
-
-html[data-theme='light'] #desktop-sub-header {
-  background-color: var(--app-chrome-bg) !important;
-  border-color: var(--app-hairline) !important;
-}
-
-html[data-theme='light'] #global-bottom-nav,
-html[data-theme='light'] #global-bottom-navigation-bar {
-  background-color: transparent !important;
-  border-color: transparent !important;
-}
-
-html[data-theme='light'] .bg-\[\#0F1115\],
-html[data-theme='light'] .bg-\[\#0f1115\],
-html[data-theme='light'] .bg-\[\#101319\],
-html[data-theme='light'] .bg-\[\#0a0c10\],
-html[data-theme='light'] .bg-\[\#0A0C10\],
-html[data-theme='light'] .bg-\[\#0B0D11\],
-html[data-theme='light'] .bg-\[\#0C0A0B\],
-html[data-theme='light'] .bg-\[\#09090C\] {
-  background-color: var(--app-bg) !important;
-}
-
-html[data-theme='light'] .bg-\[\#161920\],
-html[data-theme='light'] .bg-\[\#121722\],
-html[data-theme='light'] .bg-\[\#1A1D26\],
-html[data-theme='light'] .bg-\[\#12141A\],
-html[data-theme='light'] .bg-\[\#161214\],
-html[data-theme='light'] .bg-\[\#1C1719\],
-html[data-theme='light'] .bg-\[\#12131A\],
-html[data-theme='light'] .bg-\[\#181A24\],
-html[data-theme='light'] .bg-slate-900 {
-  background-color: var(--app-card) !important;
-  border-color: var(--app-border) !important;
-}
-
-html[data-theme='light'] .bg-slate-950 {
-  background-color: var(--app-card-subtle) !important;
-  border-color: var(--app-border) !important;
-}
-
-html[data-theme='light'] .bg-slate-900\/90,
-html[data-theme='light'] .bg-slate-900\/95,
-html[data-theme='light'] .bg-slate-900\/80,
-html[data-theme='light'] .bg-slate-900\/70,
-html[data-theme='light'] .bg-slate-900\/60,
-html[data-theme='light'] .bg-\[\#161920\]\/95,
-html[data-theme='light'] .bg-\[\#101319\]\/95,
-html[data-theme='light'] .bg-\[\#0F1117\]\/95,
-html[data-theme='light'] .bg-\[\#09090C\]\/80,
-html[data-theme='light'] .bg-\[\#09090C\]\/85,
-html[data-theme='light'] .bg-\[\#09090C\]\/75 {
-  background-color: var(--app-chrome-bg) !important;
-  border-color: var(--app-hairline) !important;
-}
-
-html[data-theme='light'] .bg-slate-800 {
-  background-color: var(--app-card-subtle) !important;
-  border-color: var(--app-border) !important;
-}
-
-html[data-theme='light'] .bg-slate-800\/80,
-html[data-theme='light'] .bg-slate-800\/60,
-html[data-theme='light'] .bg-slate-800\/50,
-html[data-theme='light'] .bg-slate-800\/40,
-html[data-theme='light'] .bg-slate-800\/30 {
-  background-color: color-mix(in srgb, var(--app-card-subtle) 85%, transparent) !important;
-}
-
-html[data-theme='light'] .border-slate-800,
-html[data-theme='light'] .border-slate-800\/80,
-html[data-theme='light'] .border-slate-800\/60,
-html[data-theme='light'] .border-slate-800\/50,
-html[data-theme='light'] .border-slate-800\/40,
-html[data-theme='light'] .border-slate-700,
-html[data-theme='light'] .border-slate-700\/80,
-html[data-theme='light'] .border-slate-700\/60,
-html[data-theme='light'] .border-white\/5,
-html[data-theme='light'] .border-white\/10,
-html[data-theme='light'] .border-white\/15 {
-  border-color: var(--app-hairline) !important;
-}
-
-html[data-theme='light'] .divide-slate-800 > :not([hidden]) ~ :not([hidden]),
-html[data-theme='light'] .divide-slate-800\/60 > :not([hidden]) ~ :not([hidden]) {
-  border-color: var(--app-border) !important;
-}
-
-/* Panel chrome slate text — NOT .text-white (keep white for media/CTAs) */
-html[data-theme='light'] .text-slate-100,
-html[data-theme='light'] .text-slate-200 {
-  color: var(--app-heading) !important;
-}
-
-html[data-theme='light'] .text-slate-300 {
-  color: var(--app-text) !important;
-}
-
-html[data-theme='light'] .text-slate-400 {
-  color: var(--app-text-muted) !important;
-}
-
-html[data-theme='light'] .fixed.inset-0.bg-black\/80,
-html[data-theme='light'] .fixed.inset-0.bg-slate-950\/80,
-html[data-theme='light'] .fixed.inset-0.bg-slate-950\/85,
-html[data-theme='light'] .fixed.inset-0.bg-black\/70 {
-  background-color: var(--app-overlay) !important;
-  backdrop-filter: blur(10px) !important;
-}
-
-/* Video call HUD stays cinema-dark even when app theme is light */
-html[data-theme='light'] .call-cinema-dark {
-  background-color: #020617 !important;
-  color: #f8fafc !important;
-  --app-heading: #f8fafc;
-  --app-text: #e2e8f0;
-  --app-text-muted: #94a3b8;
-  --app-card: #0f172a;
-  --app-card-subtle: #020617;
-  --app-input: #020617;
-  --app-hairline: rgba(255, 255, 255, 0.1);
-  --app-chrome-bg: rgba(9, 9, 12, 0.75);
-  --app-glass-bg: rgba(255, 255, 255, 0.1);
-  --app-glass-border: rgba(255, 255, 255, 0.15);
-}
-
-html[data-theme='light'] .call-cinema-dark.bg-slate-950,
-html[data-theme='light'] .call-cinema-dark .bg-slate-950,
-html[data-theme='light'] .call-cinema-dark .bg-slate-900,
-html[data-theme='light'] .call-cinema-dark .bg-slate-800,
-html[data-theme='light'] .call-cinema-dark .bg-\[\#09090C\] {
-  background-color: #020617 !important;
-  border-color: rgba(255, 255, 255, 0.1) !important;
-}
-
-html[data-theme='light'] .call-cinema-dark .bg-\[\#09090C\]\/80,
-html[data-theme='light'] .call-cinema-dark .bg-\[\#09090C\]\/85,
-html[data-theme='light'] .call-cinema-dark .bg-\[\#09090C\]\/75,
-html[data-theme='light'] .call-cinema-dark .bg-slate-950\/90,
-html[data-theme='light'] .call-cinema-dark .bg-slate-950\/80,
-html[data-theme='light'] .call-cinema-dark .bg-slate-950\/70,
-html[data-theme='light'] .call-cinema-dark .bg-slate-950\/60 {
-  background-color: rgba(9, 9, 12, 0.8) !important;
-  border-color: rgba(255, 255, 255, 0.1) !important;
-}
-
-html[data-theme='light'] .call-cinema-dark .border-white\/5,
-html[data-theme='light'] .call-cinema-dark .border-white\/10,
-html[data-theme='light'] .call-cinema-dark .border-white\/15,
-html[data-theme='light'] .call-cinema-dark .border-slate-800,
-html[data-theme='light'] .call-cinema-dark .border-slate-700 {
-  border-color: rgba(255, 255, 255, 0.12) !important;
-}
-
-html[data-theme='light'] .call-cinema-dark .text-slate-100,
-html[data-theme='light'] .call-cinema-dark .text-slate-200 {
-  color: #f1f5f9 !important;
-}
-
-html[data-theme='light'] .call-cinema-dark .text-slate-300 {
-  color: #cbd5e1 !important;
-}
-
-html[data-theme='light'] .call-cinema-dark .text-slate-400,
-html[data-theme='light'] .call-cinema-dark .text-slate-500 {
-  color: #94a3b8 !important;
-}
-
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -406,10 +202,6 @@ html[data-theme='light'] .call-cinema-dark .text-slate-500 {
 
 input[type="date"] {
   color-scheme: dark;
-}
-html[data-theme='light'] input[type="date"],
-html.light input[type="date"] {
-  color-scheme: light;
 }
 input[type="date"]::-webkit-calendar-picker-indicator {
   cursor: pointer;

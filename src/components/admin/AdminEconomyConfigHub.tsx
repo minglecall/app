@@ -7,9 +7,6 @@ import {
   Package,
   AlertTriangle,
   Zap,
-  Palette,
-  Moon,
-  Sun,
   ChevronDown,
   ChevronRight,
 } from 'lucide-react';
@@ -167,10 +164,6 @@ export const AdminEconomyConfigHub: React.FC<AdminEconomyConfigHubProps> = ({
   const [enableRegularFemaleCoinEarning, setEnableRegularFemaleCoinEarning] = useState(
     systemSettings.enableRegularFemaleCoinEarning ?? false
   );
-  const [defaultTheme, setDefaultTheme] = useState<'dark' | 'light'>(
-    systemSettings.defaultTheme || 'dark'
-  );
-
   const [quickMatchFreeEnabled, setQuickMatchFreeEnabled] = useState(
     systemSettings.quickMatchFreeEnabled !== false
   );
@@ -294,10 +287,6 @@ export const AdminEconomyConfigHub: React.FC<AdminEconomyConfigHubProps> = ({
   }, [systemSettings.enableRegularFemaleCoinEarning]);
 
   useEffect(() => {
-    if (systemSettings.defaultTheme) setDefaultTheme(systemSettings.defaultTheme);
-  }, [systemSettings.defaultTheme]);
-
-  useEffect(() => {
     if (!initialSection) return;
     setExpanded((prev) => ({ ...prev, [initialSection]: true }));
     // Deep-link scroll only — never on every re-render of settings
@@ -368,7 +357,6 @@ export const AdminEconomyConfigHub: React.FC<AdminEconomyConfigHubProps> = ({
       femalePayoutRatioUSD: Number(coinUsdPeg) || DEFAULT_COIN_USD_PEG,
       minPayoutThresholdUSD: Number(minPayout) || 50,
       enableRegularFemaleCoinEarning: Boolean(enableRegularFemaleCoinEarning),
-      defaultTheme,
       quickMatchFreeEnabled: Boolean(quickMatchFreeEnabled),
       quickMatchTimerSeconds: Number(quickMatchTimerSeconds) || 5,
       quickMatchGiftPrices: {
@@ -1159,46 +1147,6 @@ export const AdminEconomyConfigHub: React.FC<AdminEconomyConfigHubProps> = ({
             </div>
           </div>
 
-          {/* Theme — not peg economy; kept for save continuity */}
-          <div className="p-4 border border-slate-700 rounded-2xl space-y-2">
-            <div className="text-xs font-bold text-slate-300 flex items-center gap-2">
-              <Palette className="w-4 h-4 text-purple-400" />
-              Default theme (non-economy; saved with this form)
-              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-600">
-                NOT PEG
-              </span>
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setDefaultTheme('dark');
-                  updateSystemSettings({ defaultTheme: 'dark' });
-                }}
-                className={`px-3 py-2 rounded-xl text-xs font-bold border cursor-pointer flex items-center gap-2 ${
-                  defaultTheme === 'dark'
-                    ? 'bg-slate-800 border-purple-500 text-white'
-                    : 'bg-slate-900 border-slate-800 text-slate-400'
-                }`}
-              >
-                <Moon className="w-3.5 h-3.5" /> Dark
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setDefaultTheme('light');
-                  updateSystemSettings({ defaultTheme: 'light' });
-                }}
-                className={`px-3 py-2 rounded-xl text-xs font-bold border cursor-pointer flex items-center gap-2 ${
-                  defaultTheme === 'light'
-                    ? 'bg-slate-100 border-purple-500 text-slate-900'
-                    : 'bg-slate-900 border-slate-800 text-slate-400'
-                }`}
-              >
-                <Sun className="w-3.5 h-3.5" /> Light
-              </button>
-            </div>
-          </div>
         </EconomySectionShell>
 
         <div className="pt-1">

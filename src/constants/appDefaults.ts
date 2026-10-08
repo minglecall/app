@@ -75,7 +75,6 @@ export const INITIAL_SYSTEM_SETTINGS: SystemSettings = {
   screenRecordingProtection: true,
   freeDailyLoginCoins: 20,
   showDevPersonaBar: false,
-  defaultTheme: 'dark',
   videoQualityProfile: 'high_720p',
   livekitCaptureResolution: '720p',
   // ~2200 kbps @ 720p30 — clear talking-head without mobile encoder backlog

@@ -476,7 +476,6 @@ export interface SystemSettings {
   screenRecordingProtection: boolean;
   freeDailyLoginCoins: number;
   showDevPersonaBar?: boolean; // Developer Persona Switcher top bar visibility
-  defaultTheme?: 'dark' | 'light'; // System default theme
   videoQualityProfile?: 'auto' | 'hd_1080p' | 'high_720p' | 'standard_480p' | 'ultra_4k'; // WebRTC video quality setting
   livekitApiKey?: string;
   livekitApiSecret?: string;

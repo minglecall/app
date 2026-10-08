@@ -176,9 +176,6 @@ interface AppContextType {
   callLogs: CallLogItem[];
   friendRequests: FriendRequest[];
   toast: ToastNotification | null;
-  theme: 'dark' | 'light';
-  setTheme: (theme: 'dark' | 'light') => void;
-  toggleTheme: () => void;
 
   // Home & Policies CMS
   homeBanners: HomeBanner[];
@@ -509,53 +506,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isResetting, setIsResetting] = useState<boolean>(false);
   const isResettingRef = useRef<boolean>(false);
 
-  // Dark and Light Theme State
-  const [theme, setThemeState] = useState<'dark' | 'light'>(() => {
-    const savedUserTheme = localStorage.getItem('livecall_user_theme');
-    if (savedUserTheme === 'dark' || savedUserTheme === 'light') {
-      return savedUserTheme;
-    }
-    const savedSettings = localStorage.getItem('livecall_settings');
-    if (savedSettings) {
-      try {
-        const parsed = JSON.parse(savedSettings);
-        if (parsed.defaultTheme === 'dark' || parsed.defaultTheme === 'light') {
-          return parsed.defaultTheme;
-        }
-      } catch (e) { }
-    }
-    return INITIAL_SYSTEM_SETTINGS.defaultTheme || 'dark';
-  });
-
+  // Dark-only: lock document theme once (clear any stale light preference)
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-      document.documentElement.classList.remove('light');
-      document.body.classList.add('dark');
-      document.body.classList.remove('light');
-    } else {
-      document.documentElement.classList.add('light');
-      document.documentElement.classList.remove('dark');
-      document.body.classList.add('light');
-      document.body.classList.remove('dark');
+    try {
+      localStorage.removeItem('livecall_user_theme');
+    } catch {
+      /* ignore */
     }
-  }, [theme]);
-
-  const setTheme = (newTheme: 'dark' | 'light') => {
-    setThemeState(newTheme);
-    localStorage.setItem('livecall_user_theme', newTheme);
-  };
-
-  const toggleTheme = () => {
-    const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(nextTheme);
-    showToast(
-      `${nextTheme === 'dark' ? 'Dark Mode 🌙' : 'Light Mode ☀️'} Active`,
-      `Switched application theme to ${nextTheme} mode.`,
-      'info'
-    );
-  };
+    document.documentElement.setAttribute('data-theme', 'dark');
+    document.documentElement.classList.add('dark');
+    document.documentElement.classList.remove('light');
+    document.body.classList.add('dark');
+    document.body.classList.remove('light');
+  }, []);
 
   // Social & Goals State — favorites/blocks hydrate from Express/Supabase (not localStorage-as-DB)
   const [favorites, setFavorites] = useState<string[]>([]);
@@ -6623,10 +6586,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return updated;
     });
 
-    if (newSettings.defaultTheme) {
-      setThemeState(newSettings.defaultTheme);
-      localStorage.setItem('livecall_user_theme', newSettings.defaultTheme);
-    }
     if (isSupabaseConfigured()) {
       updateSystemConfigsInSupabase(newSettings).catch((e) => console.warn('Supabase system settings update error:', e));
       if (
@@ -9770,9 +9729,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         recordMomentInteraction,
         recordGiftSentInteraction,
         toast,
-        theme,
-        setTheme,
-        toggleTheme,
         homeBanners,
         policyDocuments,
         homeQuickLinks,

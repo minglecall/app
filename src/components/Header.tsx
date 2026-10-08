@@ -25,8 +25,6 @@ import {
   User,
   MapPin,
   TrendingUp,
-  Sun,
-  Moon,
   Download,
 } from 'lucide-react';
 import { UserRole } from '../types';
@@ -72,8 +70,6 @@ export const Header: React.FC<HeaderProps> = ({
     pendingFriendRequestsCount,
     missedCallsCount,
     markCallLogsSeen,
-    theme,
-    toggleTheme,
     systemSettings,
   } = useApp();
   const [showPersonaMenu, setShowPersonaMenu] = useState(false);
@@ -266,42 +262,12 @@ export const Header: React.FC<HeaderProps> = ({
                   <UserPlus className="w-3.5 h-3.5" />
                   <span>Join free</span>
                 </button>
-
-                {/* Theme Switcher Toggle (Dark / Light) */}
-                <button
-                  id="header-theme-toggle-btn"
-                  onClick={toggleTheme}
-                  className="p-1.5 sm:p-2 rounded-xl bg-app-card-subtle hover:bg-brand-soft border border-hairline text-app-muted hover:text-app-heading transition-all shrink-0 cursor-pointer flex items-center justify-center shadow-app-sm"
-                  title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-                  aria-label="Toggle Theme"
-                >
-                  {theme === 'dark' ? (
-                    <Sun className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-400 animate-in fade-in transition-transform hover:rotate-45 duration-300" />
-                  ) : (
-                    <Moon className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-400 animate-in fade-in transition-transform hover:-rotate-12 duration-300" />
-                  )}
-                </button>
               </div>
             ) : (
               /* ========================================================================= */
-              /* LOGGED IN STATE: THEME + PROFILE DROPDOWN MENU */
+              /* LOGGED IN STATE: PROFILE DROPDOWN MENU */
               /* ========================================================================= */
               <div id="header-logged-in-actions" className="flex items-center space-x-1 sm:space-x-2 shrink-0">
-                {/* Theme Switcher Toggle (Dark / Light) */}
-                <button
-                  id="header-theme-toggle-btn"
-                  onClick={toggleTheme}
-                  className="p-1.5 sm:p-2 rounded-xl bg-app-card-subtle hover:bg-brand-soft border border-hairline text-app-muted hover:text-app-heading transition-all shrink-0 cursor-pointer flex items-center justify-center shadow-app-sm"
-                  title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-                  aria-label="Toggle Theme"
-                >
-                  {theme === 'dark' ? (
-                    <Sun className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-400 animate-in fade-in transition-transform hover:rotate-45 duration-300" />
-                  ) : (
-                    <Moon className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-400 animate-in fade-in transition-transform hover:-rotate-12 duration-300" />
-                  )}
-                </button>
-
                 {/* Logged-In User Profile Dropdown Trigger */}
                 <div className="relative shrink-0" ref={personaMenuRef}>
                   <button
