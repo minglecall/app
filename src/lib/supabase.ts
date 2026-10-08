@@ -80,12 +80,60 @@ function writeClientOverride(url: string, anonKey: string) {
   }
 }
 
-const envUrl = getEnvVar('VITE_SUPABASE_URL') || getEnvVar('SUPABASE_URL');
-const envAnonKey = getEnvVar('VITE_SUPABASE_ANON_KEY') || getEnvVar('SUPABASE_ANON_KEY');
-const override = readClientOverride();
+const envUrl = (getEnvVar('VITE_SUPABASE_URL') || getEnvVar('SUPABASE_URL'))
+  .trim()
+  .replace(/^["']|["']$/g, '');
+const envAnonKey = (getEnvVar('VITE_SUPABASE_ANON_KEY') || getEnvVar('SUPABASE_ANON_KEY'))
+  .trim()
+  .replace(/^["']|["']$/g, '');
 
-let supabaseUrl = override?.url || envUrl;
-let supabaseAnonKey = override?.anonKey || envAnonKey;
+function isEnvSupabaseConfigured(url: string, anonKey: string): boolean {
+  return Boolean(
+    url &&
+      anonKey &&
+      isValidHttpUrl(url) &&
+      !url.includes('placeholder') &&
+      !url.includes('your-project-ref') &&
+      !anonKey.startsWith('••••')
+  );
+}
+
+/**
+ * Prefer build-time / .env VITE_* when present (local + Vercel).
+ * localStorage override only fills gaps when env is missing — prevents localhost
+ * from silently using a different Supabase project than production.
+ */
+function resolveClientConfig(): { url: string; anonKey: string } {
+  const override = readClientOverride();
+  const envReady = isEnvSupabaseConfigured(envUrl, envAnonKey);
+
+  if (envReady) {
+    if (
+      override &&
+      (override.url !== envUrl || override.anonKey !== envAnonKey)
+    ) {
+      clearClientOverride();
+      try {
+        console.info(
+          '[supabase] Cleared stale localStorage override; using VITE_SUPABASE_* from env.'
+        );
+      } catch {
+        /* ignore */
+      }
+    }
+    return { url: envUrl, anonKey: envAnonKey };
+  }
+
+  if (override) {
+    return { url: override.url, anonKey: override.anonKey };
+  }
+
+  return { url: envUrl, anonKey: envAnonKey };
+}
+
+const resolved = resolveClientConfig();
+let supabaseUrl = resolved.url;
+let supabaseAnonKey = resolved.anonKey;
 
 // Fallback placeholder to allow graceful instantiation without crashing
 const FALLBACK_URL = 'https://placeholder-project.supabase.co';
@@ -153,8 +201,11 @@ export const isSupabaseConfigured = (): boolean => {
 
 /**
  * Hot-swap browser Supabase URL/anon key (public values only).
- * Used when Admin saves connection settings on Vercel without a full redeploy.
- * Still set Vercel Project env vars + redeploy for a permanent build-time config.
+ * Used when Admin saves connection settings without a full redeploy.
+ * When VITE_SUPABASE_* is already set (local .env or Vercel build), the swap
+ * applies for this tab session only — env remains source of truth on reload.
+ * Persist override to localStorage only when env is missing.
+ * For permanent changes: set Vercel/project env vars + redeploy (or update .env).
  */
 export function reconfigureSupabaseClient(url: string, anonKey: string): { success: boolean; error?: string } {
   const nextUrl = String(url || '')
@@ -188,7 +239,16 @@ export function reconfigureSupabaseClient(url: string, anonKey: string): { succe
   try {
     supabaseUrl = nextUrl;
     supabaseAnonKey = nextKey;
-    writeClientOverride(nextUrl, nextKey);
+    if (isEnvSupabaseConfigured(envUrl, envAnonKey)) {
+      // Avoid writing a stale override that would fight env on next boot.
+      if (nextUrl !== envUrl || nextKey !== envAnonKey) {
+        clearClientOverride();
+      } else {
+        writeClientOverride(nextUrl, nextKey);
+      }
+    } else {
+      writeClientOverride(nextUrl, nextKey);
+    }
     supabaseClient = safeCreateClient(nextUrl, nextKey);
     return { success: true };
   } catch (err: any) {

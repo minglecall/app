@@ -27,7 +27,9 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   onClick,
   ...rest
 }) => {
-  const aspectClass = aspect === '9/16' ? 'aspect-[9/16]' : 'aspect-[3/4]';
+  // Mobile: taller portrait so overlay (name/country/call) fits; sm+: keep classic 3/4
+  const aspectClass =
+    aspect === '9/16' ? 'aspect-[9/16]' : 'aspect-[2/3] sm:aspect-[3/4]';
   const resolvedSrc = (src && String(src).trim()) || fallbackSrc || '';
   const [imgSrc, setImgSrc] = useState(resolvedSrc);
   const [loaded, setLoaded] = useState(false);
