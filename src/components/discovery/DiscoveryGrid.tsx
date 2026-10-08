@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Search,
@@ -119,104 +119,135 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
   const [selectedUserProfile, setSelectedUserProfile] = useState<UserProfile | null>(null);
 
   // User interest matching
-  const userInterestedIn = currentUser.interestedIn && currentUser.interestedIn.length > 0
-    ? currentUser.interestedIn
-    : (currentUser.gender === 'female' ? ['male'] : ['female']);
-
-  // Filter logic
-  const filteredUsers = users.filter((u) => {
-    // Exclude Team Leaders, Agency Managers, and Admins from callable live stream discovery
-    if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
-
-    // Exclude banned accounts
-    if (u.isBanned) return false;
-
-    // Exclude current logged in user unless showSelf is checked
-    if (!showSelf && u.id === currentUser.id) return false;
-
-    // Exclude blocked relationships (both directions)
-    if (blockedUserIds.includes(u.id) || blockedByUserIds.includes(u.id)) return false;
-
-    // Automatically filter on basis of user's profile interestedIn
-    const isFemaleTarget = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
-    const isMaleTarget = u.gender === 'male' || u.role === 'male_user';
-    const isOtherTarget = u.gender === 'other' || u.role === 'other_user';
-
-    if (!userInterestedIn.includes('everyone') && !userInterestedIn.includes('all')) {
-      let isInterestMatch = false;
-      if (isFemaleTarget && userInterestedIn.includes('female')) isInterestMatch = true;
-      if (isMaleTarget && userInterestedIn.includes('male')) isInterestMatch = true;
-      if (isOtherTarget && (userInterestedIn.includes('other') || userInterestedIn.includes('others'))) isInterestMatch = true;
-      if (!isInterestMatch) return false;
+  const userInterestedIn = useMemo(() => {
+    if (currentUser.interestedIn && currentUser.interestedIn.length > 0) {
+      return currentUser.interestedIn;
     }
+    return currentUser.gender === 'female' ? ['male'] : ['female'];
+  }, [currentUser.interestedIn, currentUser.gender]);
 
-    // AI Verified filter
-    if (verifiedOnly && !u.isVerified) return false;
+  // Filter logic (memoized so ranking/cards do not thrash on unrelated parent renders)
+  const filteredUsers = useMemo(() => {
+    return users.filter((u) => {
+      // Exclude Team Leaders, Agency Managers, and Admins from callable live stream discovery
+      if (u.role === 'team_leader' || u.role === 'agency_manager' || u.role === 'admin') return false;
 
-    // Search query
-    if (
-      searchQuery &&
-      !u.name.toLowerCase().includes(searchQuery.toLowerCase()) &&
-      !u.bio.toLowerCase().includes(searchQuery.toLowerCase()) &&
-      !u.nationality.toLowerCase().includes(searchQuery.toLowerCase())
-    ) {
-      return false;
-    }
+      // Exclude banned accounts
+      if (u.isBanned) return false;
 
-    // Age
-    if (u.age < minAge || u.age > maxAge) return false;
+      // Exclude current logged in user unless showSelf is checked
+      if (!showSelf && u.id === currentUser.id) return false;
 
-    // Dynamic Country Filter
-    if (selectedCountry !== 'all') {
-      const matchCode = u.countryCode && u.countryCode.toLowerCase() === selectedCountry.toLowerCase();
-      const matchName = u.nationality && u.nationality.toLowerCase() === selectedCountry.toLowerCase();
-      if (!matchCode && !matchName) return false;
-    }
+      // Exclude blocked relationships (both directions)
+      if (blockedUserIds.includes(u.id) || blockedByUserIds.includes(u.id)) return false;
 
-    // Dynamic Spoken Language Filter (Matches strictly against FIRST/Primary Language)
-    if (selectedLanguage !== 'all') {
-      const primaryLang = (u.spokenLanguages && u.spokenLanguages.length > 0) ? u.spokenLanguages[0] : 'English';
-      if (primaryLang.trim().toLowerCase() !== selectedLanguage.trim().toLowerCase()) {
+      // Automatically filter on basis of user's profile interestedIn
+      const isFemaleTarget = u.gender === 'female' || u.role === 'female_creator' || u.role === 'female_host';
+      const isMaleTarget = u.gender === 'male' || u.role === 'male_user';
+      const isOtherTarget = u.gender === 'other' || u.role === 'other_user';
+
+      if (!userInterestedIn.includes('everyone') && !userInterestedIn.includes('all')) {
+        let isInterestMatch = false;
+        if (isFemaleTarget && userInterestedIn.includes('female')) isInterestMatch = true;
+        if (isMaleTarget && userInterestedIn.includes('male')) isInterestMatch = true;
+        if (isOtherTarget && (userInterestedIn.includes('other') || userInterestedIn.includes('others'))) isInterestMatch = true;
+        if (!isInterestMatch) return false;
+      }
+
+      // AI Verified filter
+      if (verifiedOnly && !u.isVerified) return false;
+
+      // Search query
+      if (
+        searchQuery &&
+        !u.name.toLowerCase().includes(searchQuery.toLowerCase()) &&
+        !u.bio.toLowerCase().includes(searchQuery.toLowerCase()) &&
+        !u.nationality.toLowerCase().includes(searchQuery.toLowerCase())
+      ) {
         return false;
       }
-    }
 
-    // Dynamic Zodiac Sign Filter
-    if (selectedZodiac !== 'all') {
-      const matchZodiac = u.zodiac && u.zodiac.toLowerCase().includes(selectedZodiac.toLowerCase());
-      if (!matchZodiac) return false;
-    }
+      // Age
+      if (u.age < minAge || u.age > maxAge) return false;
 
-    // Dynamic Interests Filter
-    if (selectedInterest !== 'all') {
-      const matchInterest = u.interests && u.interests.some(i => i.toLowerCase() === selectedInterest.toLowerCase());
-      if (!matchInterest) return false;
-    }
+      // Dynamic Country Filter
+      if (selectedCountry !== 'all') {
+        const matchCode = u.countryCode && u.countryCode.toLowerCase() === selectedCountry.toLowerCase();
+        const matchName = u.nationality && u.nationality.toLowerCase() === selectedCountry.toLowerCase();
+        if (!matchCode && !matchName) return false;
+      }
 
-    // Status
-    if (selectedStatus === 'online' && u.onlineStatus !== 'online') return false;
-    if (selectedStatus === 'busy' && u.onlineStatus !== 'busy' && u.onlineStatus !== 'in_call') return false;
-    if (selectedStatus === 'offline' && u.onlineStatus !== 'offline') return false;
+      // Dynamic Spoken Language Filter (Matches strictly against FIRST/Primary Language)
+      if (selectedLanguage !== 'all') {
+        const primaryLang = (u.spokenLanguages && u.spokenLanguages.length > 0) ? u.spokenLanguages[0] : 'English';
+        if (primaryLang.trim().toLowerCase() !== selectedLanguage.trim().toLowerCase()) {
+          return false;
+        }
+      }
 
-    return true;
-  });
+      // Dynamic Zodiac Sign Filter
+      if (selectedZodiac !== 'all') {
+        const matchZodiac = u.zodiac && u.zodiac.toLowerCase().includes(selectedZodiac.toLowerCase());
+        if (!matchZodiac) return false;
+      }
 
-  // Apply Algorithmic Weighted Discovery Matrix & Rotational Ranking
-  const rankedItems = rankCreatorsForDiscovery(filteredUsers, creatorMetricsMap, {
-    peakHoursStart: systemSettings.peakHoursStart,
-    peakHoursEnd: systemSettings.peakHoursEnd,
-    peakHoursEnabled: systemSettings.peakHoursEnabled,
-    readyNowOnly: discoveryTab === 'ready_now',
-    trendingOnly: discoveryTab === 'trending',
-    targetThresholds: systemSettings,
-  }).filter((item) => {
-    if (discoveryTab === 'gold_silver') {
-      return item.tier === 'gold' || item.tier === 'silver';
-    }
-    return true;
-  });
+      // Dynamic Interests Filter
+      if (selectedInterest !== 'all') {
+        const matchInterest = u.interests && u.interests.some(i => i.toLowerCase() === selectedInterest.toLowerCase());
+        if (!matchInterest) return false;
+      }
 
-  const populatedDiscoveryUsers = rankedItems.map((r) => r.user);
+      // Status
+      if (selectedStatus === 'online' && u.onlineStatus !== 'online') return false;
+      if (selectedStatus === 'busy' && u.onlineStatus !== 'busy' && u.onlineStatus !== 'in_call') return false;
+      if (selectedStatus === 'offline' && u.onlineStatus !== 'offline') return false;
+
+      return true;
+    });
+  }, [
+    users,
+    currentUser.id,
+    showSelf,
+    blockedUserIds,
+    blockedByUserIds,
+    userInterestedIn,
+    verifiedOnly,
+    searchQuery,
+    minAge,
+    maxAge,
+    selectedCountry,
+    selectedLanguage,
+    selectedZodiac,
+    selectedInterest,
+    selectedStatus,
+  ]);
+
+  // Apply Algorithmic Weighted Discovery Matrix & Rotational Ranking (memoized — stable order)
+  const rankedItems = useMemo(() => {
+    return rankCreatorsForDiscovery(filteredUsers, creatorMetricsMap, {
+      peakHoursStart: systemSettings.peakHoursStart,
+      peakHoursEnd: systemSettings.peakHoursEnd,
+      peakHoursEnabled: systemSettings.peakHoursEnabled,
+      readyNowOnly: discoveryTab === 'ready_now',
+      trendingOnly: discoveryTab === 'trending',
+      targetThresholds: systemSettings,
+    }).filter((item) => {
+      if (discoveryTab === 'gold_silver') {
+        return item.tier === 'gold' || item.tier === 'silver';
+      }
+      return true;
+    });
+  }, [
+    filteredUsers,
+    creatorMetricsMap,
+    systemSettings,
+    discoveryTab,
+  ]);
+
+  const populatedDiscoveryUsers = useMemo(
+    () => rankedItems.map((r) => r.user),
+    [rankedItems]
+  );
 
   // Realtime selected profile reference
   const currentSelectedUser = selectedUserProfile
@@ -479,16 +510,20 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
               const healthScore = metrics?.responseHealthScore ?? 100;
               const hasStreak = Boolean(metrics?.currentStreakDays && metrics.currentStreakDays >= 3);
 
+              const fallbackAvatar = getFallbackAvatar(user.name, user.gender, user.role);
+              const primaryAvatar =
+                normalizeMediaUrl(user.avatarUrl) ||
+                normalizeMediaUrl(user.gallery?.[0]) ||
+                fallbackAvatar;
+
               return (
                 <MediaCard
                   key={user.id}
-                  src={normalizeMediaUrl(user.avatarUrl)}
+                  src={primaryAvatar}
+                  fallbackSrc={fallbackAvatar}
                   alt={user.name}
                   aspect="3/4"
                   onClick={() => setSelectedUserProfile(user)}
-                  onImageError={(e) => {
-                    (e.target as HTMLImageElement).src = getFallbackAvatar(user.name, user.gender, user.role);
-                  }}
                   statusSlot={
                     <>
                       {isReadyNow ? (

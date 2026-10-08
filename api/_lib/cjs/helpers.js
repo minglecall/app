@@ -146,7 +146,9 @@ function mapProfileRow(p) {
     bio: p.bio || '',
     interests: Array.isArray(p.interests) ? p.interests : [],
     tags: Array.isArray(p.tags) ? p.tags : [],
-    avatarUrl: p.avatar_url || '',
+    avatarUrl:
+      p.avatar_url ||
+      'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
     gallery: Array.isArray(p.gallery) ? p.gallery : [],
     isVerified: Boolean(p.is_verified),
     isOnboarded: p.is_onboarded !== false,

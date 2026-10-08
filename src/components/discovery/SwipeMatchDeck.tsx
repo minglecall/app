@@ -18,6 +18,8 @@ import {
   Award,
 } from 'lucide-react';
 import { rankCreatorsForDiscovery, isCurrentlyPeakHour } from '../../utils/discoveryAlgorithm';
+import { normalizeMediaUrl } from '../../utils/r2Storage';
+import { getFallbackAvatar } from '../../utils/avatars';
 
 interface SwipeMatchDeckProps {
   onOpenDetailModal: (user: UserProfile) => void;
@@ -182,8 +184,23 @@ export const SwipeMatchDeck: React.FC<SwipeMatchDeckProps> = ({ onOpenDetailModa
       >
         {/* Creator Main Photo */}
         <img
-          src={currentCreator.avatarUrl}
+          src={
+            normalizeMediaUrl(currentCreator.avatarUrl) ||
+            normalizeMediaUrl(currentCreator.gallery?.[0]) ||
+            getFallbackAvatar(currentCreator.name, currentCreator.gender, currentCreator.role)
+          }
           alt={currentCreator.name}
+          loading="eager"
+          decoding="async"
+          onError={(e) => {
+            const el = e.currentTarget;
+            const fallback = getFallbackAvatar(
+              currentCreator.name,
+              currentCreator.gender,
+              currentCreator.role
+            );
+            if (el.src !== fallback) el.src = fallback;
+          }}
           className="w-full h-full object-cover select-none"
         />
 

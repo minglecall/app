@@ -1953,6 +1953,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   : p.onlineStatus || 'offline';
               mergedMap.set(p.id, {
                 ...p,
+                // Prefer a non-empty remote avatar so discovery cards never stay blank after sync
+                avatarUrl: (p.avatarUrl && String(p.avatarUrl).trim()) || localUser?.avatarUrl || p.avatarUrl,
                 onlineStatus: liveStatus,
               });
             }

@@ -174,10 +174,15 @@ export function getDetailedCreatorScoreBreakdown(
   if (user.isVerified) trustScore += w.verified;
   if ((user.ratingScore || 5) >= 4.8) trustScore += w.highRating;
 
-  // 7. Fresh Face / Anti-Fatigue Diversity Jitter
+  // 7. Fresh Face / Anti-Fatigue Diversity Jitter (stable per user — no Math.random per render)
   let diversityJitter = 0;
   if (!options?.disableJitter && w.diversityJitterMax > 0) {
-    diversityJitter = Math.round((Math.random() * w.diversityJitterMax) * 10) / 10;
+    const id = String(user.id || user.name || '');
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) {
+      hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+    }
+    diversityJitter = Math.round(((hash % 1000) / 1000) * w.diversityJitterMax * 10) / 10;
   }
 
   const totalScore = Math.round((onlineScore + tierScore + readyNowScore + healthScorePts + streakScore + trustScore + diversityJitter) * 10) / 10;
