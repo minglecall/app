@@ -2464,26 +2464,34 @@ async function startServer(): Promise<express.Express> {
         if (isSupabaseAdminConfigured() && resolvedCallerId && resolvedReceiverId) {
           const client = getSupabaseAdmin();
           if (client) {
-            const { error } = await client.from('call_logs').upsert(
-              {
-                id: String(callId),
-                caller_id: resolvedCallerId,
-                receiver_id: resolvedReceiverId,
-                host_id: resolvedReceiverId,
-                status: callStatus === 'accepted' || callStatus === 'in_call' || callStatus === 'connecting'
+            const busyPayload: Record<string, unknown> = {
+              id: String(callId),
+              caller_id: resolvedCallerId,
+              receiver_id: resolvedReceiverId,
+              host_id: resolvedReceiverId,
+              status:
+                callStatus === 'accepted' || callStatus === 'in_call' || callStatus === 'connecting'
                   ? 'active'
                   : callStatus,
-                started_at: startedAt,
-                start_time: startedAt,
-                ended_at: null,
-                end_time: null,
-                duration_seconds: Math.max(0, Number(durationSeconds) || 0),
-                coins_spent: Math.max(0, Number(coinsSpent) || 0),
-                coins_earned: Math.max(0, Number(coinsEarned) || 0),
-                updated_at: new Date().toISOString(),
-              } as any,
-              { onConflict: 'id' }
-            );
+              started_at: startedAt,
+              start_time: startedAt,
+              ended_at: null,
+              end_time: null,
+              duration_seconds: Math.max(0, Number(durationSeconds) || 0),
+              coins_spent: Math.max(0, Number(coinsSpent) || 0),
+              coins_earned: Math.max(0, Number(coinsEarned) || 0),
+              updated_at: new Date().toISOString(),
+            };
+            let { error } = await client.from('call_logs').upsert(busyPayload as any, { onConflict: 'id' });
+            // Older DBs may lack call_logs.updated_at — retry without it so ringing can persist.
+            if (
+              error &&
+              /updated_at/i.test(String(error.message || '')) &&
+              /column|schema cache/i.test(String(error.message || ''))
+            ) {
+              const { updated_at: _drop, ...rest } = busyPayload;
+              ({ error } = await client.from('call_logs').upsert(rest as any, { onConflict: 'id' }));
+            }
             if (error) {
               console.warn('[api/calls/sync] busy upsert', error.message);
               return res.status(500).json({

@@ -461,7 +461,7 @@ async function handleAdmin(path, req, res) {
       .from('call_logs')
       .select('*')
       .in('status', ['ringing', 'connecting', 'active', 'in_progress'])
-      .order('updated_at', { ascending: false })
+      .order('started_at', { ascending: false })
       .limit(50);
     return send(res, 200, { success: true, calls: data || [], activeCalls: data || [] });
   }
@@ -488,14 +488,25 @@ async function handleAdmin(path, req, res) {
     if (callRow) {
       callerId = callerId || String(callRow.caller_id || '');
       receiverId = receiverId || String(callRow.receiver_id || '');
-      await auth.client
-        .from('call_logs')
-        .update({
+      {
+        const endedAt = new Date().toISOString();
+        const patch = {
           status: 'terminated',
-          ended_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', callId);
+          ended_at: endedAt,
+          end_time: endedAt,
+          updated_at: endedAt,
+        };
+        let { error: termErr } = await auth.client.from('call_logs').update(patch).eq('id', callId);
+        if (
+          termErr &&
+          /updated_at/i.test(String(termErr.message || '')) &&
+          /column|schema cache/i.test(String(termErr.message || ''))
+        ) {
+          const { updated_at: _drop, ...rest } = patch;
+          ({ error: termErr } = await auth.client.from('call_logs').update(rest).eq('id', callId));
+        }
+        if (termErr) console.warn('[admin/terminate-call]', termErr.message);
+      }
     }
 
     const partyIds = [callerId, receiverId].filter(Boolean);

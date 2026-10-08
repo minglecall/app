@@ -4901,7 +4901,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
     };
 
-    const persistBusy = async (): Promise<boolean> => {
+    const persistBusy = async (): Promise<{ ok: boolean; detail?: string }> => {
       try {
         const res = await authFetch('/api/calls/sync', {
           method: 'POST',
@@ -4917,9 +4917,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             hostName: receiver.name,
           }),
         });
-        return res.ok;
-      } catch {
-        return false;
+        if (res.ok) return { ok: true };
+        const json = await res.json().catch(() => null);
+        const detail =
+          (typeof json?.error === 'object' && (json.error.detail || json.error.message)) ||
+          (typeof json?.error === 'string' && json.error) ||
+          `HTTP ${res.status}`;
+        return { ok: false, detail: String(detail) };
+      } catch (e: any) {
+        return { ok: false, detail: e?.message || 'Network error' };
       }
     };
 
@@ -4935,13 +4941,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         markBusyLocal();
         // LiveKit membership requires call_logs row — never proceed without successful sync
         const synced = await persistBusy();
-        if (!synced) {
+        if (!synced.ok) {
           clearRingTimeout();
           activeCallRef.current = null;
           setActiveCall(null);
           showToast(
             'Call Failed',
-            'Could not save the call on the server. Please try again.',
+            synced.detail
+              ? `Could not save the call on the server (${synced.detail}).`
+              : 'Could not save the call on the server. Please try again.',
             'error'
           );
           return;

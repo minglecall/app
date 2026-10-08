@@ -242,7 +242,8 @@ CREATE TABLE IF NOT EXISTS public.call_logs (
     team_leader_id TEXT,
     team_leader_earned_coins INT DEFAULT 0,
     team_leader_commission_percent NUMERIC DEFAULT 10,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- Ensure all updated columns exist if table was previously created
@@ -267,6 +268,7 @@ ALTER TABLE public.call_logs ADD COLUMN IF NOT EXISTS team_leader_id TEXT;
 ALTER TABLE public.call_logs ADD COLUMN IF NOT EXISTS team_leader_earned_coins INT DEFAULT 0;
 ALTER TABLE public.call_logs ADD COLUMN IF NOT EXISTS team_leader_commission_percent NUMERIC DEFAULT 10;
 ALTER TABLE public.call_logs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.call_logs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE INDEX IF NOT EXISTS idx_call_logs_caller ON public.call_logs(caller_id);
 CREATE INDEX IF NOT EXISTS idx_call_logs_host ON public.call_logs(host_id);

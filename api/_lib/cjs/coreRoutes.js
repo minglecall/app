@@ -45,17 +45,17 @@ async function closeOpenCallLogsForUsers(client, userIds, reason) {
   // Close any open row where this user is caller, receiver, or host
   for (const col of ['caller_id', 'receiver_id', 'host_id']) {
     try {
-      const { error } = await client
-        .from('call_logs')
-        .update({
+      const error = await updateCallLogs(
+        client,
+        {
           status: 'completed',
           ended_at: endedAt,
           end_time: endedAt,
           updated_at: endedAt,
           end_reason: reason || 'presence_online_clear',
-        })
-        .in(col, ids)
-        .in('status', ACTIVE_CALL_STATUSES);
+        },
+        (q) => q.in(col, ids).in('status', ACTIVE_CALL_STATUSES)
+      );
       if (error) console.warn('[presence] closeOpenCallLogs', col, error.message);
     } catch (e) {
       console.warn('[presence] closeOpenCallLogs', col, e && e.message);
@@ -72,7 +72,7 @@ async function fetchActiveCallParticipantIds(client) {
   try {
     const { data, error } = await client
       .from('call_logs')
-      .select('id, caller_id, receiver_id, host_id, status, started_at, updated_at')
+      .select('id, caller_id, receiver_id, host_id, status, started_at, start_time')
       .in('status', ACTIVE_CALL_STATUSES)
       .limit(500);
     if (error) {
@@ -83,9 +83,8 @@ async function fetchActiveCallParticipantIds(client) {
     const zombieIds = [];
     for (const row of data || []) {
       const st = String(row.status || '').toLowerCase();
-      const startedMs = Date.parse(row.started_at || '') || 0;
-      const updatedMs = Date.parse(row.updated_at || row.started_at || '') || 0;
-      const ageMs = Math.max(startedMs, updatedMs) ? now - Math.max(startedMs, updatedMs) : 0;
+      const startedMs = Date.parse(row.started_at || row.start_time || '') || 0;
+      const ageMs = startedMs ? now - startedMs : 0;
       // Drop abandoned ringing / zombie active rows so busy cannot stick forever
       const isZombieRinging = st === 'ringing' && ageMs > 60_000;
       const isZombieActive =
@@ -102,17 +101,18 @@ async function fetchActiveCallParticipantIds(client) {
     // Best-effort close zombies so the next heartbeat does not re-scan them as busy
     if (zombieIds.length) {
       const endedAt = new Date().toISOString();
-      client
-        .from('call_logs')
-        .update({
+      updateCallLogs(
+        client,
+        {
           status: 'missed',
           ended_at: endedAt,
           end_time: endedAt,
           updated_at: endedAt,
           end_reason: 'stale_presence_cleanup',
-        })
-        .in('id', zombieIds)
-        .then(({ error: closeErr }) => {
+        },
+        (q) => q.in('id', zombieIds)
+      )
+        .then((closeErr) => {
           if (closeErr) console.warn('[presence] zombie call cleanup', closeErr.message);
         })
         .catch((e) => console.warn('[presence] zombie call cleanup', e && e.message));
@@ -185,6 +185,44 @@ async function resolveProfileId(client, raw) {
     if (data && data.id) return String(data.id);
   }
   return '';
+}
+
+/**
+ * call_logs.updated_at may be missing on older DBs. Retry without it so
+ * /api/calls/sync does not hard-fail video call placement.
+ */
+function stripCallLogUpdatedAt(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const next = { ...payload };
+  delete next.updated_at;
+  return next;
+}
+
+function isMissingUpdatedAtError(error) {
+  const msg = String((error && error.message) || '');
+  return /updated_at/i.test(msg) && (/column/i.test(msg) || /schema cache/i.test(msg));
+}
+
+async function upsertCallLog(client, payload) {
+  let { error } = await client.from('call_logs').upsert(payload, { onConflict: 'id' });
+  if (error && isMissingUpdatedAtError(error)) {
+    ({ error } = await client
+      .from('call_logs')
+      .upsert(stripCallLogUpdatedAt(payload), { onConflict: 'id' }));
+  }
+  return error;
+}
+
+async function updateCallLogs(client, patch, applyFilter) {
+  let q = client.from('call_logs').update(patch);
+  q = applyFilter(q);
+  let { error } = await q;
+  if (error && isMissingUpdatedAtError(error)) {
+    q = client.from('call_logs').update(stripCallLogUpdatedAt(patch));
+    q = applyFilter(q);
+    ({ error } = await q);
+  }
+  return error;
 }
 
 async function handlePresence(path, req, res) {
@@ -499,7 +537,7 @@ async function handleCalls(path, req, res) {
       const { data, error } = await auth.client
         .from('call_logs')
         .select(
-          'id, caller_id, receiver_id, host_id, status, started_at, start_time, updated_at, caller_name, host_name'
+          'id, caller_id, receiver_id, host_id, status, started_at, start_time, caller_name, host_name'
         )
         .eq('status', 'ringing')
         .or(orFilter)
@@ -515,8 +553,7 @@ async function handleCalls(path, req, res) {
       const now = Date.now();
       const ringing = (data || [])
         .map((row) => {
-          const startedMs =
-            Date.parse(row.started_at || row.start_time || row.updated_at || '') || 0;
+          const startedMs = Date.parse(row.started_at || row.start_time || '') || 0;
           const ageMs = startedMs ? now - startedMs : 0;
           return { row, ageMs };
         })
@@ -645,7 +682,7 @@ async function handleCalls(path, req, res) {
       payload.end_time = null;
     }
     Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
-    const { error } = await auth.client.from('call_logs').upsert(payload, { onConflict: 'id' });
+    const error = await upsertCallLog(auth.client, payload);
     if (error) {
       console.warn('[api/calls/sync]', error.message);
       return send(res, 500, {
@@ -738,16 +775,16 @@ async function handleCalls(path, req, res) {
       // Caller only bills after local accept — promote ringing → active if race with sync
       if (['ringing', 'connecting'].includes(callStatus)) {
         const nowIso = new Date().toISOString();
-        const { error: promoteErr } = await auth.client
-          .from('call_logs')
-          .update({
+        const promoteErr = await updateCallLogs(
+          auth.client,
+          {
             status: 'active',
             ended_at: null,
             end_time: null,
             updated_at: nowIso,
-          })
-          .eq('id', callId)
-          .eq('caller_id', callerId);
+          },
+          (q) => q.eq('id', callId).eq('caller_id', callerId)
+        );
         if (promoteErr) {
           console.warn('[api/calls/burn] promote active', promoteErr.message);
         } else {
@@ -898,16 +935,17 @@ async function handleCalls(path, req, res) {
             : 'BURN_FAILED');
         if (code === 'INSUFFICIENT_BALANCE') {
           const endIso = new Date().toISOString();
-          await auth.client
-            .from('call_logs')
-            .update({
+          await updateCallLogs(
+            auth.client,
+            {
               status: 'failed',
               end_reason: 'INSUFFICIENT_BALANCE',
               ended_at: endIso,
               end_time: endIso,
               updated_at: endIso,
-            })
-            .eq('id', callId);
+            },
+            (q) => q.eq('id', callId)
+          );
           await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'online').catch(
             () => {}
           );
@@ -949,29 +987,35 @@ async function handleCalls(path, req, res) {
       if (!isDuplicate) {
         callCoinsSpent += burned;
         callCoinsEarned += hostEarned;
-        const { data: updatedCall } = await auth.client
-          .from('call_logs')
-          .update({
-            status: 'active',
-            coins_spent: callCoinsSpent,
-            coins_earned: callCoinsEarned,
-            duration_seconds: Math.max(
-              Number(callRow.duration_seconds) || 0,
-              (billingMinute - 1) * 60
-            ),
-            burn_rate_per_min: coinsBurned,
-            was_friend_call: isFriendPair,
-            team_leader_id: tlId || undefined,
-            ended_at: null,
-            end_time: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', callId)
-          .select('coins_spent, coins_earned')
-          .maybeSingle();
-        if (updatedCall) {
-          callCoinsSpent = Number(updatedCall.coins_spent) || callCoinsSpent;
-          callCoinsEarned = Number(updatedCall.coins_earned) || callCoinsEarned;
+        const burnPatch = {
+          status: 'active',
+          coins_spent: callCoinsSpent,
+          coins_earned: callCoinsEarned,
+          duration_seconds: Math.max(
+            Number(callRow.duration_seconds) || 0,
+            (billingMinute - 1) * 60
+          ),
+          burn_rate_per_min: coinsBurned,
+          was_friend_call: isFriendPair,
+          team_leader_id: tlId || undefined,
+          ended_at: null,
+          end_time: null,
+          updated_at: new Date().toISOString(),
+        };
+        Object.keys(burnPatch).forEach((k) => burnPatch[k] === undefined && delete burnPatch[k]);
+        let burnUpdateErr = await updateCallLogs(auth.client, burnPatch, (q) => q.eq('id', callId));
+        if (!burnUpdateErr) {
+          const { data: updatedCall } = await auth.client
+            .from('call_logs')
+            .select('coins_spent, coins_earned')
+            .eq('id', callId)
+            .maybeSingle();
+          if (updatedCall) {
+            callCoinsSpent = Number(updatedCall.coins_spent) || callCoinsSpent;
+            callCoinsEarned = Number(updatedCall.coins_earned) || callCoinsEarned;
+          }
+        } else {
+          console.warn('[api/calls/burn] call_logs update', burnUpdateErr.message);
         }
       }
 
