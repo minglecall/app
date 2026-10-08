@@ -2,10 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Search,
-  Filter,
   Video,
   PhoneCall,
-  MessageSquare,
   ShieldCheck,
   Globe,
   Languages,
@@ -13,22 +11,15 @@ import {
   SlidersHorizontal,
   Crown,
   LayoutGrid,
-  Zap,
   Target,
-  Gift,
-  CheckCircle2,
-  MapPin,
   Flame,
-  Award,
   TrendingUp,
-  Star,
   RefreshCw,
   Users,
 } from 'lucide-react';
-import { UserProfile, CreatorMetrics } from '../../types';
+import { UserProfile } from '../../types';
 import { rankCreatorsForDiscovery, isCurrentlyPeakHour } from '../../utils/discoveryAlgorithm';
 import { ProfileDetailModal } from './ProfileDetailModal';
-import { getCountryFlag } from '../../utils/flags';
 import { getUserEffectiveLocation } from '../../utils/location';
 import { normalizeMediaUrl } from '../../utils/r2Storage';
 import { getFallbackAvatar } from '../../utils/avatars';
@@ -56,11 +47,6 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
     users,
     currentUser,
     systemSettings,
-    creatorGoals,
-    contributeToGoal,
-    favorites,
-    toggleFavorite,
-    isFriend,
     syncUsersFromSupabase,
     creatorMetricsMap,
     blockedUserIds,
@@ -112,8 +98,6 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
       !blockedByUserIds.includes(u.id)
   );
   const onlineCount = allOtherUsers.filter((u) => u.onlineStatus === 'online').length;
-  const busyCount = allOtherUsers.filter((u) => u.onlineStatus === 'busy' || u.onlineStatus === 'in_call').length;
-  const offlineCount = allOtherUsers.filter((u) => u.onlineStatus === 'offline').length;
 
   // Selected User for detail modal
   const [selectedUserProfile, setSelectedUserProfile] = useState<UserProfile | null>(null);
@@ -254,9 +238,22 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
     ? users.find((u) => u.id === selectedUserProfile.id) || selectedUserProfile
     : null;
 
+  const hasActiveFilters =
+    discoveryTab !== 'all' ||
+    selectedStatus !== 'all' ||
+    selectedCountry !== 'all' ||
+    selectedLanguage !== 'all' ||
+    selectedZodiac !== 'all' ||
+    selectedInterest !== 'all' ||
+    verifiedOnly ||
+    nearbyOnly ||
+    showSelf ||
+    minAge > 18 ||
+    maxAge < 75;
+
   return (
     <div id="discovery-grid-module" className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 pt-1.5 sm:pt-2 pb-6 space-y-3.5">
-      {/* Filter Toolbar */}
+      {/* Filter Toolbar — chips & advanced filters stay hidden until user opens Filters */}
       <div className="bg-app-card border border-hairline rounded-app-lg p-3 sm:p-3.5 space-y-3 shadow-app-sm">
             <div className="flex items-center gap-2.5 w-full">
               {/* Search Box */}
@@ -288,7 +285,7 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                 id="discovery-toggle-filters-btn"
                 onClick={() => setShowFilters(!showFilters)}
                 className={`shrink-0 px-3.5 py-2 rounded-[var(--radius-sm)] border text-xs font-semibold flex items-center space-x-1.5 transition-all whitespace-nowrap cursor-pointer ${
-                  showFilters
+                  showFilters || hasActiveFilters
                     ? 'bg-brand-soft text-brand border-brand/40'
                     : 'bg-app-input text-app-muted border-app hover:text-app-heading'
                 }`}
@@ -299,80 +296,81 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
               </button>
             </div>
 
-            {/* Algorithmic Discovery Strategy Tabs */}
-            <div className="flex items-center space-x-2 overflow-x-auto pb-1 scrollbar-none text-xs font-semibold">
-              <button
-                onClick={() => setDiscoveryTab('all')}
-                className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
-                  discoveryTab === 'all'
-                    ? 'bg-brand text-white shadow-brand'
-                    : 'bg-app-input text-app-muted hover:text-app-heading border border-app'
-                }`}
-              >
-                <LayoutGrid className="w-3.5 h-3.5" />
-                <span>All Hosts</span>
-                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-app-input text-app-muted">
-                  {allOtherUsers.length}
-                </span>
-              </button>
-
-              <button
-                onClick={() => setDiscoveryTab('ready_now')}
-                className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
-                  discoveryTab === 'ready_now'
-                    ? 'bg-brand text-white shadow-brand'
-                    : 'bg-app-input text-brand hover:text-app-heading border border-brand/30'
-                }`}
-              >
-                <Flame className="w-3.5 h-3.5 text-orange-400 animate-bounce" />
-                <span>Ready Now</span>
-                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-orange-950/80 text-orange-300 border border-orange-700/50 font-mono">
-                  🔥 Boosted
-                </span>
-              </button>
-
-              <button
-                onClick={() => setDiscoveryTab('trending')}
-                className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
-                  discoveryTab === 'trending'
-                    ? 'bg-gradient-to-r from-amber-600 to-yellow-600 text-white shadow-md'
-                    : 'bg-app-input text-amber-400 hover:text-white border border-amber-900/50'
-                }`}
-              >
-                <TrendingUp className="w-3.5 h-3.5" />
-                <span>Trending</span>
-              </button>
-
-              <button
-                onClick={() => setDiscoveryTab('gold_silver')}
-                className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
-                  discoveryTab === 'gold_silver'
-                    ? 'bg-gradient-to-r from-yellow-500 to-amber-500 text-slate-950 font-bold shadow-md'
-                    : 'bg-app-input text-yellow-400 hover:text-white border border-yellow-900/50'
-                }`}
-              >
-                <Crown className="w-3.5 h-3.5 text-yellow-400" />
-                <span>Gold & Silver</span>
-              </button>
-
-              <div className="h-4 w-px bg-[var(--app-hairline)] shrink-0 mx-1" />
-
-              <button
-                onClick={() => setSelectedStatus(selectedStatus === 'online' ? 'all' : 'online')}
-                className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
-                  selectedStatus === 'online'
-                    ? 'bg-emerald-600 text-white shadow-md'
-                    : 'bg-app-input text-emerald-400 hover:text-white border border-emerald-900/50'
-                }`}
-              >
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span>Online ({onlineCount})</span>
-              </button>
-            </div>
-
-            {/* Expanded Filters Drawer with Dynamic Admin Taxonomies */}
+            {/* Expanded Filters Drawer: strategy chips + advanced taxonomies */}
             {showFilters && (
-              <div id="discovery-advanced-filters-panel" className="pt-4 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 text-xs font-mono">
+              <div id="discovery-advanced-filters-panel" className="pt-3 border-t border-slate-800 space-y-3">
+                {/* Algorithmic Discovery Strategy Tabs */}
+                <div className="flex items-center space-x-2 overflow-x-auto pb-1 scrollbar-none text-xs font-semibold">
+                  <button
+                    onClick={() => setDiscoveryTab('all')}
+                    className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
+                      discoveryTab === 'all'
+                        ? 'bg-brand text-white shadow-brand'
+                        : 'bg-app-input text-app-muted hover:text-app-heading border border-app'
+                    }`}
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                    <span>All Hosts</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-app-input text-app-muted">
+                      {allOtherUsers.length}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setDiscoveryTab('ready_now')}
+                    className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
+                      discoveryTab === 'ready_now'
+                        ? 'bg-brand text-white shadow-brand'
+                        : 'bg-app-input text-brand hover:text-app-heading border border-brand/30'
+                    }`}
+                  >
+                    <Flame className="w-3.5 h-3.5 text-orange-400 animate-bounce" />
+                    <span>Ready Now</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-orange-950/80 text-orange-300 border border-orange-700/50 font-mono">
+                      🔥 Boosted
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setDiscoveryTab('trending')}
+                    className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
+                      discoveryTab === 'trending'
+                        ? 'bg-gradient-to-r from-amber-600 to-yellow-600 text-white shadow-md'
+                        : 'bg-app-input text-amber-400 hover:text-white border border-amber-900/50'
+                    }`}
+                  >
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    <span>Trending</span>
+                  </button>
+
+                  <button
+                    onClick={() => setDiscoveryTab('gold_silver')}
+                    className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
+                      discoveryTab === 'gold_silver'
+                        ? 'bg-gradient-to-r from-yellow-500 to-amber-500 text-slate-950 font-bold shadow-md'
+                        : 'bg-app-input text-yellow-400 hover:text-white border border-yellow-900/50'
+                    }`}
+                  >
+                    <Crown className="w-3.5 h-3.5 text-yellow-400" />
+                    <span>Gold & Silver</span>
+                  </button>
+
+                  <div className="h-4 w-px bg-[var(--app-hairline)] shrink-0 mx-1" />
+
+                  <button
+                    onClick={() => setSelectedStatus(selectedStatus === 'online' ? 'all' : 'online')}
+                    className={`px-3 py-1.5 rounded-lg transition-all shrink-0 cursor-pointer flex items-center space-x-1.5 ${
+                      selectedStatus === 'online'
+                        ? 'bg-emerald-600 text-white shadow-md'
+                        : 'bg-app-input text-emerald-400 hover:text-white border border-emerald-900/50'
+                    }`}
+                  >
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>Online ({onlineCount})</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 text-xs font-mono">
                 {/* Age Range */}
                 <div className="xl:col-span-2">
                   <label className="block font-semibold text-slate-300 mb-1">
@@ -488,6 +486,7 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                     Showing {populatedDiscoveryUsers.length} of {users.length} profiles
                   </span>
                 </div>
+                </div>
               </div>
             )}
           </div>
@@ -495,26 +494,21 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
           {/* Profile Cards Grid - 2 Cards per row on mobile */}
           <div id="discovery-user-cards-grid" className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-6">
             {populatedDiscoveryUsers.map((user) => {
-              const isFemale = user.gender === 'female';
-              const userIsFriend = isFriend(user.id);
-              const friendRate = systemSettings.coinBurnRateFriendPerMin ?? 80;
-              const standardRate = systemSettings.coinBurnRatePerMin || 120;
-              const rate = userIsFriend ? friendRate : standardRate;
-              const isFav = favorites.includes(user.id);
               const isUserOnline = user.onlineStatus === 'online';
               const isUserBusy = user.onlineStatus === 'busy' || user.onlineStatus === 'in_call';
 
               const metrics = creatorMetricsMap[user.id];
               const isReadyNow = Boolean(metrics?.isReadyNowActive) && isUserOnline && isCurrentlyPeakHour(systemSettings.peakHoursStart, systemSettings.peakHoursEnd);
-              const tier = metrics?.performanceTier || 'bronze';
-              const healthScore = metrics?.responseHealthScore ?? 100;
-              const hasStreak = Boolean(metrics?.currentStreakDays && metrics.currentStreakDays >= 3);
+              const countryName = getUserEffectiveLocation(user).country || user.nationality || '';
 
               const fallbackAvatar = getFallbackAvatar(user.name, user.gender, user.role);
               const primaryAvatar =
                 normalizeMediaUrl(user.avatarUrl) ||
                 normalizeMediaUrl(user.gallery?.[0]) ||
                 fallbackAvatar;
+
+              const statusBadgeClass =
+                'backdrop-blur-md shadow-md shadow-black/50 font-bold text-white border';
 
               return (
                 <MediaCard
@@ -527,77 +521,68 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                   statusSlot={
                     <>
                       {isReadyNow ? (
-                        <Badge tone="brand" className="backdrop-blur-md">
+                        <Badge tone="brand" className={`${statusBadgeClass} !bg-orange-500 !text-white !border-orange-200/70`}>
                           <Flame className="w-2.5 h-2.5" /> Ready
                         </Badge>
                       ) : isUserOnline ? (
-                        <Badge tone="online" className="backdrop-blur-md">Online</Badge>
+                        <Badge tone="online" className={`${statusBadgeClass} !bg-emerald-500 !text-white !border-emerald-200/70`}>
+                          Online
+                        </Badge>
                       ) : isUserBusy ? (
-                        <Badge tone="warning" className="backdrop-blur-md">Busy</Badge>
+                        <Badge tone="warning" className={`${statusBadgeClass} !bg-amber-500 !text-white !border-amber-200/70`}>
+                          Busy
+                        </Badge>
                       ) : (
-                        <Badge tone="neutral" className="backdrop-blur-md bg-black/40 text-white/80 border-white/20">
+                        <Badge tone="neutral" className={`${statusBadgeClass} !bg-slate-900/85 !text-white !border-white/40`}>
                           Offline
                         </Badge>
                       )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleFavorite(user.id);
-                        }}
-                        className={`p-1.5 rounded-full backdrop-blur-md border border-white/20 transition-colors ${
-                          isFav ? 'bg-amber-400 text-slate-950' : 'bg-black/35 text-on-media hover:bg-black/50'
-                        }`}
-                      >
-                        <Star className={`w-3.5 h-3.5 ${isFav ? 'fill-current' : ''}`} />
-                      </button>
+                      {user.isVerified && (
+                        <span
+                          title="Verified"
+                          className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-sky-500 text-white shadow-md shadow-black/40 border border-sky-200/70 ml-auto"
+                          aria-label="Verified"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" strokeWidth={2.5} />
+                        </span>
+                      )}
                     </>
                   }
                   metadata={
-                    <div className="flex items-center gap-1.5 text-on-media flex-wrap">
-                      <h3 className="font-display font-bold text-base sm:text-lg drop-shadow-md truncate max-w-[70%]">{user.name}</h3>
-                      <span className="text-sm text-on-media-muted font-medium shrink-0">{user.age}</span>
-                      <SvgFlag
-                        countryCode={user.countryCode}
-                        nationality={getUserEffectiveLocation(user).country || user.nationality}
-                        size="sm"
-                        rounded={true}
-                      />
+                    <div className="space-y-0.5 text-on-media">
+                      <h3 className="font-display font-bold text-sm sm:text-base drop-shadow-md truncate leading-tight">
+                        {user.name}
+                      </h3>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <SvgFlag
+                          countryCode={user.countryCode}
+                          nationality={countryName}
+                          size="sm"
+                          rounded={true}
+                        />
+                        <span className="text-[11px] sm:text-xs text-white/90 font-medium truncate drop-shadow-sm">
+                          {countryName}
+                        </span>
+                      </div>
                     </div>
                   }
                   footer={
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenChat(user.id);
-                        }}
-                        className="h-9 flex-1 bg-app-card-subtle hover:bg-app-input text-app-heading rounded-app text-xs font-semibold flex items-center justify-center gap-1.5 border border-hairline cursor-pointer"
-                      >
-                        <MessageSquare className="w-3.5 h-3.5 text-app-muted" />
-                        Chat
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onStartCall(user.id);
-                        }}
-                        className={`h-9 flex-[1.4] rounded-app text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                          isUserOnline
-                            ? 'bg-flirt text-white shadow-brand active:scale-95'
-                            : isUserBusy
-                            ? 'bg-amber-500/15 border border-amber-500/40 text-amber-300'
-                            : 'bg-app-card-subtle text-app-muted border border-hairline'
-                        }`}
-                      >
-                        {isUserBusy ? <PhoneCall className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
-                        <span>{isUserBusy ? 'Busy' : 'Call'}</span>
-                        {isUserOnline && userIsFriend && (
-                          <span className="glass-pill px-1.5 py-0.5 rounded-md text-[9px] font-ticker ml-0.5">
-                            {friendRate}/m
-                          </span>
-                        )}
-                      </button>
-                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onStartCall(user.id);
+                      }}
+                      className={`h-9 w-full rounded-app text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                        isUserOnline
+                          ? 'bg-flirt text-white shadow-brand active:scale-[0.98]'
+                          : isUserBusy
+                          ? 'bg-amber-500 text-white shadow-md'
+                          : 'bg-black/55 text-white/80 border border-white/25 backdrop-blur-md'
+                      }`}
+                    >
+                      {isUserBusy ? <PhoneCall className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+                      <span>{isUserBusy ? 'Busy' : 'Call'}</span>
+                    </button>
                   }
                 />
               );

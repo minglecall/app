@@ -92,10 +92,10 @@ export const GlobalBottomNav: React.FC<GlobalBottomNavProps> = ({
     <>
       <nav
         id="global-bottom-navigation-bar"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-[9000] pointer-events-none pb-[max(0.75rem,env(safe-area-inset-bottom))] px-4"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-[9000] pointer-events-none pb-[env(safe-area-inset-bottom)] px-2"
       >
-        <div className="pointer-events-auto mx-auto max-w-md flex items-center justify-center gap-1.5">
-          <div className="flex items-center justify-around gap-0.5 px-2 py-1.5 rounded-full bg-chrome backdrop-blur-xl border border-hairline shadow-app-lg">
+        <div className="pointer-events-auto mx-auto max-w-lg flex items-center justify-center gap-1.5">
+          <div className="flex items-center justify-around gap-0.5 px-1.5 py-1.5 rounded-full bg-chrome backdrop-blur-xl border border-hairline shadow-app-lg">
             <button
               id="global-nav-home"
               onClick={() => handleTabClick('home')}
@@ -156,64 +156,61 @@ export const GlobalBottomNav: React.FC<GlobalBottomNavProps> = ({
               <span className="text-[9px] font-medium leading-none">Profile</span>
             </button>
 
-            <button
-              id="global-nav-exit"
-              onClick={() => {
-                onCloseOverlays();
-                setShowExitConfirm(true);
-              }}
-              className={item(false)}
-              title="Exit"
-            >
-              <LogOut className="w-5 h-5 mb-0.5" />
-              <span className="text-[9px] font-medium leading-none">Exit</span>
-            </button>
+            {(isFemale || isAdmin) && (
+              <button
+                id="global-nav-call-logs"
+                onClick={() => handleTabClick('call_logs')}
+                className={`${item(activeTab === 'call_logs' && !isChatOpen && !isMatchOpen)} relative`}
+                title="Call Logs"
+              >
+                <div className="relative">
+                  <PhoneCall className="w-5 h-5 mb-0.5" />
+                  {missedCallsCount > 0 && (
+                    <span className="absolute -top-1.5 -right-2.5 px-1 min-w-[14px] h-[14px] rounded-full bg-rose-500 text-white text-[8px] font-bold flex items-center justify-center border-2 border-[var(--app-bg)]">
+                      {missedCallsCount > 9 ? '9+' : missedCallsCount}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[9px] font-medium leading-none">Logs</span>
+              </button>
+            )}
+            {isLeader && (
+              <button
+                id="global-nav-team-leader"
+                onClick={() => handleTabClick('team_leader')}
+                className={item(activeTab === 'team_leader' && !isChatOpen && !isMatchOpen)}
+                title="Agency"
+              >
+                <Crown className="w-5 h-5 mb-0.5" />
+                <span className="text-[9px] font-medium leading-none">Agency</span>
+              </button>
+            )}
+            {isAdmin && (
+              <button
+                id="global-nav-admin"
+                onClick={() => handleTabClick('admin')}
+                className={item(activeTab === 'admin' && !isChatOpen && !isMatchOpen)}
+                title="Admin"
+              >
+                <Settings className="w-5 h-5 mb-0.5" />
+                <span className="text-[9px] font-medium leading-none">Admin</span>
+              </button>
+            )}
           </div>
 
-          {(isFemale || isAdmin || isLeader) && (
-            <div className="flex items-center gap-0.5 px-1.5 py-1.5 rounded-full bg-chrome backdrop-blur-xl border border-hairline shadow-app">
-              {(isFemale || isAdmin) && (
-                <button
-                  id="global-nav-call-logs"
-                  onClick={() => handleTabClick('call_logs')}
-                  className={`${item(activeTab === 'call_logs' && !isChatOpen && !isMatchOpen)} relative`}
-                  title="Call Logs"
-                >
-                  <div className="relative">
-                    <PhoneCall className="w-4.5 h-4.5 mb-0.5" />
-                    {missedCallsCount > 0 && (
-                      <span className="absolute -top-1.5 -right-2.5 px-1 min-w-[14px] h-[14px] rounded-full bg-rose-500 text-white text-[8px] font-bold flex items-center justify-center border-2 border-[var(--app-bg)]">
-                        {missedCallsCount > 9 ? '9+' : missedCallsCount}
-                      </span>
-                    )}
-                  </div>
-                  <span className="text-[8px] font-medium leading-none">Logs</span>
-                </button>
-              )}
-              {isLeader && (
-                <button
-                  id="global-nav-team-leader"
-                  onClick={() => handleTabClick('team_leader')}
-                  className={item(activeTab === 'team_leader' && !isChatOpen && !isMatchOpen)}
-                  title="Agency"
-                >
-                  <Crown className="w-4.5 h-4.5 mb-0.5" />
-                  <span className="text-[8px] font-medium leading-none">Agency</span>
-                </button>
-              )}
-              {isAdmin && (
-                <button
-                  id="global-nav-admin"
-                  onClick={() => handleTabClick('admin')}
-                  className={item(activeTab === 'admin' && !isChatOpen && !isMatchOpen)}
-                  title="Admin"
-                >
-                  <Settings className="w-4.5 h-4.5 mb-0.5" />
-                  <span className="text-[8px] font-medium leading-none">Admin</span>
-                </button>
-              )}
-            </div>
-          )}
+          {/* Exit kept separate as the last item */}
+          <button
+            id="global-nav-exit"
+            onClick={() => {
+              onCloseOverlays();
+              setShowExitConfirm(true);
+            }}
+            className={`${item(false)} px-2.5 py-1.5 rounded-full bg-chrome backdrop-blur-xl border border-hairline shadow-app-lg`}
+            title="Exit"
+          >
+            <LogOut className="w-5 h-5 mb-0.5" />
+            <span className="text-[9px] font-medium leading-none">Exit</span>
+          </button>
         </div>
       </nav>
 

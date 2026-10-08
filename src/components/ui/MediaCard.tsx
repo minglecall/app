@@ -85,22 +85,21 @@ export const MediaCard: React.FC<MediaCardProps> = ({
             ].join(' ')}
           />
         ) : null}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/35 to-transparent pointer-events-none" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-black/10 pointer-events-none" />
 
         {statusSlot ? (
-          <div className="absolute top-2.5 left-2.5 right-2.5 z-10 flex items-start justify-between gap-2">
+          <div className="absolute top-2 left-2 right-2 z-10 flex items-start justify-between gap-2">
             {statusSlot}
           </div>
         ) : null}
 
-        {metadata ? (
-          <div className="absolute bottom-0 left-0 right-0 z-10 p-3 sm:p-3.5 pointer-events-none">
-            <div className="pointer-events-auto">{metadata}</div>
+        {(metadata || footer) ? (
+          <div className="absolute bottom-0 left-0 right-0 z-10 p-2.5 sm:p-3 pointer-events-none space-y-2">
+            {metadata ? <div className="pointer-events-auto">{metadata}</div> : null}
+            {footer ? <div className="pointer-events-auto">{footer}</div> : null}
           </div>
         ) : null}
       </div>
-
-      {footer ? <div className="p-2.5 sm:p-3 border-t border-hairline bg-app-card">{footer}</div> : null}
     </div>
   );
 };
