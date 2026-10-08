@@ -40,6 +40,89 @@ function r2Env() {
   };
 }
 
+function livekitHttpHost(wsUrl) {
+  const u = clean(wsUrl);
+  if (!u) return '';
+  return u.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+}
+
+/** Subscribe briefly and broadcast a signaling payload (Realtime replaces Express /ws). */
+async function broadcastAdminSignal(client, payload, userIds) {
+  const delivery = { presence: false, users: [], errors: [] };
+  const ids = Array.from(
+    new Set((userIds || []).map((id) => String(id || '').trim()).filter(Boolean))
+  );
+
+  const subscribeAndSend = async (topic) => {
+    const channel = client.channel(topic, {
+      config: { broadcast: { self: false, ack: false } },
+    });
+    await new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(done, 4000);
+      channel.subscribe((status) => {
+        if (status === 'SUBSCRIBED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') done();
+      });
+    });
+    const status = await channel.send({
+      type: 'broadcast',
+      event: 'signal',
+      payload,
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    try {
+      await client.removeChannel(channel);
+    } catch {
+      /* ignore */
+    }
+    return status !== 'error';
+  };
+
+  try {
+    delivery.presence = await subscribeAndSend('app-presence');
+  } catch (e) {
+    delivery.errors.push(`presence: ${(e && e.message) || 'broadcast failed'}`);
+  }
+
+  for (const uid of ids) {
+    try {
+      const ok = await subscribeAndSend(`user:${uid}`);
+      if (ok) delivery.users.push(uid);
+      else delivery.errors.push(`user:${uid}: send error`);
+    } catch (e) {
+      delivery.errors.push(`user:${uid}: ${(e && e.message) || 'broadcast failed'}`);
+    }
+  }
+  return delivery;
+}
+
+async function deleteLivekitRoom(roomName) {
+  const lk = livekitEnv();
+  const host = livekitHttpHost(lk.wsUrl);
+  if (!host || !lk.apiKey || !lk.apiSecret || lk.apiKey === 'devkey' || lk.apiSecret === 'secret') {
+    return { ok: false, skipped: true, reason: 'LiveKit env not configured' };
+  }
+  try {
+    const { RoomServiceClient } = require('livekit-server-sdk');
+    const svc = new RoomServiceClient(host, lk.apiKey, lk.apiSecret);
+    await svc.deleteRoom(String(roomName));
+    return { ok: true, skipped: false, roomName: String(roomName) };
+  } catch (e) {
+    // Room already gone is fine for killswitch
+    const msg = (e && e.message) || 'deleteRoom failed';
+    if (/not found|does not exist|404/i.test(msg)) {
+      return { ok: true, skipped: false, roomName: String(roomName), alreadyGone: true };
+    }
+    return { ok: false, skipped: false, reason: msg };
+  }
+}
+
 async function requireAdmin(req) {
   const auth = await requireAuth(req);
   if (auth.ok === false) return auth;
@@ -84,6 +167,7 @@ async function handleAdmin(path, req, res) {
         livekit.apiKey !== 'devkey' &&
         livekit.apiSecret !== 'secret'
     );
+    const onVercel = Boolean(process.env.VERCEL);
     if (req.method === 'GET') {
       return send(res, 200, {
         success: true,
@@ -102,22 +186,27 @@ async function handleAdmin(path, req, res) {
           r2Configured,
           livekitWsUrl: livekit.wsUrl,
           livekitConfigured,
-          vercel: Boolean(process.env.VERCEL),
+          vercel: onVercel,
+          secretsWritable: false,
         },
-        message:
-          'Credentials are loaded from server environment variables. Set them in Vercel → Settings → Environment Variables.',
+        message: onVercel
+          ? 'Production (Vercel): credentials are read-only from Vercel Environment Variables. This API never writes a .env file.'
+          : 'Credentials are loaded from process environment variables (local .env via Node). This serverless path does not write secrets to disk.',
       });
     }
     await readJsonBody(req);
     return send(res, 200, {
       success: true,
-      message:
-        'Using server environment credentials. No secrets were changed. Configure VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Vercel → Environment Variables.',
+      message: onVercel
+        ? 'No secrets were changed. On Vercel, set VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Project Settings → Environment Variables, then Redeploy. Pool/R2 size sliders here are not persisted.'
+        : 'No secrets were changed via this endpoint. Use local Express setup / .env for local secret persistence.',
       config: {
         source: 'environment',
         supabaseConfigured,
         r2Configured,
         livekitConfigured,
+        vercel: onVercel,
+        secretsWritable: false,
       },
     });
   }
@@ -382,7 +471,23 @@ async function handleAdmin(path, req, res) {
     if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
     const body = await readJsonBody(req);
     const callId = String((body && (body.callId || body.id)) || '').trim();
-    if (callId) {
+    const reason =
+      String((body && body.reason) || '').trim() ||
+      'Call terminated by Safety & Compliance Administration.';
+    if (!callId) {
+      return send(res, 400, { success: false, error: { message: 'callId is required' } });
+    }
+
+    let callerId = String((body && body.callerId) || '').trim();
+    let receiverId = String((body && body.receiverId) || '').trim();
+    const { data: callRow } = await auth.client
+      .from('call_logs')
+      .select('id, caller_id, receiver_id, status')
+      .eq('id', callId)
+      .maybeSingle();
+    if (callRow) {
+      callerId = callerId || String(callRow.caller_id || '');
+      receiverId = receiverId || String(callRow.receiver_id || '');
       await auth.client
         .from('call_logs')
         .update({
@@ -392,7 +497,37 @@ async function handleAdmin(path, req, res) {
         })
         .eq('id', callId);
     }
-    return send(res, 200, { success: true });
+
+    const partyIds = [callerId, receiverId].filter(Boolean);
+    if (partyIds.length) {
+      await auth.client
+        .from('profiles')
+        .update({ online_status: 'online', updated_at: new Date().toISOString() })
+        .in('id', partyIds);
+    }
+
+    const payload = {
+      type: 'call:ended',
+      callId,
+      endedBy: 'admin_moderator',
+      reason,
+      callerId: callerId || undefined,
+      receiverId: receiverId || undefined,
+      outcome: 'terminated',
+      status: 'terminated',
+    };
+    const signalDelivery = await broadcastAdminSignal(auth.client, payload, partyIds);
+    const livekit = await deleteLivekitRoom(callId);
+
+    return send(res, 200, {
+      success: true,
+      callId,
+      message: 'Call successfully terminated by Safety Administration.',
+      delivery: {
+        realtime: signalDelivery,
+        livekit,
+      },
+    });
   }
 
   if (path === 'admin/issue-warning' && req.method === 'POST') {
@@ -402,13 +537,24 @@ async function handleAdmin(path, req, res) {
     const callId = String((body && body.callId) || '').trim();
     const warningText =
       String((body && (body.warningText || body.message)) || '').trim() ||
-      'Safety warning from admin';
-    // Vercel has no WebSocket bus — persist a moderation note when callId is present.
+      'Automated Safety Advisory: Please adhere to community guidelines.';
+
+    let callerId = '';
+    let receiverId = '';
     if (callId) {
+      const { data: callRow } = await auth.client
+        .from('call_logs')
+        .select('id, caller_id, receiver_id')
+        .eq('id', callId)
+        .maybeSingle();
+      if (callRow) {
+        callerId = String(callRow.caller_id || '');
+        receiverId = String(callRow.receiver_id || '');
+      }
       try {
         await auth.client.from('moderation_reports').insert({
           reporter_id: auth.profileId,
-          reported_user_id: auth.profileId,
+          reported_user_id: receiverId || callerId || auth.profileId,
           reason: 'admin_call_warning',
           details: JSON.stringify({
             type: 'call:safety_warning',
@@ -424,11 +570,26 @@ async function handleAdmin(path, req, res) {
         console.warn('[admin/issue-warning] persist skipped:', e && e.message);
       }
     }
+
+    const warningPayload = {
+      type: 'call:safety_warning',
+      callId,
+      message: warningText,
+      timestamp: Date.now(),
+      callerId: callerId || undefined,
+      receiverId: receiverId || undefined,
+    };
+    const signalDelivery = await broadcastAdminSignal(
+      auth.client,
+      warningPayload,
+      [callerId, receiverId]
+    );
+
     return send(res, 200, {
       success: true,
-      message: 'Warning recorded (Realtime push unavailable on Vercel; note persisted when possible).',
+      message: 'Warning dispatched discreetly.',
       callId: callId || null,
-      delivery: 'persisted_only',
+      delivery: { realtime: signalDelivery },
     });
   }
 
@@ -698,14 +859,20 @@ async function handleAdmin(path, req, res) {
         success: false,
         error: { message: result.error || 'Reset failed', code: 'GRANULAR_RESET_FAILED' },
         clearedTables: result.clearedTables,
-        warnings: result.warnings,
+        warnings: result.warnings || [],
+        r2PurgeRequested: Boolean(result.r2PurgeRequested),
+        r2Purged: false,
       });
     }
     return send(res, 200, {
       success: true,
-      message: 'DB-only granular reset completed on Vercel.',
+      message: result.r2PurgeRequested
+        ? 'DB-only granular reset completed. R2 media was NOT deleted.'
+        : 'DB-only granular reset completed on Vercel.',
       clearedTables: result.clearedTables,
-      warnings: result.warnings,
+      warnings: result.warnings || [],
+      r2PurgeRequested: Boolean(result.r2PurgeRequested),
+      r2Purged: false,
     });
   }
 

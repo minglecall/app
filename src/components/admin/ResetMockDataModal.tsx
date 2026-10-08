@@ -811,14 +811,15 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
                       <span className="font-medium text-slate-200 group-hover:text-white">
-                        Purge ALL remote media storage (R2 uploads)
+                        Request R2 media purge (not executed on Vercel)
                       </span>
-                      <span className="px-1.5 py-0.5 rounded bg-pink-950/60 text-[10px] text-slate-300 font-mono border border-pink-500/20">
-                        Hard Wipe
+                      <span className="px-1.5 py-0.5 rounded bg-amber-950/60 text-[10px] text-amber-200 font-mono border border-amber-500/30">
+                        DB-only on Vercel
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      Deletes every object under <span className="font-mono">uploads/</span> (not limited to prefixes).
+                      On Vercel production the API records this request but does <span className="text-amber-300 font-semibold">not</span> delete
+                      R2 objects. Clear the bucket in Cloudflare if a full media wipe is required. Local Express may purge when configured.
                     </p>
                   </div>
                 </label>

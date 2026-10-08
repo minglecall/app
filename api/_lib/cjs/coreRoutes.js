@@ -1326,6 +1326,50 @@ async function handleSupabase(path, req, res) {
     return send(res, 200, { success: true, statuses });
   }
 
+  // Real latency probe (replaces Express mock random pool stats). Same response keys for Admin UI.
+  if (path === 'supabase/test-query' && req.method === 'POST') {
+    if (!isAdminRole(auth.role, auth.email)) {
+      return send(res, 403, { success: false, error: { message: 'Admin role required.' } });
+    }
+    const startTime = performance.now();
+    try {
+      const { error, count } = await auth.client
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .limit(1);
+      const queryExecutionMs = Math.round(performance.now() - startTime);
+      if (error) {
+        return send(res, 500, {
+          success: false,
+          message: error.message || 'Supabase probe query failed',
+          latencyMs: queryExecutionMs,
+        });
+      }
+      return send(res, 200, {
+        success: true,
+        latencyMs: queryExecutionMs,
+        poolStats: {
+          activeConnections: 'managed',
+          maxPoolSize: 'supabase-pooler',
+          idleTimeoutSeconds: null,
+          statementTimeoutMs: null,
+          queryExecutionMs,
+          queryPlan: 'COUNT profiles (head) via service role',
+          cacheHitRate: 'n/a (serverless)',
+          profileCount: typeof count === 'number' ? count : null,
+        },
+        message: `Supabase service-role probe completed in ${queryExecutionMs}ms.`,
+      });
+    } catch (err) {
+      const latencyMs = Math.round(performance.now() - startTime);
+      return send(res, 500, {
+        success: false,
+        message: (err && err.message) || 'Query test failed',
+        latencyMs,
+      });
+    }
+  }
+
   if (path === 'supabase/bulk-upsert-profiles' && req.method === 'POST') {
     if (!isAdminRole(auth.role, auth.email)) {
       return send(res, 403, { success: false, error: { message: 'Admin role required.' } });

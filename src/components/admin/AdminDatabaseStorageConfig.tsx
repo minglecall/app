@@ -414,10 +414,12 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
 
       if (res.ok && data.success !== false) {
         showToast(
-          'Infrastructure Status ⚡',
+          data.config?.vercel || data.config?.secretsWritable === false
+            ? 'Env status only (no secrets saved)'
+            : 'Infrastructure Status',
           data.message ||
-            'Using server environment credentials. Set VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Vercel Environment Variables.',
-          'success'
+            'Credentials are environment-backed. On Vercel, set VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Project Settings → Environment Variables, then Redeploy. Nothing is written to .env.',
+          'info'
         );
         await fetchConfig();
         await checkProfilesStatus();
@@ -782,6 +784,17 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
             <p className="text-xs text-slate-400 max-w-2xl mt-0.5">
               Decoupled presigned storage architecture, connection pooling latency benchmarks, Row-Level Security policies, and content moderation rules.
             </p>
+            {(config as any).vercel || (config as any).source === 'environment' ? (
+              <div className="mt-2 max-w-2xl text-[11px] leading-relaxed text-amber-200/90 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+                <span className="font-bold text-amber-300">
+                  {(config as any).vercel ? 'Vercel production' : 'Environment-backed'}
+                </span>
+                : secrets are read from{' '}
+                <span className="font-semibold">Vercel Environment Variables</span> (or local process env).
+                This UI never writes a <code className="text-amber-100">.env</code> file and cannot persist
+                credentials on the serverless filesystem. Change secrets in the Vercel dashboard, then Redeploy.
+              </div>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -971,6 +984,10 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
                 <Zap className="w-4 h-4 text-amber-400" />
                 <span>PostgreSQL Connection Pooling Tuning</span>
               </h4>
+              <p className="text-[11px] text-slate-500 mb-3">
+                On Vercel these sliders are reference-only — Supabase manages pooling. Values are not written to
+                disk or Vercel env from this form.
+              </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
@@ -1046,7 +1063,8 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
             </h3>
 
             <p className="text-xs text-slate-400">
-              Run benchmark diagnostics against indexed PostgreSQL queries (`idx_messages_conversation` and `idx_profiles_geo`).
+              Runs a live service-role probe against Supabase (<code className="text-slate-300">profiles</code> count)
+              and reports round-trip latency. Pool size figures from local Express are not applicable on Vercel serverless.
             </p>
 
             <button

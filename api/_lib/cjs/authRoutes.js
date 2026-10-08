@@ -14,6 +14,7 @@ const {
   mapProfileRow,
   findAuthUserByEmail,
   requireAuth,
+  isAdminRole,
   saveOtpDb,
   verifyOtpDb,
   savePendingSignupDb,
@@ -699,6 +700,46 @@ async function updatePassword(req, res) {
   }
 }
 
+/**
+ * POST /api/auth/test-email — same contract as Express auth.routes test-email.
+ * Uses Vercel env SMTP/Resend via sendOtpEmailVercel (no duplicate admin/email/test path).
+ */
+async function testEmail(req, res) {
+  if (req.method !== 'POST') return send(res, 405, { success: false, error: 'Method not allowed' });
+  try {
+    const auth = await requireAuth(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    if (!isAdminRole(auth.role, auth.email)) {
+      return send(res, 403, { success: false, error: 'Admin role required' });
+    }
+    const body = await readJsonBody(req);
+    const email = String((body && body.email) || '').trim().toLowerCase();
+    const name = String((body && body.name) || 'Admin Tester').trim() || 'Admin Tester';
+    if (!isValidEmail(email)) {
+      return send(res, 400, { success: false, error: 'Destination email is required' });
+    }
+    const testCode = generateSixDigitOtp();
+    const sendResult = await sendOtpEmailVercel({
+      to: email,
+      name,
+      otpCode: testCode,
+    });
+    return send(res, 200, {
+      success: true,
+      delivered: Boolean(sendResult && sendResult.delivered),
+      message: (sendResult && sendResult.message) || 'Test email dispatch attempted',
+      // Admin UI toast shows the OTP; same value was emailed (local Express omitted this field).
+      code: testCode,
+    });
+  } catch (err) {
+    console.error('[api/auth/test-email]', err);
+    return send(res, 500, {
+      success: false,
+      error: (err && err.message) || 'Failed to send test email',
+    });
+  }
+}
+
 async function handleAuth(path, req, res) {
   if (path === 'auth/email-policy') return emailPolicy(req, res);
   if (path === 'auth/send-otp') return sendOtp(req, res);
@@ -708,6 +749,7 @@ async function handleAuth(path, req, res) {
   if (path === 'auth/claim-session') return claimSession(req, res);
   if (path === 'auth/reset-password') return resetPassword(req, res);
   if (path === 'auth/update-password') return updatePassword(req, res);
+  if (path === 'auth/test-email') return testEmail(req, res);
   return null;
 }
 

@@ -204,7 +204,8 @@ export class RealtimeSignaling {
       type === 'call:reject' ||
       type === 'call:cancel' ||
       type === 'call:end' ||
-      type === 'call:ended'
+      type === 'call:ended' ||
+      type === 'call:safety_warning'
     ) {
       pushTarget(payload.callerId);
       pushTarget(payload.receiverId);

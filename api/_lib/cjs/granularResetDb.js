@@ -25,8 +25,13 @@ async function granularResetDb(client, options = {}) {
     Boolean(options.resetBalances?.callerCoins) ||
     Boolean(options.resetBalances?.creatorEarnings);
 
-  if (options.purgeR2MediaStorage) {
-    warnings.push('R2 media purge is skipped on Vercel serverless (DB-only reset).');
+  const r2PurgeRequested = Boolean(options.purgeR2MediaStorage || options.purgeAllR2Uploads);
+  // Never delete R2 objects from serverless — filesystem/S3 bulk purge is not implemented here.
+  // Callers must treat r2Purged === false as authoritative (do not claim media was deleted).
+  if (r2PurgeRequested) {
+    warnings.push(
+      'R2 media was NOT deleted. Vercel granular-reset is database-only; clear the bucket in Cloudflare R2 if required.'
+    );
   }
 
   if (options.virtualGiftsCatalog) {
@@ -259,10 +264,18 @@ async function granularResetDb(client, options = {}) {
       success: false,
       clearedTables,
       warnings,
+      r2PurgeRequested,
+      r2Purged: false,
       error: `Some reset operations failed: ${failedOps.join('; ')}`,
     };
   }
-  return { success: true, clearedTables, warnings };
+  return {
+    success: true,
+    clearedTables,
+    warnings,
+    r2PurgeRequested,
+    r2Purged: false,
+  };
 }
 
 function isFactoryResetAllowed() {

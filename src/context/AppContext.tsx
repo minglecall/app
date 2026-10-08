@@ -2170,7 +2170,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const code = typeof rawError === 'object' ? rawError?.code : undefined;
           if (code === 'FACTORY_RESET_DISABLED' || resetRes.status === 403) {
             throw new Error(
-              'Factory / destructive data reset is disabled on the server. Set ALLOW_FACTORY_RESET=true in the server .env, restart Node, run the wipe, then set ALLOW_FACTORY_RESET=false again.'
+              'Factory / destructive data reset is disabled. Set ALLOW_FACTORY_RESET=true in Vercel Environment Variables (or local .env), redeploy/restart, run the wipe, then disable it again.'
             );
           }
           const message =
@@ -2178,6 +2178,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             rawError?.message ||
             `Reset API failed (${resetRes.status}).`;
           throw new Error(message);
+        }
+
+        const serverWarnings: string[] = Array.isArray(resetJson?.warnings)
+          ? resetJson.warnings.map((w: unknown) => String(w || '').trim()).filter(Boolean)
+          : [];
+        const r2WasRequested = Boolean(resetJson?.r2PurgeRequested || options.r2PurgeAllUploads);
+        const r2WasPurged = resetJson?.r2Purged === true;
+        if (r2WasRequested && !r2WasPurged) {
+          const r2Note =
+            serverWarnings.find((w) => /R2/i.test(w)) ||
+            'R2 media was NOT deleted (database-only reset on Vercel).';
+          showToast('R2 media not deleted', r2Note, 'warning');
         }
 
         // Tombstone wiped users so Discovery sync cannot resurrect them this session
@@ -2222,7 +2234,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         categoriesCleared.push('Admin Profile Fields (password unchanged)');
       }
 
-      // 2. Profiles & Media
+      // 2. Profiles & Media (local UI URLs only — remote R2 objects are not deleted on Vercel)
       if (options.profilesMedia) {
         currentUsersList = currentUsersList.map((u) => {
           return {
@@ -2236,7 +2248,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             mockLocationCountry: undefined,
           };
         });
-        categoriesCleared.push('Profiles & Media');
+        categoriesCleared.push('Profiles & Media (local URLs cleared; R2 objects retained)');
+      }
+      if (options.r2PurgeAllUploads) {
+        categoriesCleared.push('R2 purge requested but NOT executed on Vercel');
       }
 
       // 3. Coins & Wallet Balances
@@ -3664,6 +3679,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
             if (data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE') {
               showToast('Call Ended', 'Call ended due to insufficient coin balance.', 'error');
+            } else if (data.endedBy === 'admin_moderator' || outcomeStatus === 'terminated') {
+              showToast(
+                'Call Terminated',
+                data.reason || 'This call was ended by Safety & Compliance Administration.',
+                'error'
+              );
+            }
+          } else if (data.type === 'call:safety_warning') {
+            const warnCallId = String(data.callId || '').trim();
+            const warnText = String(data.message || data.warningText || '').trim();
+            const session = activeCallRef.current;
+            if (
+              session &&
+              warnText &&
+              (!warnCallId || warnCallId === session.id)
+            ) {
+              const next = { ...session, warningMessage: warnText };
+              activeCallRef.current = next;
+              setActiveCall(next);
+              showToast('Safety Advisory', warnText, 'warning');
             }
           } else if (data.type === 'wallet:burn_result') {
             // Authoritative balances from server billing — update HUD immediately
