@@ -78,6 +78,11 @@ export type DiscoveryFlagSize = 'xs' | 'sm' | 'md';
 export type DiscoveryAspectMobile = '2/3' | '9/16';
 export type DiscoveryAspectDesktop = '3/4' | '2/3';
 export type DiscoveryCallStyle = 'circle' | 'pill';
+export type DiscoveryImageFit = 'cover' | 'contain' | 'fill';
+export type DiscoveryImagePosition = 'center' | 'top' | 'bottom';
+
+export const OVERLAY_BOUNDS = { min: 0, max: 100, default: 70 } as const;
+export const IMAGE_SCALE_BOUNDS = { min: 100, max: 140, default: 100 } as const;
 
 export interface DiscoveryCardWidgetConfig {
   id: DiscoveryCardWidgetId;
@@ -112,6 +117,16 @@ export interface DiscoveryCardLayout {
   cardAspectMobile: DiscoveryAspectMobile;
   cardAspectDesktop: DiscoveryAspectDesktop;
   callStyle: DiscoveryCallStyle;
+  /** Show host photo on the card (off = solid placeholder only). */
+  showPhoto: boolean;
+  /** Prefer gallery[0] over avatarUrl when both exist. */
+  preferGalleryFirst: boolean;
+  imageFit: DiscoveryImageFit;
+  imagePosition: DiscoveryImagePosition;
+  /** Bottom gradient / scrim strength 0–100. */
+  overlayStrength: number;
+  /** Photo zoom percent 100–140. */
+  imageScale: number;
 }
 
 export const SLOT_LABELS: Record<DiscoveryCardSlotId, string> = {
@@ -177,6 +192,12 @@ export const DEFAULT_DISCOVERY_CARD_LAYOUT: DiscoveryCardLayout = {
   cardAspectMobile: '9/16',
   cardAspectDesktop: '3/4',
   callStyle: 'circle',
+  showPhoto: true,
+  preferGalleryFirst: false,
+  imageFit: 'cover',
+  imagePosition: 'center',
+  overlayStrength: OVERLAY_BOUNDS.default,
+  imageScale: IMAGE_SCALE_BOUNDS.default,
 };
 
 function coerceFlagSize(v: unknown): DiscoveryFlagSize {
@@ -193,6 +214,14 @@ function coerceAspectDesktop(v: unknown): DiscoveryAspectDesktop {
 
 function coerceCallStyle(v: unknown): DiscoveryCallStyle {
   return v === 'pill' || v === 'circle' ? v : 'circle';
+}
+
+function coerceImageFit(v: unknown): DiscoveryImageFit {
+  return v === 'contain' || v === 'fill' || v === 'cover' ? v : 'cover';
+}
+
+function coerceImagePosition(v: unknown): DiscoveryImagePosition {
+  return v === 'top' || v === 'bottom' || v === 'center' ? v : 'center';
 }
 
 function coerceHAlign(v: unknown, fallback: DiscoveryHAlign): DiscoveryHAlign {
@@ -310,6 +339,22 @@ export function parseDiscoveryCardLayout(raw: unknown): DiscoveryCardLayout {
     cardAspectMobile: coerceAspectMobile(obj.cardAspectMobile),
     cardAspectDesktop: coerceAspectDesktop(obj.cardAspectDesktop),
     callStyle: coerceCallStyle(obj.callStyle),
+    showPhoto: obj.showPhoto === undefined ? true : Boolean(obj.showPhoto),
+    preferGalleryFirst: Boolean(obj.preferGalleryFirst),
+    imageFit: coerceImageFit(obj.imageFit),
+    imagePosition: coerceImagePosition(obj.imagePosition),
+    overlayStrength: clampInt(
+      obj.overlayStrength,
+      OVERLAY_BOUNDS.min,
+      OVERLAY_BOUNDS.max,
+      OVERLAY_BOUNDS.default
+    ),
+    imageScale: clampInt(
+      obj.imageScale,
+      IMAGE_SCALE_BOUNDS.min,
+      IMAGE_SCALE_BOUNDS.max,
+      IMAGE_SCALE_BOUNDS.default
+    ),
   };
 }
 

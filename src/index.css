@@ -206,6 +206,13 @@ body {
   animation: onlinePing 1.6s ease-out infinite;
 }
 
+/* Discovery MediaCard: desktop aspect via CSS var (set inline on the node) */
+@media (min-width: 640px) {
+  .mc-aspect-responsive {
+    aspect-ratio: var(--mc-aspect-sm, 3 / 4) !important;
+  }
+}
+
 /* =========================================================================
    LIGHT THEME — legacy hex remaps (admin + older screens). Do NOT remap
    global .text-white — that breaks photo scrims and flirt/coin CTAs.
