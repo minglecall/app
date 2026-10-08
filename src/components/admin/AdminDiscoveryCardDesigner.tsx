@@ -18,9 +18,6 @@ import {
   DiscoveryCardWidgetId,
   SIZE_BOUNDS,
   PAD_BOUNDS,
-  OVERLAY_BOUNDS,
-  IMAGE_SCALE_BOUNDS,
-  COUNTRY_MAX_LETTERS_BOUNDS,
   SLOT_LABELS,
   H_ALIGN_LABELS,
   DiscoveryHAlign,
@@ -46,11 +43,8 @@ const PREVIEW_USER = {
   nationality: 'United States',
   countryCode: 'US',
   bio: '',
-  avatarUrl:
-    'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=600',
-  gallery: [
-    'https://images.unsplash.com/photo-1524504388940-b1c17226555e?auto=format&fit=crop&q=80&w=600',
-  ] as string[],
+  avatarUrl: '',
+  gallery: [] as string[],
   interests: [] as string[],
   spokenLanguages: ['English'],
   createdAt: new Date().toISOString(),
@@ -378,113 +372,6 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
             </div>
           )}
 
-          {/* Picture */}
-          <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
-            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Picture</h4>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <label className="flex items-center gap-2 cursor-pointer sm:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={draft.showPhoto}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, showPhoto: e.target.checked })
-                    )
-                  }
-                  className="accent-pink-500 w-4 h-4"
-                />
-                <span className="font-semibold text-slate-200">Show host photo</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer sm:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={draft.preferGalleryFirst}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, preferGalleryFirst: e.target.checked })
-                    )
-                  }
-                  className="accent-pink-500 w-4 h-4"
-                />
-                <span className="font-semibold text-slate-200">Prefer gallery photo over avatar</span>
-              </label>
-              <label className="space-y-1">
-                <span className="text-slate-400 font-semibold">Image fit</span>
-                <select
-                  value={draft.imageFit}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, imageFit: e.target.value })
-                    )
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200"
-                >
-                  <option value="cover">Cover (fill crop)</option>
-                  <option value="contain">Contain (fit inside)</option>
-                  <option value="fill">Fill (stretch)</option>
-                </select>
-              </label>
-              <label className="space-y-1">
-                <span className="text-slate-400 font-semibold">Image position</span>
-                <select
-                  value={draft.imagePosition}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, imagePosition: e.target.value })
-                    )
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200"
-                >
-                  <option value="center">Center</option>
-                  <option value="top">Top</option>
-                  <option value="bottom">Bottom</option>
-                </select>
-              </label>
-              <label className="space-y-1">
-                <span className="text-slate-400 font-semibold flex justify-between">
-                  <span>Overlay / scrim</span>
-                  <span className="font-mono text-slate-300">{draft.overlayStrength}%</span>
-                </span>
-                <input
-                  type="range"
-                  min={OVERLAY_BOUNDS.min}
-                  max={OVERLAY_BOUNDS.max}
-                  value={draft.overlayStrength}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({
-                        ...prev,
-                        overlayStrength: Number(e.target.value),
-                      })
-                    )
-                  }
-                  className="w-full accent-pink-500"
-                />
-              </label>
-              <label className="space-y-1">
-                <span className="text-slate-400 font-semibold flex justify-between">
-                  <span>Photo zoom</span>
-                  <span className="font-mono text-slate-300">{draft.imageScale}%</span>
-                </span>
-                <input
-                  type="range"
-                  min={IMAGE_SCALE_BOUNDS.min}
-                  max={IMAGE_SCALE_BOUNDS.max}
-                  value={draft.imageScale}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({
-                        ...prev,
-                        imageScale: Number(e.target.value),
-                      })
-                    )
-                  }
-                  className="w-full accent-pink-500"
-                />
-              </label>
-            </div>
-          </div>
-
           {/* Sizes */}
           <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Sizes (clamped)</h4>
@@ -540,47 +427,6 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                   <option value="sm">sm</option>
                   <option value="md">md</option>
                 </select>
-              </label>
-
-              <label className="flex items-center gap-2 cursor-pointer sm:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={draft.countryTruncate}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, countryTruncate: e.target.checked })
-                    )
-                  }
-                  className="accent-pink-500 w-4 h-4"
-                />
-                <span className="font-semibold text-slate-200">
-                  Truncate long country names (no wrap to next line)
-                </span>
-              </label>
-              <label className={`space-y-1 sm:col-span-2 ${draft.countryTruncate ? '' : 'opacity-40'}`}>
-                <span className="text-slate-400 font-semibold flex justify-between">
-                  <span>Country max letters</span>
-                  <span className="font-mono text-slate-300">{draft.countryMaxLetters}</span>
-                </span>
-                <input
-                  type="range"
-                  min={COUNTRY_MAX_LETTERS_BOUNDS.min}
-                  max={COUNTRY_MAX_LETTERS_BOUNDS.max}
-                  value={draft.countryMaxLetters}
-                  disabled={!draft.countryTruncate}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({
-                        ...prev,
-                        countryMaxLetters: Number(e.target.value),
-                      })
-                    )
-                  }
-                  className="w-full accent-pink-500"
-                />
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {COUNTRY_MAX_LETTERS_BOUNDS.min}–{COUNTRY_MAX_LETTERS_BOUNDS.max} letters, then …
-                </span>
               </label>
 
               <label className="space-y-1">

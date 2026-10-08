@@ -13,7 +13,6 @@ import {
   DiscoveryCardWidgetConfig,
   DiscoveryCardWidgetId,
   groupWidgetsBySlot,
-  formatDiscoveryCountryName,
   parseDiscoveryCardLayout,
   splitSlotIntoLines,
   widgetPaddingStyle,
@@ -58,11 +57,10 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   const countryName = getUserEffectiveLocation(user).country || user.nationality || '';
 
   const fallbackAvatar = getFallbackAvatar(user.name, user.gender, user.role);
-  const avatarNorm = normalizeMediaUrl(user.avatarUrl);
-  const galleryNorm = normalizeMediaUrl(user.gallery?.[0]);
-  const primaryAvatar = layout.preferGalleryFirst
-    ? galleryNorm || avatarNorm || fallbackAvatar
-    : avatarNorm || galleryNorm || fallbackAvatar;
+  const primaryAvatar =
+    normalizeMediaUrl(user.avatarUrl) ||
+    normalizeMediaUrl(user.gallery?.[0]) ||
+    fallbackAvatar;
 
   const wrapPad = (w: DiscoveryCardWidgetConfig, node: React.ReactNode): React.ReactNode => {
     if (node == null) return null;
@@ -169,30 +167,13 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           />
         );
 
-      case 'country': {
-        const displayCountry = formatDiscoveryCountryName(
-          countryName,
-          layout.countryTruncate,
-          layout.countryMaxLetters
-        );
+      case 'country':
         return wrapPad(
           w,
-          <span
-            title={countryName}
-            className={`text-white/90 font-medium drop-shadow-sm whitespace-nowrap ${
-              layout.countryTruncate ? 'truncate max-w-full' : ''
-            }`}
-            style={{
-              fontSize: layout.metaFontPx,
-              ...(layout.countryTruncate
-                ? { maxWidth: `${Math.max(4, layout.countryMaxLetters)}ch` }
-                : {}),
-            }}
-          >
-            {displayCountry}
+          <span className="text-white/90 font-medium truncate drop-shadow-sm" style={{ fontSize: layout.metaFontPx }}>
+            {countryName}
           </span>
         );
-      }
 
       case 'callButton': {
         const btnStyle: React.CSSProperties = {
@@ -277,11 +258,6 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       alt={user.name}
       aspectMobile={layout.cardAspectMobile}
       aspectDesktop={layout.cardAspectDesktop}
-      showPhoto={layout.showPhoto}
-      imageFit={layout.imageFit}
-      imagePosition={layout.imagePosition}
-      overlayStrength={layout.overlayStrength}
-      imageScale={layout.imageScale}
       onClick={previewMode ? undefined : () => onOpenProfile(user)}
       statusSlot={
         hasTop ? (
