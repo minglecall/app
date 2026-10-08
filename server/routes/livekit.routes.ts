@@ -124,13 +124,68 @@ export function createLivekitRouter(ctx: ServerRuntime): Router {
           }
         }
         if (!call) {
+          // Brief retry — Accept may race ahead of call_logs upsert
+          if (isSupabaseAdminConfigured()) {
+            const supabase = getSupabaseAdmin();
+            await new Promise((r) => setTimeout(r, 500));
+            if (supabase) {
+              const { data: row } = await supabase
+                .from('call_logs')
+                .select('id, caller_id, receiver_id, host_id, status')
+                .eq('id', room)
+                .maybeSingle();
+              const st = String(row?.status || '').toLowerCase();
+              const open = ['ringing', 'active', 'accepted', 'in_call', 'connecting'].includes(st);
+              if (row && open) {
+                call = {
+                  id: String(row.id),
+                  callerId: String(row.caller_id || ''),
+                  receiverId: String(row.receiver_id || row.host_id || ''),
+                  status: st === 'ringing' ? 'ringing' : 'active',
+                  ringingAt: Date.now(),
+                  startTime: st === 'ringing' ? undefined : Date.now(),
+                } as any;
+                activeCalls.set(room, call as any);
+              }
+            }
+          }
+        }
+        if (!call) {
           return res.status(404).json({ error: 'Call room not found or is no longer active.' });
         }
-        const isMember =
-          call.callerId === identity ||
-          call.receiverId === identity ||
-          (!!authUserId &&
-            (call.callerId === authUserId || call.receiverId === authUserId));
+        const participantIds = [call.callerId, call.receiverId]
+          .map((v) => String(v || '').trim())
+          .filter(Boolean);
+        let isMember =
+          participantIds.includes(identity) ||
+          (!!authUserId && participantIds.includes(authUserId));
+        // Resolve profile.id ↔ auth_id aliases when ids disagree across devices
+        if (!isMember && isSupabaseAdminConfigured() && participantIds.length) {
+          const supabase = getSupabaseAdmin();
+          if (supabase) {
+            const { data: rows } = await supabase
+              .from('profiles')
+              .select('id, auth_id, email')
+              .in('id', participantIds);
+            const myEmail = String((req as any).user?.email || (req as any).profile?.email || '')
+              .trim()
+              .toLowerCase();
+            for (const row of rows || []) {
+              if (String(row.id) === identity || String(row.id) === authUserId) {
+                isMember = true;
+                break;
+              }
+              if (row.auth_id && (String(row.auth_id) === identity || String(row.auth_id) === authUserId)) {
+                isMember = true;
+                break;
+              }
+              if (myEmail && row.email && String(row.email).trim().toLowerCase() === myEmail) {
+                isMember = true;
+                break;
+              }
+            }
+          }
+        }
         if (!isMember) {
           return res.status(403).json({ error: 'Not authorized to join this room.' });
         }

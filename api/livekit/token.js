@@ -97,7 +97,7 @@ async function requireAuth(req) {
   {
     const { data: byAuth } = await admin
       .from('profiles')
-      .select('id, role, email')
+      .select('id, role, email, auth_id')
       .eq('auth_id', authUser.id)
       .maybeSingle();
     profile = byAuth || null;
@@ -105,10 +105,18 @@ async function requireAuth(req) {
   if (!profile) {
     const { data: byId } = await admin
       .from('profiles')
-      .select('id, role, email')
+      .select('id, role, email, auth_id')
       .eq('id', authUser.id)
       .maybeSingle();
     profile = byId || null;
+  }
+  if (!profile && authUser.email) {
+    const { data: byEmail } = await admin
+      .from('profiles')
+      .select('id, role, email, auth_id')
+      .ilike('email', String(authUser.email).trim().toLowerCase())
+      .maybeSingle();
+    profile = byEmail || null;
   }
 
   const profileId = String((profile && profile.id) || authUser.id);
@@ -123,7 +131,66 @@ async function requireAuth(req) {
     email,
     user: authUser,
     client: admin,
+    profile,
   };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * True if the authenticated user is a participant on this call_logs row.
+ * Handles profile.id vs auth.users.id mismatches (common after Vercel/Auth linking).
+ */
+async function isCallParticipant(client, callRow, auth) {
+  if (!callRow || !auth) return false;
+  const participantIds = [callRow.caller_id, callRow.receiver_id, callRow.host_id]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean);
+  if (!participantIds.length) return false;
+
+  const myIds = new Set(
+    [auth.profileId, auth.userId, auth.profile && auth.profile.auth_id]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+  );
+
+  if (participantIds.some((id) => myIds.has(id))) return true;
+
+  // Map stored participant ids → their auth_id / email and compare to session
+  try {
+    const { data: rows } = await client
+      .from('profiles')
+      .select('id, auth_id, email')
+      .in('id', participantIds);
+    for (const row of rows || []) {
+      const rid = String((row && row.id) || '').trim();
+      const raid = String((row && row.auth_id) || '').trim();
+      const remail = String((row && row.email) || '')
+        .trim()
+        .toLowerCase();
+      if (rid && myIds.has(rid)) return true;
+      if (raid && myIds.has(raid)) return true;
+      if (remail && auth.email && remail === auth.email) return true;
+    }
+  } catch (e) {
+    console.warn('[api/livekit/token] participant profile lookup', e && e.message);
+  }
+  return false;
+}
+
+async function loadCallRow(client, roomName) {
+  const { data, error } = await client
+    .from('call_logs')
+    .select('id, caller_id, receiver_id, host_id, status')
+    .eq('id', roomName)
+    .maybeSingle();
+  if (error) {
+    console.warn('[api/livekit/token] call_logs lookup', error.message);
+    return null;
+  }
+  return data || null;
 }
 
 module.exports = async function handler(req, res) {
@@ -166,20 +233,21 @@ module.exports = async function handler(req, res) {
     // Do NOT require status=active — accept may race ahead of sync.
     if (!isAdminTestRoom && !isAdmin) {
       let authorized = false;
+      let callRow = null;
       if (auth.client) {
-        const { data: callRow, error: callErr } = await auth.client
-          .from('call_logs')
-          .select('id, caller_id, receiver_id, host_id, status')
-          .eq('id', roomName)
-          .maybeSingle();
-        if (callErr) {
-          console.warn('[api/livekit/token] call_logs lookup', callErr.message);
+        callRow = await loadCallRow(auth.client, roomName);
+        // Accept / sync race: row may land a few hundred ms after UI flips to active
+        if (!callRow) {
+          await sleep(450);
+          callRow = await loadCallRow(auth.client, roomName);
         }
+        if (!callRow) {
+          await sleep(700);
+          callRow = await loadCallRow(auth.client, roomName);
+        }
+
         if (callRow) {
-          const ids = [callRow.caller_id, callRow.receiver_id, callRow.host_id].map((v) =>
-            String(v || '')
-          );
-          authorized = ids.includes(identity) || ids.includes(String(auth.userId));
+          authorized = await isCallParticipant(auth.client, callRow, auth);
           const st = String(callRow.status || '').toLowerCase();
           const openStatuses = new Set([
             'ringing',
@@ -210,6 +278,16 @@ module.exports = async function handler(req, res) {
           error:
             'Not authorized for this LiveKit room. Join only works for calls you participate in.',
           code: 'NOT_CALL_MEMBER',
+          detail: callRow
+            ? {
+                roomName,
+                profileId: identity,
+                authUserId: auth.userId,
+                callerId: callRow.caller_id,
+                receiverId: callRow.receiver_id,
+                hostId: callRow.host_id,
+              }
+            : { roomName, profileId: identity, reason: 'call_row_missing' },
         });
       }
     }

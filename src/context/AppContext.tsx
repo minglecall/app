@@ -1458,23 +1458,149 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     isSelfIdRef.current = isSelfId;
   }, [isSelfId]);
 
+  const CALL_TERMINAL_STATUSES = useMemo(
+    () =>
+      new Set([
+        'missed',
+        'declined',
+        'cancelled',
+        'canceled',
+        'rejected',
+        'failed',
+        'completed',
+        'ended',
+      ]),
+    []
+  );
+
+  /** Peer hung up / cancelled — close local call UI + restore presence (no re-broadcast). */
+  const closeCallFromRemote = useCallback(
+    (opts: { callId: string; status?: string; silent?: boolean }) => {
+      const cur = activeCallRef.current;
+      const callId = String(opts.callId || '').trim();
+      if (!cur || !callId || cur.id !== callId) return false;
+
+      clearRingTimeout();
+      billedMinutesRef.current.clear();
+      burnInFlightRef.current.clear();
+      activeCallRef.current = null;
+      setActiveCall(null);
+
+      if (preferredStatusRef.current !== 'offline') {
+        preferredStatusRef.current = 'online';
+      }
+      const restore = preferredStatusRef.current;
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === cur.callerId || u.id === cur.receiverId
+            ? { ...u, onlineStatus: restore }
+            : u
+        )
+      );
+      void authFetch('/api/presence/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: restore }),
+      }).catch(() => {});
+
+      if (!opts.silent) {
+        const st = String(opts.status || '').toLowerCase();
+        if (st === 'declined') {
+          showToastRef.current?.('Call Declined 🚫', 'The other person declined the call.', 'info');
+        } else if (st === 'missed' || st === 'cancelled' || st === 'canceled') {
+          showToastRef.current?.(
+            'Call Ended',
+            'The other person ended or cancelled the call.',
+            'info'
+          );
+        } else {
+          showToastRef.current?.('Call Ended', 'The other person left the call.', 'info');
+        }
+      }
+
+      if (isSupabaseConfigured()) {
+        fetchCallLogsFromSupabase()
+          .then((logs) => {
+            if (Array.isArray(logs)) setCallLogs(logs);
+          })
+          .catch(() => {});
+      }
+      return true;
+    },
+    []
+  );
+  const closeCallFromRemoteRef = useRef(closeCallFromRemote);
+  useEffect(() => {
+    closeCallFromRemoteRef.current = closeCallFromRemote;
+  }, [closeCallFromRemote]);
+
   // DB + HTTP fallback for incoming rings when Realtime broadcast is dropped (Vercel).
   useEffect(() => {
     if (!isLoggedIn || !currentUserId) return;
     const meId = String(currentUserId);
+    const meAuth = String(supabaseAuthUserIdRef.current || '').trim();
+    const myIds = Array.from(new Set([meId, meAuth].filter(Boolean)));
     let cancelled = false;
+
+    const onCallLogRow = (row: Record<string, any>) => {
+      const callId = String(row.id || '').trim();
+      const callerId = String(row.caller_id || '').trim();
+      const receiverId = String(row.receiver_id || row.host_id || '').trim();
+      const st = String(row.status || '').toLowerCase();
+      if (!callId) return;
+
+      const involvesMe =
+        myIds.includes(callerId) ||
+        myIds.includes(receiverId) ||
+        myIds.includes(String(row.host_id || '').trim());
+      if (!involvesMe) return;
+
+      if (st === 'ringing') {
+        // Only callee should open incoming UI
+        if (myIds.includes(receiverId) || myIds.includes(String(row.host_id || '').trim())) {
+          if (!myIds.includes(callerId)) {
+            applyIncomingRingRef.current({
+              callId,
+              callerId,
+              receiverId: receiverId || meId,
+            });
+          }
+        }
+        return;
+      }
+
+      if (CALL_TERMINAL_STATUSES.has(st)) {
+        closeCallFromRemoteRef.current({ callId, status: st });
+      }
+    };
 
     const pollIncoming = async () => {
       if (cancelled || isResettingRef.current) return;
       const cur = activeCallRef.current;
       if (cur && cur.status === 'active') return;
-      // Already ringing as callee — keep UI; still allow status clear via later poll
       try {
         const res = await authFetch('/api/calls/incoming');
         if (!res.ok || cancelled) return;
         const json = await res.json().catch(() => null);
         const rows = Array.isArray(json?.data) ? json.data : [];
-        if (!rows.length) return;
+        if (!rows.length) {
+          // Ringing cancelled remotely — clear local ringing UI
+          if (cur && cur.status === 'ringing' && myIds.includes(String(cur.receiverId || ''))) {
+            // Confirm via call_logs before closing
+            if (isSupabaseConfigured()) {
+              const { data } = await supabase
+                .from('call_logs')
+                .select('status')
+                .eq('id', cur.id)
+                .maybeSingle();
+              const st = String((data as any)?.status || '').toLowerCase();
+              if (CALL_TERMINAL_STATUSES.has(st)) {
+                closeCallFromRemoteRef.current({ callId: cur.id, status: st });
+              }
+            }
+          }
+          return;
+        }
         const top = rows[0];
         applyIncomingRing({
           callId: String(top.callId || top.id || ''),
@@ -1486,73 +1612,83 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     };
 
-    // Immediate + frequent poll — primary reliability path for callee popup
     void pollIncoming();
     const pollTimer = setInterval(() => void pollIncoming(), 1500);
 
-    let channel: ReturnType<typeof supabase.channel> | null = null;
+    const channels: ReturnType<typeof supabase.channel>[] = [];
     if (isSupabaseConfigured()) {
-      channel = supabase
-        .channel(`call_logs_inbox_${meId}`)
-        .on(
-          'postgres_changes',
-          {
-            event: '*',
-            schema: 'public',
-            table: 'call_logs',
-            filter: `receiver_id=eq.${meId}`,
-          },
-          (payload: any) => {
-            try {
-              const row = (payload.new || payload.old || {}) as Record<string, any>;
-              const callId = String(row.id || '').trim();
-              const callerId = String(row.caller_id || '').trim();
-              const receiverId = String(row.receiver_id || row.host_id || meId).trim();
-              const st = String(row.status || '').toLowerCase();
-              if (!callId || !callerId) return;
-
-              if (st === 'ringing') {
-                applyIncomingRing({ callId, callerId, receiverId });
-                return;
+      const attach = (filterCol: 'receiver_id' | 'caller_id' | 'host_id', id: string) => {
+        const ch = supabase
+          .channel(`call_logs_${filterCol}_${id}`)
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: 'call_logs',
+              filter: `${filterCol}=eq.${id}`,
+            },
+            (payload: any) => {
+              try {
+                const row = (payload.new || payload.old || {}) as Record<string, any>;
+                onCallLogRow(row);
+              } catch (e) {
+                console.warn('[call_logs] inbox handler error', e);
               }
-
-              const cur = activeCallRef.current;
-              if (
-                cur &&
-                cur.id === callId &&
-                (st === 'missed' ||
-                  st === 'declined' ||
-                  st === 'cancelled' ||
-                  st === 'canceled' ||
-                  st === 'rejected' ||
-                  st === 'failed' ||
-                  st === 'completed' ||
-                  st === 'ended')
-              ) {
-                clearRingTimeout();
-                activeCallRef.current = null;
-                setActiveCall(null);
-                // Refresh host call logs after ring outcome lands in DB
-                fetchCallLogsFromSupabase()
-                  .then((logs) => {
-                    if (Array.isArray(logs)) setCallLogs(logs);
-                  })
-                  .catch(() => {});
-              }
-            } catch (e) {
-              console.warn('[call_logs] inbox handler error', e);
             }
-          }
-        )
-        .subscribe();
+          )
+          .subscribe();
+        channels.push(ch);
+      };
+      for (const id of myIds) {
+        attach('receiver_id', id);
+        attach('caller_id', id);
+        attach('host_id', id);
+      }
     }
 
     return () => {
       cancelled = true;
       clearInterval(pollTimer);
-      if (channel) void supabase.removeChannel(channel);
+      for (const ch of channels) {
+        void supabase.removeChannel(ch);
+      }
     };
-  }, [isLoggedIn, currentUserId, applyIncomingRing]);
+  }, [isLoggedIn, currentUserId, applyIncomingRing, CALL_TERMINAL_STATUSES]);
+
+  // While in a call (ringing or active), poll call_logs so peer hangup closes UI even if Realtime drops
+  useEffect(() => {
+    if (!isLoggedIn || !activeCall?.id || !isSupabaseConfigured()) return;
+    const callId = activeCall.id;
+    let cancelled = false;
+
+    const pollStatus = async () => {
+      if (cancelled || isResettingRef.current) return;
+      const cur = activeCallRef.current;
+      if (!cur || cur.id !== callId) return;
+      try {
+        const { data, error } = await supabase
+          .from('call_logs')
+          .select('status')
+          .eq('id', callId)
+          .maybeSingle();
+        if (error || !data) return;
+        const st = String((data as { status?: string }).status || '').toLowerCase();
+        if (CALL_TERMINAL_STATUSES.has(st)) {
+          closeCallFromRemoteRef.current({ callId, status: st });
+        }
+      } catch (e) {
+        console.warn('[call] end-status poll failed', e);
+      }
+    };
+
+    void pollStatus();
+    const timer = setInterval(() => void pollStatus(), 1200);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isLoggedIn, activeCall?.id, activeCall?.status, CALL_TERMINAL_STATUSES]);
 
   // Keep host/user call logs fresh (missed / completed) without relying on WS fanout
   useEffect(() => {
@@ -3392,103 +3528,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               }),
             }).catch(() => {});
             showToast('Call Connected! 📹', '1-on-1 WebRTC Video Call connected live.', 'success');
-          } else if (data.type === 'call:ended') {
-            clearRingTimeout();
-            billedMinutesRef.current.clear();
-            burnInFlightRef.current.clear();
-            const endedCallSnapshot = activeCallRef.current;
-            activeCallRef.current = null;
-            setActiveCall(null);
-            if (preferredStatusRef.current !== 'offline') {
-              preferredStatusRef.current = 'online';
-            }
-            const restoreIds = [
-              endedCallSnapshot?.callerId,
-              endedCallSnapshot?.receiverId,
-              data.callerId,
-              data.receiverId,
-            ]
-              .map((id) => String(id || '').trim())
-              .filter(Boolean);
-            if (restoreIds.length) {
-              setUsers((prev) =>
-                prev.map((u) =>
-                  restoreIds.includes(u.id)
-                    ? { ...u, onlineStatus: preferredStatusRef.current }
-                    : u
-                )
-              );
-            }
-            // Persist end + refresh presence so discovery stops showing busy
-            if (endedCallSnapshot?.id || data.callId) {
-              void syncCallEndAndPresenceRef.current(
-                {
-                  callId: endedCallSnapshot?.id || data.callId,
-                  callerId: endedCallSnapshot?.callerId || data.callerId,
-                  receiverId: endedCallSnapshot?.receiverId || data.receiverId,
-                  status: data.outcome || data.status || 'completed',
-                  outcome: data.outcome || data.status || 'completed',
-                  endedBy: currentUserIdRef.current,
-                  durationSeconds: endedCallSnapshot?.durationSeconds || 0,
-                  coinsSpent: endedCallSnapshot?.coinsSpent || 0,
-                  coinsEarned: endedCallSnapshot?.coinsEarned || 0,
-                },
-                restoreIds
-              );
+          } else if (data.type === 'call:ended' || data.type === 'call:end' || data.type === 'call:cancel' || data.type === 'call:reject') {
+            const endedId = String(data.callId || activeCallRef.current?.id || '').trim();
+            const outcomeStatus = String(data.outcome || data.status || 'completed');
+            if (endedId) {
+              closeCallFromRemoteRef.current({
+                callId: endedId,
+                status: outcomeStatus,
+                silent:
+                  data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE',
+              });
             }
             if (data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE') {
               showToast('Call Ended', 'Call ended due to insufficient coin balance.', 'error');
-            } else if (data.outcome === 'declined' || data.status === 'declined') {
-              showToast('Call Declined 🚫', 'The call was declined.', 'info');
-            } else if (data.outcome === 'missed' || data.status === 'missed' || data.reason === 'Ring timeout') {
-              showToast('Call Missed', data.reason === 'Ring timeout' ? 'No answer — ring timed out.' : 'Call was not answered.', 'info');
-            } else {
-              showToast('Call Ended', 'The call was ended or declined.', 'info');
-            }
-
-            // Merge ringing outcome into local call logs immediately (authoritative refresh follows)
-            const outcomeStatus = String(data.outcome || data.status || '');
-            if (
-              endedCallSnapshot &&
-              (outcomeStatus === 'missed' ||
-                outcomeStatus === 'declined' ||
-                outcomeStatus === 'failed' ||
-                data.reason === 'Ring timeout')
-            ) {
-              const caller = usersRef.current.find((u) => u.id === endedCallSnapshot.callerId);
-              const receiver = usersRef.current.find((u) => u.id === endedCallSnapshot.receiverId);
-              if (caller && receiver) {
-                const optimistic: CallLogItem = {
-                  id: endedCallSnapshot.id,
-                  callerId: caller.id,
-                  callerName: caller.name,
-                  callerAvatar: caller.avatarUrl,
-                  callerCountry: caller.nationality,
-                  receiverId: receiver.id,
-                  receiverName: receiver.name,
-                  receiverAvatar: receiver.avatarUrl,
-                  startTime: endedCallSnapshot.startTime || Date.now(),
-                  endTime: Date.now(),
-                  durationSeconds: 0,
-                  coinsSpent: 0,
-                  coinsEarned: 0,
-                  timestamp: 'Just now',
-                  wasFriendCall: false,
-                  status: outcomeStatus === 'failed' ? 'failed' : outcomeStatus === 'declined' ? 'declined' : 'missed',
-                };
-                setCallLogs((prev) => {
-                  const withoutDup = prev.filter((l) => l.id !== optimistic.id);
-                  return [optimistic, ...withoutDup];
-                });
-              }
-            }
-
-            if (isSupabaseConfigured()) {
-              fetchCallLogsFromSupabase()
-                .then((logs) => {
-                  if (Array.isArray(logs)) setCallLogs(logs);
-                })
-                .catch((e) => console.warn('[WS] call:ended call_logs refresh note:', e));
             }
           } else if (data.type === 'wallet:burn_result') {
             // Authoritative balances from server billing — update HUD immediately
@@ -4943,11 +4995,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!activeCall) return;
     clearRingTimeout();
     const rejectedCall = activeCall;
-    const isCaller = currentUser.id === rejectedCall.callerId;
+    const isCaller = isSelfId(rejectedCall.callerId);
     const outcome = isCaller ? 'missed' : 'declined';
     const reason = isCaller ? 'Caller hangup' : 'Receiver reject';
     const endNow = Date.now();
     const peerId = isCaller ? rejectedCall.receiverId : rejectedCall.callerId;
+    const peerUser = usersRef.current.find(
+      (u) => u.id === peerId || u.authId === peerId
+    );
+    const callerUser = usersRef.current.find(
+      (u) => u.id === rejectedCall.callerId || u.authId === rejectedCall.callerId
+    );
+    const receiverUser = usersRef.current.find(
+      (u) => u.id === rejectedCall.receiverId || u.authId === rejectedCall.receiverId
+    );
+
+    // Persist end to DB first so peer poll closes UI even if Realtime is down
+    void syncCallEndAndPresence(
+      {
+        callId: rejectedCall.id,
+        callerId: rejectedCall.callerId,
+        receiverId: rejectedCall.receiverId,
+        status: outcome,
+        outcome,
+        endedBy: currentUser.id,
+        reason,
+        durationSeconds: 0,
+        coinsSpent: 0,
+        coinsEarned: 0,
+      },
+      [rejectedCall.callerId, rejectedCall.receiverId]
+    );
 
     void signalSendAsync({
       type: 'call:ended',
@@ -4956,6 +5034,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       callerId: rejectedCall.callerId,
       receiverId: rejectedCall.receiverId,
       toUserId: peerId,
+      toAuthId: peerUser?.authId || undefined,
+      callerAuthId: callerUser?.authId || undefined,
+      receiverAuthId: receiverUser?.authId || supabaseAuthUserIdRef.current || undefined,
       outcome,
       reason,
       status: outcome,
@@ -4991,26 +5072,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     setActiveCall(null);
-    void syncCallEndAndPresence(
-      {
-        callId: rejectedCall.id,
-        callerId: rejectedCall.callerId,
-        receiverId: rejectedCall.receiverId,
-        status: outcome,
-        outcome,
-        endedBy: currentUser.id,
-        reason,
-        durationSeconds: 0,
-        coinsSpent: 0,
-        coinsEarned: 0,
-        wasFriendCall: isFriendCall,
-        callerName: caller?.name,
-        receiverName: receiver?.name,
-        startTime: rejectedCall.startTime || endNow,
-        endTime: endNow,
-      },
-      [rejectedCall.callerId, rejectedCall.receiverId]
-    );
 
     showToast(
       outcome === 'declined' ? 'Call Declined 🚫' : 'Call Cancelled',
@@ -5025,7 +5086,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     clearRingTimeout();
     const endedCall = activeCall;
     const wasRinging = endedCall.status === 'ringing';
-    const isCaller = currentUser.id === endedCall.callerId;
+    const isCaller = isSelfId(endedCall.callerId);
     const endNow = Date.now();
 
     // Ringing hangup should classify like cancel/decline (not completed)
@@ -5039,6 +5100,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       : undefined;
 
     const peerId = isCaller ? endedCall.receiverId : endedCall.callerId;
+    const peerUser = usersRef.current.find((u) => u.id === peerId || u.authId === peerId);
+    const callerParty = usersRef.current.find(
+      (u) => u.id === endedCall.callerId || u.authId === endedCall.callerId
+    );
+    const receiverParty = usersRef.current.find(
+      (u) => u.id === endedCall.receiverId || u.authId === endedCall.receiverId
+    );
+    const endStatus = ringingOutcome || 'completed';
+
+    // Build sync payload early — peer must see terminal status in call_logs ASAP
+    let syncPayload: Record<string, unknown> = {
+      callId: endedCall.id,
+      callerId: endedCall.callerId,
+      receiverId: endedCall.receiverId,
+      status: endStatus,
+      outcome: endStatus,
+      endedBy: currentUser.id,
+      reason,
+      durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
+      coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
+      coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
+      startTime: endedCall.startTime || endNow,
+      endTime: endNow,
+    };
+
     void signalSendAsync({
       type: 'call:ended',
       callId: endedCall.id,
@@ -5046,9 +5132,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       callerId: endedCall.callerId,
       receiverId: endedCall.receiverId,
       toUserId: peerId,
-      outcome: ringingOutcome || 'completed',
+      toAuthId: peerUser?.authId || undefined,
+      callerAuthId: callerParty?.authId || undefined,
+      receiverAuthId: receiverParty?.authId || supabaseAuthUserIdRef.current || undefined,
+      outcome: endStatus,
       reason,
-      status: ringingOutcome || 'completed',
+      status: endStatus,
     });
 
     if (!wasRinging && endedCall.durationSeconds > 0) {
@@ -5058,22 +5147,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const caller = users.find((u) => u.id === endedCall.callerId);
     const receiver = users.find((u) => u.id === endedCall.receiverId);
     const isFriendCall = isFriend(endedCall.receiverId) || isFriend(endedCall.callerId);
-    const logStatus = ringingOutcome || 'completed';
-
-    let syncPayload: Record<string, unknown> = {
-      callId: endedCall.id,
-      callerId: endedCall.callerId,
-      receiverId: endedCall.receiverId,
-      status: logStatus,
-      outcome: logStatus,
-      endedBy: currentUser.id,
-      reason,
-      durationSeconds: wasRinging ? 0 : endedCall.durationSeconds,
-      coinsSpent: wasRinging ? 0 : endedCall.coinsSpent,
-      coinsEarned: wasRinging ? 0 : endedCall.coinsEarned,
-      startTime: endedCall.startTime || endNow,
-      endTime: endNow,
-    };
+    const logStatus = endStatus;
 
     if (caller && receiver) {
       const tlId = receiver.teamLeaderId || receiver.createdById || null;
@@ -5118,7 +5192,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
     }
 
-    // Clear call UI first, then persist end + presence (order avoids sticky busy)
+    // Persist end immediately so peer poll/Realtime closes their UI, then clear local call
+    void syncCallEndAndPresence(syncPayload, [endedCall.callerId, endedCall.receiverId]);
+
     setAdminActiveCalls((prev) =>
       prev.filter(
         (c) =>
@@ -5130,8 +5206,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     billedMinutesRef.current.clear();
     burnInFlightRef.current.clear();
     setActiveCall(null);
-
-    void syncCallEndAndPresence(syncPayload, [endedCall.callerId, endedCall.receiverId]);
 
     showToast(
       wasRinging

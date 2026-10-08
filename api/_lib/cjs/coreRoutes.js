@@ -541,8 +541,15 @@ async function handleCalls(path, req, res) {
   if (path === 'calls/sync' && req.method === 'POST') {
     const body = await readJsonBody(req);
     const callId = String((body && (body.callId || body.id)) || randomUUID());
-    const callerId = String((body && body.callerId) || auth.profileId || '').trim();
-    const receiverId = String((body && body.receiverId) || '').trim();
+    // Canonicalize auth.users.id → profiles.id so LiveKit membership matches token identity
+    const canonicalizePartyId = (raw) => {
+      const id = String(raw || '').trim();
+      if (!id) return '';
+      if (id === String(auth.userId || '') && auth.profileId) return String(auth.profileId);
+      return id;
+    };
+    const callerId = canonicalizePartyId((body && body.callerId) || auth.profileId || '');
+    const receiverId = canonicalizePartyId((body && body.receiverId) || '');
     const callStatus = String((body && body.status) || 'completed').toLowerCase();
     const busyStatuses = new Set(['ringing', 'active', 'accepted', 'in_call', 'connecting']);
     const endStatuses = new Set([

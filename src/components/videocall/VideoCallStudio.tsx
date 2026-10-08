@@ -460,16 +460,20 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
           return { tokenRes, data };
         };
 
-        // Retry once — Accept sync may land a few hundred ms after UI goes active
+        // Retry — Accept sync / profile-id race may land after UI flips to active
         let { tokenRes, data } = await fetchToken();
-        if (
-          (!tokenRes.ok || !data?.configured || !data?.token || !data?.wsUrl) &&
-          (tokenRes.status === 403 ||
-            tokenRes.status === 404 ||
-            tokenRes.status === 409 ||
-            !data?.token)
-        ) {
-          await new Promise((r) => setTimeout(r, 700));
+        const shouldRetryToken = () =>
+          !tokenRes.ok ||
+          !data?.configured ||
+          !data?.token ||
+          !data?.wsUrl ||
+          tokenRes.status === 403 ||
+          tokenRes.status === 404 ||
+          tokenRes.status === 409;
+        for (const delayMs of [500, 900, 1400]) {
+          if (!shouldRetryToken()) break;
+          if (tokenRes.status === 409) break; // call ended — no point retrying
+          await new Promise((r) => setTimeout(r, delayMs));
           if (!isMounted || abortController.signal.aborted) return;
           ({ tokenRes, data } = await fetchToken());
         }
@@ -592,6 +596,18 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
             setLiveKitConnected(true);
             setConnectionStatusText(`${baseStatus} · Reconnected`);
             attachExistingRemoteTracks(room);
+          }
+        });
+
+        room.on(RoomEvent.ParticipantDisconnected, () => {
+          // Peer left the LiveKit room — close local call UI if still active
+          if (!isMounted) return;
+          if (room.remoteParticipants.size === 0) {
+            try {
+              endCall();
+            } catch (e) {
+              console.warn('[LiveKit] peer leave → endCall notice', e);
+            }
           }
         });
 

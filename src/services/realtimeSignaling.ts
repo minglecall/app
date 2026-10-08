@@ -177,6 +177,7 @@ export class RealtimeSignaling {
       type === 'call:ended'
     ) {
       pushTarget(payload.callerId);
+      pushTarget(payload.receiverId);
     }
     if (type === 'call:initiate' || type === 'call:incoming' || type === 'call:ringing') {
       pushTarget(payload.receiverId);
