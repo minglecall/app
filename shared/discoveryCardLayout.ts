@@ -83,6 +83,7 @@ export type DiscoveryImagePosition = 'center' | 'top' | 'bottom';
 
 export const OVERLAY_BOUNDS = { min: 0, max: 100, default: 70 } as const;
 export const IMAGE_SCALE_BOUNDS = { min: 100, max: 140, default: 100 } as const;
+export const COUNTRY_MAX_LETTERS_BOUNDS = { min: 4, max: 40, default: 12 } as const;
 
 export interface DiscoveryCardWidgetConfig {
   id: DiscoveryCardWidgetId;
@@ -127,6 +128,10 @@ export interface DiscoveryCardLayout {
   overlayStrength: number;
   /** Photo zoom percent 100–140. */
   imageScale: number;
+  /** Truncate long country names instead of wrapping to the next line. */
+  countryTruncate: boolean;
+  /** Max letters shown when countryTruncate is on (then …). */
+  countryMaxLetters: number;
 }
 
 export const SLOT_LABELS: Record<DiscoveryCardSlotId, string> = {
@@ -198,6 +203,8 @@ export const DEFAULT_DISCOVERY_CARD_LAYOUT: DiscoveryCardLayout = {
   imagePosition: 'center',
   overlayStrength: OVERLAY_BOUNDS.default,
   imageScale: IMAGE_SCALE_BOUNDS.default,
+  countryTruncate: true,
+  countryMaxLetters: COUNTRY_MAX_LETTERS_BOUNDS.default,
 };
 
 function coerceFlagSize(v: unknown): DiscoveryFlagSize {
@@ -355,7 +362,27 @@ export function parseDiscoveryCardLayout(raw: unknown): DiscoveryCardLayout {
       IMAGE_SCALE_BOUNDS.max,
       IMAGE_SCALE_BOUNDS.default
     ),
+    countryTruncate: obj.countryTruncate === undefined ? true : Boolean(obj.countryTruncate),
+    countryMaxLetters: clampInt(
+      obj.countryMaxLetters,
+      COUNTRY_MAX_LETTERS_BOUNDS.min,
+      COUNTRY_MAX_LETTERS_BOUNDS.max,
+      COUNTRY_MAX_LETTERS_BOUNDS.default
+    ),
   };
+}
+
+/** Truncate country label by letter count when enabled. */
+export function formatDiscoveryCountryName(
+  name: string,
+  truncate: boolean,
+  maxLetters: number
+): string {
+  const text = (name || '').trim();
+  if (!truncate || !text) return text;
+  const max = clampInt(maxLetters, COUNTRY_MAX_LETTERS_BOUNDS.min, COUNTRY_MAX_LETTERS_BOUNDS.max, COUNTRY_MAX_LETTERS_BOUNDS.default);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max).trimEnd()}…`;
 }
 
 export interface SlotConflict {

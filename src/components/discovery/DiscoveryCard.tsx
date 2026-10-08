@@ -13,6 +13,7 @@ import {
   DiscoveryCardWidgetConfig,
   DiscoveryCardWidgetId,
   groupWidgetsBySlot,
+  formatDiscoveryCountryName,
   parseDiscoveryCardLayout,
   splitSlotIntoLines,
   widgetPaddingStyle,
@@ -168,13 +169,30 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           />
         );
 
-      case 'country':
+      case 'country': {
+        const displayCountry = formatDiscoveryCountryName(
+          countryName,
+          layout.countryTruncate,
+          layout.countryMaxLetters
+        );
         return wrapPad(
           w,
-          <span className="text-white/90 font-medium truncate drop-shadow-sm" style={{ fontSize: layout.metaFontPx }}>
-            {countryName}
+          <span
+            title={countryName}
+            className={`text-white/90 font-medium drop-shadow-sm whitespace-nowrap ${
+              layout.countryTruncate ? 'truncate max-w-full' : ''
+            }`}
+            style={{
+              fontSize: layout.metaFontPx,
+              ...(layout.countryTruncate
+                ? { maxWidth: `${Math.max(4, layout.countryMaxLetters)}ch` }
+                : {}),
+            }}
+          >
+            {displayCountry}
           </span>
         );
+      }
 
       case 'callButton': {
         const btnStyle: React.CSSProperties = {

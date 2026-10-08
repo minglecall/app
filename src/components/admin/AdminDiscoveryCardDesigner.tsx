@@ -20,6 +20,7 @@ import {
   PAD_BOUNDS,
   OVERLAY_BOUNDS,
   IMAGE_SCALE_BOUNDS,
+  COUNTRY_MAX_LETTERS_BOUNDS,
   SLOT_LABELS,
   H_ALIGN_LABELS,
   DiscoveryHAlign,
@@ -539,6 +540,47 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                   <option value="sm">sm</option>
                   <option value="md">md</option>
                 </select>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer sm:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={draft.countryTruncate}
+                  onChange={(e) =>
+                    setDraft((prev) =>
+                      parseDiscoveryCardLayout({ ...prev, countryTruncate: e.target.checked })
+                    )
+                  }
+                  className="accent-pink-500 w-4 h-4"
+                />
+                <span className="font-semibold text-slate-200">
+                  Truncate long country names (no wrap to next line)
+                </span>
+              </label>
+              <label className={`space-y-1 sm:col-span-2 ${draft.countryTruncate ? '' : 'opacity-40'}`}>
+                <span className="text-slate-400 font-semibold flex justify-between">
+                  <span>Country max letters</span>
+                  <span className="font-mono text-slate-300">{draft.countryMaxLetters}</span>
+                </span>
+                <input
+                  type="range"
+                  min={COUNTRY_MAX_LETTERS_BOUNDS.min}
+                  max={COUNTRY_MAX_LETTERS_BOUNDS.max}
+                  value={draft.countryMaxLetters}
+                  disabled={!draft.countryTruncate}
+                  onChange={(e) =>
+                    setDraft((prev) =>
+                      parseDiscoveryCardLayout({
+                        ...prev,
+                        countryMaxLetters: Number(e.target.value),
+                      })
+                    )
+                  }
+                  className="w-full accent-pink-500"
+                />
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {COUNTRY_MAX_LETTERS_BOUNDS.min}–{COUNTRY_MAX_LETTERS_BOUNDS.max} letters, then …
+                </span>
               </label>
 
               <label className="space-y-1">
