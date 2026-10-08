@@ -491,6 +491,20 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                 );
               })}
 
+              <label className="flex items-center gap-2 cursor-pointer sm:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={draft.statusBadgePing}
+                  onChange={(e) =>
+                    setDraft((prev) =>
+                      parseDiscoveryCardLayout({ ...prev, statusBadgePing: e.target.checked })
+                    )
+                  }
+                  className="accent-pink-500 w-4 h-4"
+                />
+                <span className="text-slate-300 font-semibold">Online badge status dot</span>
+              </label>
+
               <label className="space-y-1">
                 <span className="text-slate-400 font-semibold">Flag size</span>
                 <select

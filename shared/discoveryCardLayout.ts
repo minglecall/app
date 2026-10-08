@@ -142,6 +142,8 @@ export interface DiscoveryCardLayout {
   nameFontPx: number;
   metaFontPx: number;
   badgeFontPx: number;
+  /** Show the Online status badge dot (with pulse). Off = hide the dot entirely. */
+  statusBadgePing: boolean;
   verifiedIconPx: number;
   flagSize: DiscoveryFlagSize;
   callButtonPx: number;
@@ -216,6 +218,7 @@ export const DEFAULT_DISCOVERY_CARD_LAYOUT: DiscoveryCardLayout = {
   nameFontPx: SIZE_BOUNDS.nameFontPx.default,
   metaFontPx: SIZE_BOUNDS.metaFontPx.default,
   badgeFontPx: SIZE_BOUNDS.badgeFontPx.default,
+  statusBadgePing: true,
   verifiedIconPx: SIZE_BOUNDS.verifiedIconPx.default,
   flagSize: 'sm',
   callButtonPx: SIZE_BOUNDS.callButtonPx.default,
@@ -399,6 +402,7 @@ export function parseDiscoveryCardLayout(raw: unknown): DiscoveryCardLayout {
     nameFontPx: clampInt(obj.nameFontPx, SIZE_BOUNDS.nameFontPx.min, SIZE_BOUNDS.nameFontPx.max, SIZE_BOUNDS.nameFontPx.default),
     metaFontPx: clampInt(obj.metaFontPx, SIZE_BOUNDS.metaFontPx.min, SIZE_BOUNDS.metaFontPx.max, SIZE_BOUNDS.metaFontPx.default),
     badgeFontPx: clampInt(obj.badgeFontPx, SIZE_BOUNDS.badgeFontPx.min, SIZE_BOUNDS.badgeFontPx.max, SIZE_BOUNDS.badgeFontPx.default),
+    statusBadgePing: obj.statusBadgePing === undefined ? true : Boolean(obj.statusBadgePing),
     verifiedIconPx: clampInt(
       obj.verifiedIconPx,
       SIZE_BOUNDS.verifiedIconPx.min,

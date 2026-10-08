@@ -102,10 +102,12 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               className={`${STATUS_BADGE_CLASS} !bg-emerald-500 !text-white !border-emerald-200/70`}
               style={{ fontSize: layout.badgeFontPx }}
             >
-              <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/80" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-white shadow-sm" />
-              </span>
+              {layout.statusBadgePing ? (
+                <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/80" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-white shadow-sm" />
+                </span>
+              ) : null}
               Online
             </Badge>
           );
