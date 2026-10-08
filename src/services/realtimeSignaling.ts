@@ -2,7 +2,7 @@
  * Supabase Realtime signaling — replaces Express WebSocket /ws on Vercel.
  * Channel naming:
  *  - presence: global "app-presence"
- *  - per-user inbox: "user:{profileId}"
+ *  - per-user inbox: "user:{profileId}" and optionally "user:{authId}"
  *
  * Call reliability: user inbox alone is enough to mark connected. Presence is
  * best-effort. Callee also polls GET /api/calls/incoming when broadcast drops.
@@ -51,8 +51,11 @@ async function removeChannelSafe(channel: RealtimeChannel | null) {
 
 export class RealtimeSignaling {
   private userChannel: RealtimeChannel | null = null;
+  /** Extra inboxes when profile.id !== auth.users.id (signals may target either). */
+  private aliasChannels: RealtimeChannel[] = [];
   private presenceChannel: RealtimeChannel | null = null;
   private profileId: string | null = null;
+  private authId: string | null = null;
   private handler: SignalHandler | null = null;
   private connected = false;
   private connectGeneration = 0;
@@ -61,11 +64,17 @@ export class RealtimeSignaling {
     return this.connected;
   }
 
-  async connect(profileId: string, accessToken: string, onMessage: SignalHandler): Promise<boolean> {
+  async connect(
+    profileId: string,
+    accessToken: string,
+    onMessage: SignalHandler,
+    authId?: string | null
+  ): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
     const generation = ++this.connectGeneration;
     this.handler = onMessage;
     this.profileId = profileId;
+    this.authId = String(authId || '').trim() || null;
 
     // Prefer Realtime JWT auth — do NOT setSession with access_token as refresh_token
     // (that can corrupt/refresh-fail the client session and drop Realtime).
@@ -82,13 +91,31 @@ export class RealtimeSignaling {
     await this.disconnectAsync();
     if (generation !== this.connectGeneration) return false;
 
+    const inboxIds = Array.from(
+      new Set([profileId, this.authId].map((v) => String(v || '').trim()).filter(Boolean))
+    );
+
     const trySubscribePair = async (): Promise<{ userOk: boolean; presenceOk: boolean }> => {
-      const userChannel = supabase.channel(`user:${profileId}`, {
+      const bindBroadcast = (ch: RealtimeChannel) => {
+        ch.on('broadcast', { event: 'signal' }, ({ payload }) => {
+          if (payload && this.handler) this.handler(payload);
+        });
+      };
+
+      const primaryId = inboxIds[0];
+      const userChannel = supabase.channel(`user:${primaryId}`, {
         config: { broadcast: { self: false } },
       });
-      userChannel.on('broadcast', { event: 'signal' }, ({ payload }) => {
-        if (payload && this.handler) this.handler(payload);
-      });
+      bindBroadcast(userChannel);
+
+      const aliases: RealtimeChannel[] = [];
+      for (const id of inboxIds.slice(1)) {
+        const ch = supabase.channel(`user:${id}`, {
+          config: { broadcast: { self: false } },
+        });
+        bindBroadcast(ch);
+        aliases.push(ch);
+      }
 
       const presenceChannel = supabase.channel('app-presence', {
         config: { presence: { key: profileId } },
@@ -105,13 +132,16 @@ export class RealtimeSignaling {
         });
 
       this.userChannel = userChannel;
+      this.aliasChannels = aliases;
       this.presenceChannel = presenceChannel;
 
-      const [userOk, presenceOk] = await Promise.all([
+      const [userOk, ...aliasResults] = await Promise.all([
         waitForSubscribe(userChannel, 12000),
-        waitForSubscribe(presenceChannel, 12000),
+        ...aliases.map((ch) => waitForSubscribe(ch, 12000)),
       ]);
-      return { userOk, presenceOk };
+      const presenceOk = await waitForSubscribe(presenceChannel, 12000);
+      const anyInbox = userOk || aliasResults.some(Boolean);
+      return { userOk: anyInbox, presenceOk };
     };
 
     let { userOk, presenceOk } = await trySubscribePair();
@@ -208,7 +238,7 @@ export class RealtimeSignaling {
 
         let delivered = false;
         for (const targetId of targetIds) {
-          // Must use the same topic the peer subscribed to in connect(): user:{profileId}
+          // Must use the same topic the peer subscribed to in connect(): user:{profileId|authId}
           const targetChannel = supabase.channel(`user:${targetId}`, {
             config: { broadcast: { self: false, ack: true } },
           });
@@ -283,11 +313,16 @@ export class RealtimeSignaling {
   async disconnectAsync() {
     const presence = this.presenceChannel;
     const user = this.userChannel;
+    const aliases = this.aliasChannels.slice();
     this.presenceChannel = null;
     this.userChannel = null;
+    this.aliasChannels = [];
     this.connected = false;
     await removeChannelSafe(presence);
     await removeChannelSafe(user);
+    for (const ch of aliases) {
+      await removeChannelSafe(ch);
+    }
   }
 }
 

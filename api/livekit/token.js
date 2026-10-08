@@ -139,6 +139,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function collectMyIds(auth) {
+  return new Set(
+    [auth.profileId, auth.userId, auth.profile && auth.profile.auth_id]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+  );
+}
+
 /**
  * True if the authenticated user is a participant on this call_logs row.
  * Handles profile.id vs auth.users.id mismatches (common after Vercel/Auth linking).
@@ -150,21 +158,21 @@ async function isCallParticipant(client, callRow, auth) {
     .filter(Boolean);
   if (!participantIds.length) return false;
 
-  const myIds = new Set(
-    [auth.profileId, auth.userId, auth.profile && auth.profile.auth_id]
-      .map((v) => String(v || '').trim())
-      .filter(Boolean)
-  );
-
+  const myIds = collectMyIds(auth);
   if (participantIds.some((id) => myIds.has(id))) return true;
 
   // Map stored participant ids → their auth_id / email and compare to session
   try {
-    const { data: rows } = await client
+    const { data: byId } = await client
       .from('profiles')
       .select('id, auth_id, email')
       .in('id', participantIds);
-    for (const row of rows || []) {
+    const { data: byAuth } = await client
+      .from('profiles')
+      .select('id, auth_id, email')
+      .in('auth_id', participantIds);
+    const rows = [...(byId || []), ...(byAuth || [])];
+    for (const row of rows) {
       const rid = String((row && row.id) || '').trim();
       const raid = String((row && row.auth_id) || '').trim();
       const remail = String((row && row.email) || '')
@@ -193,6 +201,47 @@ async function loadCallRow(client, roomName) {
   return data || null;
 }
 
+/** Last-resort: open call involving this user (handles sync race / id alias). */
+async function findOpenCallForUser(client, auth, roomName) {
+  const myIds = Array.from(collectMyIds(auth));
+  if (!myIds.length) return null;
+  const open = ['ringing', 'active', 'accepted', 'in_call', 'connecting'];
+  try {
+    // Prefer exact room id among user's open calls
+    if (roomName) {
+      const exact = await loadCallRow(client, roomName);
+      if (exact && open.includes(String(exact.status || '').toLowerCase())) {
+        if (await isCallParticipant(client, exact, auth)) return exact;
+      }
+    }
+    const orFilter = myIds
+      .flatMap((id) => [`caller_id.eq.${id}`, `receiver_id.eq.${id}`, `host_id.eq.${id}`])
+      .join(',');
+    const { data, error } = await client
+      .from('call_logs')
+      .select('id, caller_id, receiver_id, host_id, status, updated_at')
+      .or(orFilter)
+      .in('status', open)
+      .order('updated_at', { ascending: false })
+      .limit(5);
+    if (error) {
+      console.warn('[api/livekit/token] open-call lookup', error.message);
+      return null;
+    }
+    const rows = data || [];
+    if (roomName) {
+      const match = rows.find((r) => String(r.id) === roomName);
+      if (match) return match;
+    }
+    // Only auto-pick when exactly one open call (sync race before row id is queryable)
+    if (rows.length === 1) return rows[0];
+    return null;
+  } catch (e) {
+    console.warn('[api/livekit/token] findOpenCallForUser', e && e.message);
+    return null;
+  }
+}
+
 module.exports = async function handler(req, res) {
   try {
     if (req.method === 'OPTIONS') {
@@ -213,7 +262,7 @@ module.exports = async function handler(req, res) {
     }
 
     const body = await readJsonBody(req);
-    const roomName = String(body.roomName || '').trim();
+    let roomName = String(body.roomName || '').trim();
     const identity = auth.profileId;
     const isAdmin =
       auth.role === 'admin' ||
@@ -238,16 +287,20 @@ module.exports = async function handler(req, res) {
         callRow = await loadCallRow(auth.client, roomName);
         // Accept / sync race: row may land a few hundred ms after UI flips to active
         if (!callRow) {
-          await sleep(450);
+          await sleep(400);
           callRow = await loadCallRow(auth.client, roomName);
         }
         if (!callRow) {
-          await sleep(700);
-          callRow = await loadCallRow(auth.client, roomName);
+          await sleep(800);
+          callRow = await findOpenCallForUser(auth.client, auth, roomName);
         }
 
         if (callRow) {
           authorized = await isCallParticipant(auth.client, callRow, auth);
+          // Prefer canonical call id from DB for the LiveKit room name
+          if (authorized && callRow.id) {
+            roomName = String(callRow.id);
+          }
           const st = String(callRow.status || '').toLowerCase();
           const openStatuses = new Set([
             'ringing',
@@ -286,8 +339,15 @@ module.exports = async function handler(req, res) {
                 callerId: callRow.caller_id,
                 receiverId: callRow.receiver_id,
                 hostId: callRow.host_id,
+                status: callRow.status,
               }
-            : { roomName, profileId: identity, reason: 'call_row_missing' },
+            : {
+                roomName,
+                profileId: identity,
+                authUserId: auth.userId,
+                reason: 'call_row_missing',
+                hint: 'POST /api/calls/sync must succeed before LiveKit token',
+              },
         });
       }
     }

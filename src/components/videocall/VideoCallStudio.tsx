@@ -440,6 +440,40 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
 
       try {
         setIsPreviewOnly(false);
+        setConnectionStatusText('Registering call room…');
+
+        // Ensure call_logs row exists before token (Vercel membership check)
+        const ensureCallSynced = async () => {
+          try {
+            const syncRes = await authFetch('/api/calls/sync', {
+              method: 'POST',
+              body: JSON.stringify({
+                callId: activeCall!.id,
+                callerId: activeCall!.callerId,
+                receiverId: activeCall!.receiverId,
+                status: 'active',
+                startTime: new Date(activeCall!.startTime || Date.now()).toISOString(),
+              }),
+              signal: abortController.signal,
+            });
+            return syncRes.ok;
+          } catch {
+            return false;
+          }
+        };
+        let syncedOk = await ensureCallSynced();
+        if (!syncedOk) {
+          await new Promise((r) => setTimeout(r, 600));
+          syncedOk = await ensureCallSynced();
+        }
+        if (!isMounted || abortController.signal.aborted) return;
+        if (!syncedOk) {
+          await enablePreviewOnly(
+            'Could not register this call on the server. Hang up and try again.'
+          );
+          return;
+        }
+
         setConnectionStatusText('Fetching LiveKit access token…');
 
         const fetchToken = async () => {
@@ -473,6 +507,9 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
         for (const delayMs of [500, 900, 1400]) {
           if (!shouldRetryToken()) break;
           if (tokenRes.status === 409) break; // call ended — no point retrying
+          if (tokenRes.status === 403 || data?.code === 'NOT_CALL_MEMBER') {
+            await ensureCallSynced();
+          }
           await new Promise((r) => setTimeout(r, delayMs));
           if (!isMounted || abortController.signal.aborted) return;
           ({ tokenRes, data } = await fetchToken());
@@ -481,8 +518,12 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
         if (!isMounted || abortController.signal.aborted) return;
 
         if (!tokenRes.ok) {
+          const detailReason =
+            data?.detail?.reason === 'call_row_missing'
+              ? ' Call was not saved — check /api/calls/sync on the server.'
+              : '';
           const msg =
-            data?.error ||
+            (typeof data?.error === 'string' ? data.error : null) ||
             (tokenRes.status === 403
               ? 'Not authorized for this call room'
               : tokenRes.status === 404
@@ -490,7 +531,7 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
               : tokenRes.status === 409
               ? 'This call has already ended'
               : 'Failed to get LiveKit token');
-          await enablePreviewOnly(msg);
+          await enablePreviewOnly(msg + detailReason);
           return;
         }
 
@@ -1625,9 +1666,9 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
     const selfIds = new Set(
       [currentUser.id, currentUser.authId].map((id) => String(id || '').trim()).filter(Boolean)
     );
-    const isReceiver =
-      selfIds.has(String(activeCall.receiverId || '')) &&
-      !selfIds.has(String(activeCall.callerId || ''));
+    const callerId = String(activeCall.callerId || '').trim();
+    // Incoming Accept UI whenever we did not place the call (covers profile↔auth id aliases)
+    const isReceiver = !selfIds.has(callerId);
 
     return (
       <div

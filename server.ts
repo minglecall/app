@@ -2413,16 +2413,41 @@ async function startServer(): Promise<express.Express> {
       ]);
 
       const profileId = String((req as any).profileId || (req as any).profile?.id || '');
+      const authUserId = String((req as any).user?.id || '');
       const memCall = activeCalls.get(String(callId));
-      const resolvedCallerId = String(callerId || memCall?.callerId || '');
-      const resolvedReceiverId = String(receiverId || memCall?.receiverId || '');
+      const rawCaller = String(callerId || memCall?.callerId || '');
+      const rawReceiver = String(receiverId || memCall?.receiverId || '');
+
+      // Map auth.users.id aliases → profiles.id (call_logs FK)
+      const resolvePid = async (raw: string): Promise<string> => {
+        const id = String(raw || '').trim();
+        if (!id || !isSupabaseAdminConfigured()) return id;
+        const client = getSupabaseAdmin();
+        if (!client) return id;
+        const { data: byId } = await client.from('profiles').select('id').eq('id', id).maybeSingle();
+        if (byId?.id) return String(byId.id);
+        const { data: byAuth } = await client.from('profiles').select('id').eq('auth_id', id).maybeSingle();
+        if (byAuth?.id) return String(byAuth.id);
+        return '';
+      };
+
+      let resolvedCallerId = await resolvePid(rawCaller);
+      let resolvedReceiverId = await resolvePid(rawReceiver);
+      if (rawCaller === profileId || rawCaller === authUserId || (!rawCaller && profileId)) {
+        resolvedCallerId = profileId || resolvedCallerId;
+      }
+      if (rawReceiver === profileId || rawReceiver === authUserId) {
+        resolvedReceiverId = profileId || resolvedReceiverId;
+      }
 
       if (
         profileId &&
         resolvedCallerId &&
         resolvedReceiverId &&
         profileId !== resolvedCallerId &&
-        profileId !== resolvedReceiverId
+        profileId !== resolvedReceiverId &&
+        authUserId !== resolvedCallerId &&
+        authUserId !== resolvedReceiverId
       ) {
         const role = (req as any).profile?.role;
         if (role !== 'admin') {
@@ -2461,6 +2486,10 @@ async function startServer(): Promise<express.Express> {
             );
             if (error) {
               console.warn('[api/calls/sync] busy upsert', error.message);
+              return res.status(500).json({
+                success: false,
+                error: { message: 'Call sync failed', code: 'CALL_SYNC_FAILED', detail: error.message },
+              });
             }
           }
         }
@@ -2488,7 +2517,8 @@ async function startServer(): Promise<express.Express> {
           if (cu) cu.onlineStatus = 'busy';
           if (isSupabaseAdminConfigured()) updateUserStatusAdmin(resolvedCallerId, 'busy').catch(() => {});
         }
-        if (resolvedReceiverId) {
+        // Ringing: keep callee online until Accept UI arrives (avoids busy-without-ring on Vercel)
+        if (resolvedReceiverId && callStatus !== 'ringing') {
           presenceMap.set(resolvedReceiverId, 'busy');
           presenceLastKnownStatus.set(resolvedReceiverId, 'busy');
           const ru = serverUsers.get(resolvedReceiverId);

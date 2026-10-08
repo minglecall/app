@@ -1396,28 +1396,58 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       .catch(() => {});
   }, [activeCall?.id, activeCall?.status]);
 
-  /** True if id matches this session's profile id or auth id. */
-  const isSelfId = useCallback((id?: string | null) => {
-    const sid = String(id || '').trim();
-    if (!sid) return false;
+  /** Collect every id alias for this session (profile id ↔ auth.users.id). */
+  const collectSelfIds = useCallback((): Set<string> => {
     const me = String(currentUserIdRef.current || '').trim();
-    const meAuth = String(
-      supabaseAuthUserIdRef.current ||
-        usersRef.current.find((u) => u.id === me)?.authId ||
-        ''
-    ).trim();
-    return sid === me || (Boolean(meAuth) && sid === meAuth);
+    const meAuth = String(supabaseAuthUserIdRef.current || '').trim();
+    const ids = new Set<string>();
+    if (me) ids.add(me);
+    if (meAuth) ids.add(meAuth);
+    const row = usersRef.current.find(
+      (u) =>
+        u.id === me ||
+        u.authId === me ||
+        (meAuth && (u.id === meAuth || u.authId === meAuth))
+    );
+    if (row?.id) ids.add(String(row.id));
+    if (row?.authId) ids.add(String(row.authId));
+    return ids;
   }, []);
 
+  /** True if id matches this session's profile id or auth id (either direction). */
+  const isSelfId = useCallback(
+    (id?: string | null) => {
+      const sid = String(id || '').trim();
+      if (!sid) return false;
+      return collectSelfIds().has(sid);
+    },
+    [collectSelfIds]
+  );
+
   const applyIncomingRing = useCallback(
-    (opts: { callId: string; callerId: string; receiverId: string }) => {
+    (opts: {
+      callId: string;
+      callerId: string;
+      receiverId: string;
+      /** When true, server/poll already verified we are the callee — do not drop on id alias mismatch. */
+      trusted?: boolean;
+    }) => {
       const callId = String(opts.callId || '').trim();
       const callerId = String(opts.callerId || '').trim();
-      const receiverId = String(opts.receiverId || currentUserIdRef.current || '').trim();
+      let receiverId = String(opts.receiverId || currentUserIdRef.current || '').trim();
       if (!callId || !callerId) return;
+
+      const selfIds = collectSelfIds();
+      const amCaller = selfIds.has(callerId);
+      const amReceiver = selfIds.has(receiverId);
+
       // Never show incoming UI for a call we placed ourselves
-      if (isSelfId(callerId) && !isSelfId(receiverId)) return;
-      if (!isSelfId(receiverId)) return;
+      if (amCaller && !amReceiver) return;
+      if (!opts.trusted && !amReceiver) return;
+      // Trusted poll/API path: force canonical self id so Accept UI treats us as receiver
+      if (opts.trusted && !amReceiver) {
+        receiverId = String(currentUserIdRef.current || [...selfIds][0] || receiverId).trim();
+      }
 
       const cur = activeCallRef.current;
       if (cur && cur.status === 'active') return;
@@ -1436,7 +1466,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
       setUsers((prev) =>
         prev.map((u) =>
-          u.id === callerId || u.id === receiverId || u.authId === callerId || u.authId === receiverId
+          u.id === callerId ||
+          u.id === receiverId ||
+          u.authId === callerId ||
+          u.authId === receiverId ||
+          selfIds.has(u.id) ||
+          (u.authId ? selfIds.has(u.authId) : false)
             ? { ...u, onlineStatus: 'busy' as const }
             : u
         )
@@ -1447,7 +1482,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         'info'
       );
     },
-    [isSelfId]
+    [collectSelfIds]
   );
   const applyIncomingRingRef = useRef(applyIncomingRing);
   useEffect(() => {
@@ -1537,34 +1572,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // DB + HTTP fallback for incoming rings when Realtime broadcast is dropped (Vercel).
   useEffect(() => {
     if (!isLoggedIn || !currentUserId) return;
-    const meId = String(currentUserId);
-    const meAuth = String(supabaseAuthUserIdRef.current || '').trim();
-    const myIds = Array.from(new Set([meId, meAuth].filter(Boolean)));
     let cancelled = false;
+
+    const freshSelfIds = (): string[] => Array.from(collectSelfIds());
 
     const onCallLogRow = (row: Record<string, any>) => {
       const callId = String(row.id || '').trim();
       const callerId = String(row.caller_id || '').trim();
       const receiverId = String(row.receiver_id || row.host_id || '').trim();
+      const hostId = String(row.host_id || '').trim();
       const st = String(row.status || '').toLowerCase();
       if (!callId) return;
 
+      const myIds = freshSelfIds();
       const involvesMe =
-        myIds.includes(callerId) ||
-        myIds.includes(receiverId) ||
-        myIds.includes(String(row.host_id || '').trim());
+        myIds.includes(callerId) || myIds.includes(receiverId) || myIds.includes(hostId);
       if (!involvesMe) return;
 
       if (st === 'ringing') {
         // Only callee should open incoming UI
-        if (myIds.includes(receiverId) || myIds.includes(String(row.host_id || '').trim())) {
-          if (!myIds.includes(callerId)) {
-            applyIncomingRingRef.current({
-              callId,
-              callerId,
-              receiverId: receiverId || meId,
-            });
-          }
+        const amCallee = myIds.includes(receiverId) || myIds.includes(hostId);
+        const amCaller = myIds.includes(callerId);
+        if (amCallee && !amCaller) {
+          applyIncomingRingRef.current({
+            callId,
+            callerId,
+            receiverId: receiverId || currentUserIdRef.current || '',
+            trusted: true,
+          });
         }
         return;
       }
@@ -1574,19 +1609,87 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     };
 
+    const applyRingFromRow = (top: {
+      callId?: string;
+      id?: string;
+      callerId?: string;
+      receiverId?: string;
+    }) => {
+      const callId = String(top.callId || top.id || '').trim();
+      const callerId = String(top.callerId || '').trim();
+      if (!callId || !callerId) return;
+      applyIncomingRingRef.current({
+        callId,
+        callerId,
+        receiverId: String(top.receiverId || currentUserIdRef.current || ''),
+        trusted: true,
+      });
+    };
+
     const pollIncoming = async () => {
       if (cancelled || isResettingRef.current) return;
       const cur = activeCallRef.current;
       if (cur && cur.status === 'active') return;
+      const myIds = freshSelfIds();
+      const meId = String(currentUserIdRef.current || '').trim();
+
       try {
         const res = await authFetch('/api/calls/incoming');
-        if (!res.ok || cancelled) return;
-        const json = await res.json().catch(() => null);
-        const rows = Array.isArray(json?.data) ? json.data : [];
-        if (!rows.length) {
-          // Ringing cancelled remotely — clear local ringing UI
-          if (cur && cur.status === 'ringing' && myIds.includes(String(cur.receiverId || ''))) {
-            // Confirm via call_logs before closing
+        if (cancelled) return;
+        if (res.ok) {
+          const json = await res.json().catch(() => null);
+          const rows = Array.isArray(json?.data) ? json.data : [];
+          if (rows.length) {
+            applyRingFromRow(rows[0]);
+            return;
+          }
+        }
+
+        // Client DB fallback — recovers when API is slow or id aliases differ
+        if (isSupabaseConfigured() && myIds.length) {
+          const orFilter = myIds
+            .flatMap((id) => [`receiver_id.eq.${id}`, `host_id.eq.${id}`])
+            .join(',');
+          const { data, error } = await supabase
+            .from('call_logs')
+            .select(
+              'id, caller_id, receiver_id, host_id, status, started_at, start_time, updated_at'
+            )
+            .eq('status', 'ringing')
+            .or(orFilter)
+            .order('started_at', { ascending: false })
+            .limit(5);
+          if (!error && data?.length) {
+            const now = Date.now();
+            const fresh = data.filter((row) => {
+              const startedMs =
+                Date.parse(
+                  String(
+                    (row as any).started_at ||
+                      (row as any).start_time ||
+                      (row as any).updated_at ||
+                      ''
+                  )
+                ) || 0;
+              const ageMs = startedMs ? now - startedMs : 0;
+              return ageMs >= 0 && ageMs < 75_000;
+            });
+            if (fresh.length) {
+              const row = fresh[0] as any;
+              applyRingFromRow({
+                callId: String(row.id),
+                callerId: String(row.caller_id || ''),
+                receiverId: String(row.receiver_id || row.host_id || meId),
+              });
+              return;
+            }
+          }
+        }
+
+        // Ringing cancelled remotely — clear local ringing UI
+        if (cur && cur.status === 'ringing') {
+          const curReceiver = String(cur.receiverId || '');
+          if (myIds.includes(curReceiver) || isSelfIdRef.current(curReceiver)) {
             if (isSupabaseConfigured()) {
               const { data } = await supabase
                 .from('call_logs')
@@ -1599,21 +1702,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               }
             }
           }
-          return;
         }
-        const top = rows[0];
-        applyIncomingRing({
-          callId: String(top.callId || top.id || ''),
-          callerId: String(top.callerId || ''),
-          receiverId: String(top.receiverId || meId),
-        });
       } catch (e) {
         console.warn('[calls/incoming] poll failed', e);
       }
     };
 
+    // If presence already says busy but Accept UI never opened, force a poll now
+    const recoverBusyWithoutRing = () => {
+      if (cancelled || activeCallRef.current) return;
+      const me = usersRef.current.find((u) => {
+        const ids = freshSelfIds();
+        return ids.includes(u.id) || (u.authId ? ids.includes(u.authId) : false);
+      });
+      if (me?.onlineStatus === 'busy' || me?.onlineStatus === 'in_call') {
+        void pollIncoming();
+      }
+    };
+
     void pollIncoming();
-    const pollTimer = setInterval(() => void pollIncoming(), 1500);
+    const pollTimer = setInterval(() => void pollIncoming(), 800);
+    const recoverTimer = setInterval(() => recoverBusyWithoutRing(), 1200);
 
     const channels: ReturnType<typeof supabase.channel>[] = [];
     if (isSupabaseConfigured()) {
@@ -1640,7 +1749,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           .subscribe();
         channels.push(ch);
       };
-      for (const id of myIds) {
+      for (const id of freshSelfIds()) {
         attach('receiver_id', id);
         attach('caller_id', id);
         attach('host_id', id);
@@ -1650,11 +1759,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return () => {
       cancelled = true;
       clearInterval(pollTimer);
+      clearInterval(recoverTimer);
       for (const ch of channels) {
         void supabase.removeChannel(ch);
       }
     };
-  }, [isLoggedIn, currentUserId, applyIncomingRing, CALL_TERMINAL_STATUSES]);
+  }, [
+    isLoggedIn,
+    currentUserId,
+    currentUser?.authId,
+    collectSelfIds,
+    CALL_TERMINAL_STATUSES,
+  ]);
 
   // While in a call (ringing or active), poll call_logs so peer hangup closes UI even if Realtime drops
   useEffect(() => {
@@ -3090,7 +3206,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         void (async () => {
           const accessToken = accessTokenRef.current || (await getAccessToken());
           if (!accessToken || isCancelled) return;
-          const ok = await rt.connect(currentUserIdRef.current, accessToken, (data) => {
+          const ok = await rt.connect(
+            currentUserIdRef.current,
+            accessToken,
+            (data) => {
             if (isCancelled || isResettingRef.current) return;
             try {
               if (data.type === 'presence:sync' && data.state) {
@@ -3128,7 +3247,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             } catch (e) {
               console.warn('[Realtime] signal handler error', e);
             }
-          });
+          },
+            supabaseAuthUserIdRef.current ||
+              usersRef.current.find((u) => u.id === currentUserIdRef.current)?.authId ||
+              null
+          );
           // Keep retrying — Vercel has no /ws; Realtime is optional for rings (DB poll works)
           if (!ok && !isCancelled && retryAttempt < 12) {
             setTimeout(() => connect(retryAttempt + 1), Math.min(8000, 600 * (retryAttempt + 1)));
@@ -4722,9 +4845,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     const markBusyLocal = () => {
+      // Only mark caller busy locally while ringing — callee flips busy when Accept UI opens
       setUsers((prev) =>
         prev.map((u) =>
-          u.id === currentUser.id || u.id === receiverId
+          u.id === currentUser.id || u.authId === currentUser.id
             ? { ...u, onlineStatus: 'busy' as const }
             : u
         )
@@ -4774,36 +4898,36 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // Persist ringing FIRST so callee postgres_changes / ring poll can recover
         // even when Realtime broadcast is dropped.
         markBusyLocal();
+        // LiveKit membership requires call_logs row — never proceed without successful sync
         const synced = await persistBusy();
+        if (!synced) {
+          clearRingTimeout();
+          activeCallRef.current = null;
+          setActiveCall(null);
+          showToast(
+            'Call Failed',
+            'Could not save the call on the server. Please try again.',
+            'error'
+          );
+          return;
+        }
         let sent = false;
         if (realtimeRef.current?.isConnected()) {
           sent = (await realtimeRef.current.send(initiatePayload)) === true;
         } else if (!useRealtimeMode) {
           sent = (await signalSendAsync(initiatePayload)) === true;
         } else {
-          // Kick Realtime reconnect in background; ring already in DB for callee poll
           try {
             wsConnectRef.current();
           } catch {
             /* ignore */
           }
         }
-        if (!synced && !sent) {
-          clearRingTimeout();
-          activeCallRef.current = null;
-          setActiveCall(null);
-          showToast(
-            'Call Failed',
-            'Could not reach the other user. Ask them to open the app and try again.',
-            'error'
-          );
-          return;
-        }
         showToast(
           'Calling... 📞',
-          synced && !sent
-            ? `Ringing ${receiver.name} (secure channel)…`
-            : `Ringing ${receiver.name}. Waiting for call acceptance...`,
+          sent
+            ? `Ringing ${receiver.name}. Waiting for call acceptance...`
+            : `Ringing ${receiver.name} (secure channel)…`,
           'info'
         );
         // Auto-miss if host never accepts (Realtime/Vercel has no server ring reaper)
@@ -4926,9 +5050,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     void (async () => {
-      // Persist active BEFORE LiveKit token so membership checks succeed
+      // Persist active BEFORE LiveKit token — membership requires call_logs row
+      let synced = false;
       try {
-        await authFetch('/api/calls/sync', {
+        const syncRes = await authFetch('/api/calls/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -4942,8 +5067,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             hostName: receiverUser?.name || currentUser.name,
           }),
         });
-      } catch {
-        /* still proceed — ringing row may already authorize token */
+        synced = syncRes.ok;
+        if (!synced) {
+          const errBody = await syncRes.json().catch(() => null);
+          console.warn('[acceptCall] sync failed', syncRes.status, errBody);
+        }
+      } catch (e) {
+        console.warn('[acceptCall] sync exception', e);
+      }
+
+      if (!synced) {
+        showToast(
+          'Accept failed',
+          'Could not register this call on the server. Please try accepting again.',
+          'error'
+        );
+        return;
       }
 
       // Flip local UI to active → VideoCallStudio connects LiveKit

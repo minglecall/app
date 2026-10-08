@@ -172,6 +172,21 @@ async function setProfilesOnlineStatus(client, userIds, status) {
     .in('id', ids);
 }
 
+/** Map auth.users.id or profile id → canonical profiles.id (required for call_logs FK). */
+async function resolveProfileId(client, raw) {
+  const id = String(raw || '').trim();
+  if (!id || !client) return '';
+  {
+    const { data } = await client.from('profiles').select('id').eq('id', id).maybeSingle();
+    if (data && data.id) return String(data.id);
+  }
+  {
+    const { data } = await client.from('profiles').select('id').eq('auth_id', id).maybeSingle();
+    if (data && data.id) return String(data.id);
+  }
+  return '';
+}
+
 async function handlePresence(path, req, res) {
   if (path !== 'presence' && path !== 'presence/index' && path !== 'presence/heartbeat') {
     return null;
@@ -541,15 +556,45 @@ async function handleCalls(path, req, res) {
   if (path === 'calls/sync' && req.method === 'POST') {
     const body = await readJsonBody(req);
     const callId = String((body && (body.callId || body.id)) || randomUUID());
-    // Canonicalize auth.users.id → profiles.id so LiveKit membership matches token identity
-    const canonicalizePartyId = (raw) => {
-      const id = String(raw || '').trim();
-      if (!id) return '';
-      if (id === String(auth.userId || '') && auth.profileId) return String(auth.profileId);
-      return id;
-    };
-    const callerId = canonicalizePartyId((body && body.callerId) || auth.profileId || '');
-    const receiverId = canonicalizePartyId((body && body.receiverId) || '');
+    const myProfileId = String(auth.profileId || '').trim();
+    const myAuthId = String(auth.userId || '').trim();
+    const rawCaller = String((body && body.callerId) || '').trim();
+    const rawReceiver = String((body && body.receiverId) || '').trim();
+    // Always store profiles.id (FK). Client may send auth.users.id aliases.
+    let callerId = await resolveProfileId(
+      auth.client,
+      rawCaller || myProfileId || myAuthId
+    );
+    let receiverId = await resolveProfileId(auth.client, rawReceiver);
+    // Pin the authenticated party to their canonical profiles.id so LiveKit
+    // membership (profileId vs auth.users.id) always matches call_logs.
+    const rawIsMe = (v) => v && (v === myProfileId || v === myAuthId);
+    if (rawIsMe(rawCaller) || (!rawCaller && myProfileId)) {
+      callerId = myProfileId || callerId;
+    }
+    if (rawIsMe(rawReceiver)) {
+      receiverId = myProfileId || receiverId;
+    }
+    if (!callerId && myProfileId) callerId = myProfileId;
+    if (!callerId) {
+      return send(res, 400, {
+        success: false,
+        error: {
+          message: 'Invalid callerId — no matching profile',
+          code: 'INVALID_CALLER',
+        },
+      });
+    }
+    if (rawReceiver && !receiverId) {
+      return send(res, 400, {
+        success: false,
+        error: {
+          message: 'Invalid receiverId — no matching profile',
+          code: 'INVALID_RECEIVER',
+          detail: rawReceiver,
+        },
+      });
+    }
     const callStatus = String((body && body.status) || 'completed').toLowerCase();
     const busyStatuses = new Set(['ringing', 'active', 'accepted', 'in_call', 'connecting']);
     const endStatuses = new Set([
@@ -609,9 +654,14 @@ async function handleCalls(path, req, res) {
       });
     }
 
-    // Authoritative presence: busy while ringing/active; online when call ends
+    // Authoritative presence:
+    // - ringing: only caller → busy (callee stays online until Accept UI lands)
+    // - active: both busy
+    // - ended: both online
     try {
-      if (busyStatuses.has(callStatus)) {
+      if (callStatus === 'ringing') {
+        await setProfilesOnlineStatus(auth.client, [callerId], 'busy');
+      } else if (busyStatuses.has(callStatus)) {
         await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'busy');
       } else if (endStatuses.has(callStatus)) {
         await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'online');
