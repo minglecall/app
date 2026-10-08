@@ -491,9 +491,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-pink-400 font-mono text-[9px] font-bold select-all">
-                  TL-1.1
-                </span>
                 <span>Managed Creators</span>
               </span>
               <Users className="w-4 h-4 text-pink-400" />
@@ -512,9 +509,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                  TL-1.2
-                </span>
                 <span>Total Video Calls</span>
               </span>
               <PhoneCall className="w-4 h-4 text-emerald-400" />
@@ -531,9 +525,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-sky-400 font-mono text-[9px] font-bold select-all">
-                  TL-1.3
-                </span>
                 <span>Live Minutes</span>
               </span>
               <Clock className="w-4 h-4 text-sky-400" />
@@ -550,9 +541,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  TL-1.4
-                </span>
                 <span>Host Coins</span>
               </span>
               <Coins className="w-4 h-4 text-amber-400" />
@@ -569,9 +557,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                  TL-1.5
-                </span>
                 <span>Host Revenue</span>
               </span>
               <DollarSign className="w-4 h-4 text-emerald-400" />
@@ -591,9 +576,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="bg-gradient-to-br from-amber-950/40 via-[#161922] to-slate-900 border border-amber-500/40 rounded-xl p-3.5 flex flex-col justify-between shadow-lg shadow-amber-950/30">
             <div className="flex items-center justify-between text-amber-300 text-xs font-medium">
               <span className="flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  TL-1.6
-                </span>
                 <span>TL Earnings</span>
               </span>
               <Percent className="w-4 h-4 text-amber-400" />
@@ -623,9 +605,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 font-mono text-[9px] font-bold select-all">
-              TL-2
-            </span>
             <Users className="w-4 h-4" />
             <span>My Creators & Overrides</span>
             <span className="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] font-mono">
@@ -642,9 +621,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 : 'text-amber-400 hover:text-amber-300 hover:bg-amber-950/30 border border-amber-500/20'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-amber-950 border border-amber-400/50 text-amber-300 font-mono text-[9px] font-bold select-all">
-              TL-3
-            </span>
             <Crown className="w-4 h-4 text-yellow-300" />
             <span>Target Leaderboard & Boosts</span>
             <span className="px-1.5 py-0.2 rounded-full bg-amber-950 border border-amber-400/50 text-[10px] font-mono text-amber-300">
@@ -661,9 +637,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 font-mono text-[9px] font-bold select-all">
-              TL-4
-            </span>
             <TrendingUp className="w-4 h-4" />
             <span>Call History & Analytics</span>
             <span className="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] font-mono">
@@ -680,15 +653,9 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 font-mono text-[9px] font-bold select-all">
-              TL-5
-            </span>
             <DollarSign className="w-4 h-4" />
             <span>Settlements</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-amber-950 border border-amber-500/40 text-amber-300 text-[10px] font-mono">
-              TL-5
-            </span>
-          </button>
+            </button>
 
           <button
             id="tl-tab-agency"
@@ -699,9 +666,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 font-mono text-[9px] font-bold select-all">
-              TL-6
-            </span>
             <Building className="w-4 h-4" />
             <span>Agency Guild Profile</span>
           </button>
@@ -735,9 +699,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               </div>
 
               <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  TL-2.1
-                </span>
                 <span className="text-xs text-slate-400 flex items-center gap-1">
                   <Filter className="w-3.5 h-3.5" /> Filter:
                 </span>
@@ -1023,9 +984,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-5 space-y-3 shadow-xl">
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-black text-white font-mono uppercase tracking-wider flex items-center gap-2">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-yellow-400 font-mono text-[9px] font-bold select-all">
-                      TL-4.1
-                    </span>
                     <Award className="w-4 h-4 text-yellow-400" />
                     <span>Top Agency Creator Performers</span>
                   </h4>
@@ -1100,9 +1058,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
               <div className="bg-[#12151F] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
                 <div className="p-4 border-b border-slate-800 flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-black text-white font-mono uppercase tracking-wider flex items-center gap-2">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-sky-400 font-mono text-[9px] font-bold select-all">
-                      TL-4.2
-                    </span>
                     <PhoneCall className="w-4 h-4 text-sky-400" />
                     <span>Live Call Logs & Session Ledger</span>
                   </h4>
@@ -1262,9 +1217,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-6 space-y-4">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  TL-6.1
-                </span>
                 <Building className="w-5 h-5 text-amber-400" />
                 Agency Organization Profile
               </h3>
@@ -1305,9 +1257,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
 
             <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-6 space-y-4">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                  TL-6.2
-                </span>
                 <Award className="w-5 h-5 text-amber-400" />
                 Team Leader Rights & Privileges
               </h3>
@@ -1349,9 +1298,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           <div className="bg-[#12151F] border border-amber-500/30 w-full max-w-xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between bg-gradient-to-r from-amber-950/40 via-slate-900 to-slate-900">
               <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  TL-M1
-                </span>
                 <div className="p-2 rounded-xl bg-amber-500/20 text-amber-300">
                   <UserPlus className="w-5 h-5" />
                 </div>

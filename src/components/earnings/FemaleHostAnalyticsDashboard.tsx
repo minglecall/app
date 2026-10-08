@@ -346,9 +346,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 font-mono text-[9px] font-bold select-all">
-              CR-1
-            </span>
             <Zap className="w-3.5 h-3.5 text-yellow-300" />
             <span>Targets & Algorithmic Boosts</span>
           </button>
@@ -362,9 +359,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 text-emerald-300 font-mono text-[9px] font-bold select-all">
-                CR-2
-              </span>
               <TrendingUp className="w-3.5 h-3.5" />
               <span>Call Activity & Estimates</span>
             </button>
@@ -378,9 +372,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-pink-300 font-mono text-[9px] font-bold select-all">
-              CR-3
-            </span>
             <PhoneCall className="w-3.5 h-3.5" />
             <span>Call & Engagement Metrics</span>
           </button>
@@ -393,9 +384,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 font-mono text-[9px] font-bold select-all">
-              CR-4
-            </span>
             <Star className="w-3.5 h-3.5" />
             <span>Ratings & Quality Standing</span>
           </button>
@@ -409,9 +397,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 text-indigo-300 font-mono text-[9px] font-bold select-all">
-                CR-5
-              </span>
               <ShieldCheck className="w-3.5 h-3.5" />
               <span>Salary Status</span>
             </button>
@@ -426,9 +411,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
             <div className="flex items-center justify-between text-slate-400">
               <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                  CR-0.1
-                </span>
                 <span>Lifetime Revenue</span>
               </span>
               <TrendingUp className="w-4 h-4 text-emerald-400" />
@@ -448,9 +430,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
             <div className="flex items-center justify-between text-slate-400">
               <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-pink-400 font-mono text-[9px] font-bold select-all">
-                  CR-0.1
-                </span>
                 <span>Total Calls Hosted</span>
               </span>
               <PhoneCall className="w-4 h-4 text-pink-400" />
@@ -468,9 +447,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-pink-400 font-mono text-[9px] font-bold select-all">
-                CR-0.2
-              </span>
               <span>Call Minutes Hosted</span>
             </span>
             <Clock className="w-4 h-4 text-pink-400" />
@@ -488,9 +464,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
             <div className="flex items-center justify-between text-slate-400">
               <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  CR-0.3
-                </span>
                 <span>Gifts Received</span>
               </span>
               <Gift className="w-4 h-4 text-amber-400" />
@@ -506,9 +479,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
             <div className="flex items-center justify-between text-slate-400">
               <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-indigo-400 font-mono text-[9px] font-bold select-all">
-                  CR-0.3
-                </span>
                 <span>Connected Members</span>
               </span>
               <Users className="w-4 h-4 text-indigo-400" />
@@ -526,9 +496,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-yellow-400 font-mono text-[9px] font-bold select-all">
-                CR-0.4
-              </span>
               <span>Host Quality Score</span>
             </span>
             <Star className="w-4 h-4 text-yellow-400 fill-yellow-400/20" />
@@ -560,9 +527,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider flex items-center gap-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  TL-HOSTS
-                </span>
                 <Users className="w-4 h-4 text-amber-400" />
                 <span>Managed Hosts</span>
               </h3>
@@ -705,9 +669,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
                 <h3 className="text-base font-black text-white font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                    CR-2.1
-                  </span>
                   <BarChart3 className="w-4 h-4 text-emerald-400" />
                   <span>Revenue & Earning Streams Breakdown</span>
                 </h3>
@@ -782,9 +743,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             {/* Left: Transparent Commission Structure */}
             <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
               <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                  CR-2.2
-                </span>
                 <ShieldCheck className="w-5 h-5 text-emerald-400" />
                 <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                   Commission & Deduction Breakdown
@@ -831,9 +789,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             {/* Right: Supported Payout Gateways Overview */}
             <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
               <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-indigo-400 font-mono text-[9px] font-bold select-all">
-                  CR-2.3
-                </span>
                 <Building className="w-5 h-5 text-indigo-400" />
                 <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                   Period-end settlement remittance
@@ -902,9 +857,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-pink-400 font-mono text-[9px] font-bold select-all">
-                    CR-3.1
-                  </span>
                   <PhoneCall className="w-4 h-4 text-pink-400" />
                   <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                     Call Minutes by Session Type
@@ -1009,9 +961,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                    CR-3.2
-                  </span>
                   <Activity className="w-4 h-4 text-emerald-400" />
                   <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                     Peak Calling Hours (UTC)
@@ -1057,9 +1006,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                  CR-3.3
-                </span>
                 <Gift className="w-5 h-5 text-amber-400" />
                 <div>
                   <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
@@ -1119,9 +1065,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             {/* Big Star Card */}
             <div className="p-6 bg-[#13161F] border border-slate-800 rounded-3xl text-center space-y-4 shadow-xl flex flex-col justify-center">
               <div className="flex items-center justify-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-yellow-400 font-mono text-[9px] font-bold select-all">
-                  CR-4.1
-                </span>
                 <div className="w-12 h-12 rounded-2xl bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 flex items-center justify-center text-2xl">
                   ★
                 </div>
@@ -1158,9 +1101,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
             <div className="lg:col-span-2 p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-5 shadow-xl">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                    CR-4.2
-                  </span>
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                     Platform Compliance & Attendance Standing
@@ -1220,9 +1160,6 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-yellow-400 font-mono text-[9px] font-bold select-all">
-                  CR-4.3
-                </span>
                 <Star className="w-4 h-4 text-yellow-400 fill-yellow-400/20" />
                 <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                   Recent Verified Caller Reviews

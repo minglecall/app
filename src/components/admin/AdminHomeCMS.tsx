@@ -135,9 +135,6 @@ export const AdminHomeCMS: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-slate-900 border border-slate-800 rounded-2xl">
         <div>
           <h2 className="text-lg font-black text-white flex items-center space-x-2">
-            <span className="px-1.5 py-0.5 rounded bg-pink-950/80 border border-pink-500/50 text-pink-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-              AD-14
-            </span>
             <Layers className="w-5 h-5 text-pink-400" />
             <span>Home Page CMS & Policy Manager</span>
           </h2>
@@ -164,9 +161,6 @@ export const AdminHomeCMS: React.FC = () => {
               cmsSection === 'banners' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-              AD-14.1
-            </span>
             <Image className="w-3.5 h-3.5" />
             <span>Hero Banners ({homeBanners.length})</span>
           </button>
@@ -176,9 +170,6 @@ export const AdminHomeCMS: React.FC = () => {
               cmsSection === 'policies' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-              AD-14.2
-            </span>
             <FileText className="w-3.5 h-3.5" />
             <span>Policies & Terms ({policyDocuments.length})</span>
           </button>
@@ -188,9 +179,6 @@ export const AdminHomeCMS: React.FC = () => {
               cmsSection === 'shortcuts' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-              AD-14.3
-            </span>
             <Zap className="w-3.5 h-3.5" />
             <span>Quick Shortcuts ({homeQuickLinks.length})</span>
           </button>

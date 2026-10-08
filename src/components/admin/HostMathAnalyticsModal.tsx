@@ -291,9 +291,6 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-indigo-300 border border-indigo-400/40 text-[9px] font-mono font-bold select-all">
-                TB-1.7.1
-              </span>
               <Activity className="w-3.5 h-3.5 text-indigo-300" />
               <span>Executive Analytics</span>
             </button>
@@ -306,9 +303,6 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-amber-300 border border-amber-400/40 text-[9px] font-mono font-bold select-all">
-                TB-1.7.2
-              </span>
               <Zap className="w-3.5 h-3.5 text-yellow-300" />
               <span>Score Math Formula</span>
             </button>
@@ -321,9 +315,6 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-emerald-300 border border-emerald-400/40 text-[9px] font-mono font-bold select-all">
-                TB-1.7.3
-              </span>
               <Crown className="w-3.5 h-3.5 text-emerald-300" />
               <span>Dual Target Engine</span>
             </button>
@@ -336,9 +327,6 @@ export const HostMathAnalyticsModal: React.FC<HostMathAnalyticsModalProps> = ({
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-purple-300 border border-purple-400/40 text-[9px] font-mono font-bold select-all">
-                TB-1.7.4
-              </span>
               <Clock className="w-3.5 h-3.5 text-purple-300" />
               <span>Heartbeats & Telemetry</span>
             </button>

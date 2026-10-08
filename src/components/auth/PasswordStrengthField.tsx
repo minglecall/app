@@ -49,6 +49,10 @@ export function PasswordStrengthField({
   const [visible, setVisible] = useState(false);
 
   const strength = useMemo(() => evaluatePasswordStrength(value), [value]);
+  const unmetRules = useMemo(
+    () => (value.length > 0 ? strength.rules.filter((rule) => !rule.met) : []),
+    [strength.rules, value.length]
+  );
 
   useEffect(() => {
     onValidityChange?.(strength.isValid, strength);
@@ -86,7 +90,11 @@ export function PasswordStrengthField({
           onChange={(e) => onChange(e.target.value)}
           autoComplete={autoComplete}
           aria-invalid={showStrengthUi && value.length > 0 ? !strength.isValid : undefined}
-          aria-describedby={showStrengthUi ? `${meterId} ${checklistId}` : undefined}
+          aria-describedby={
+            showStrengthUi
+              ? [meterId, unmetRules.length > 0 ? checklistId : null].filter(Boolean).join(' ') || undefined
+              : undefined
+          }
           className={
             inputClassName ||
             'w-full bg-app-input border border-hairline rounded-xl pl-10 pr-10 py-2.5 text-xs text-app-heading placeholder:text-app-muted focus:outline-none focus:border-rose-500 disabled:opacity-50'
@@ -133,24 +141,20 @@ export function PasswordStrengthField({
               )}
             </>
           )}
-          <ul id={checklistId} className="space-y-1 pt-0.5" aria-label="Password requirements">
-            {strength.rules.map((rule) => (
-              <li
-                key={rule.id}
-                className={`flex items-center gap-1.5 text-[10px] font-mono ${
-                  rule.met ? 'text-emerald-400' : 'text-slate-500'
-                }`}
-              >
-                {rule.met ? (
-                  <Check className="w-3 h-3 shrink-0" aria-hidden />
-                ) : (
-                  <X className="w-3 h-3 shrink-0 text-rose-400/80" aria-hidden />
-                )}
-                <span>{rule.label}</span>
-                <span className="sr-only">{rule.met ? 'met' : 'not met'}</span>
-              </li>
-            ))}
-          </ul>
+          {/* Only list unmet rules — hide satisfied requirements */}
+          {unmetRules.length > 0 && (
+            <ul id={checklistId} className="space-y-1 pt-0.5" aria-label="Unmet password requirements">
+              {unmetRules.map((rule) => (
+                <li
+                  key={rule.id}
+                  className="flex items-center gap-1.5 text-[10px] font-mono text-rose-400"
+                >
+                  <X className="w-3 h-3 shrink-0" aria-hidden />
+                  <span>{rule.label}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

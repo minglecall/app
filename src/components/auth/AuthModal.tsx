@@ -767,8 +767,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <form onSubmit={handleStartRegistration} className="space-y-4">
               {/* Role Selection */}
               <div>
-                <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-2">
-                  CHOOSE YOUR ACCOUNT TYPE *
+                <label className="block text-xs font-semibold text-app-muted font-mono tracking-wider mb-2">
+                  Gender *
                 </label>
                 <div className="grid grid-cols-3 gap-2.5">
                   <button
@@ -781,7 +781,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     }`}
                   >
                     <span className="text-base">👨</span>
-                    <span className="text-xs font-bold text-app-heading">Male User</span>
+                    <span className="text-xs font-bold text-app-heading">Male</span>
                     {selectedRole === 'male_user' && (
                       <Check className="w-3 h-3 text-indigo-400 absolute top-2 right-2" />
                     )}
@@ -797,7 +797,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     }`}
                   >
                     <span className="text-base">👩</span>
-                    <span className="text-xs font-bold text-app-heading">Female User</span>
+                    <span className="text-xs font-bold text-app-heading">Female</span>
                     {(selectedRole === 'female_user' || selectedRole === 'female_creator') && (
                       <Check className="w-3 h-3 text-rose-400 absolute top-2 right-2" />
                     )}
@@ -813,7 +813,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     }`}
                   >
                     <span className="text-base">✨</span>
-                    <span className="text-xs font-bold text-app-heading">Other User</span>
+                    <span className="text-xs font-bold text-app-heading">Other</span>
                     {selectedRole === 'other_user' && (
                       <Check className="w-3 h-3 text-purple-400 absolute top-2 right-2" />
                     )}
@@ -823,8 +823,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               {/* Full Name */}
               <div>
-                <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-1">
-                  FULL NAME / DISPLAY HANDLE *
+                <label className="block text-xs font-semibold text-app-muted font-mono tracking-wider mb-1">
+                  Full Name / Display Handle *
                 </label>
                 <div className="relative">
                   <User className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -841,8 +841,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               {/* Email Address */}
               <div>
-                <label className="block text-xs font-semibold text-app-muted uppercase font-mono tracking-wider mb-1">
-                  EMAIL ADDRESS (FOR SUPABASE OTP) *
+                <label className="block text-xs font-semibold text-app-muted font-mono tracking-wider mb-1">
+                  Email *
                 </label>
                 <div className="relative">
                   <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -880,14 +880,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 />
               </div>
 
-              {/* Security & Zero KYC Notice */}
-              <div className="p-3 bg-app-input border border-hairline rounded-xl flex items-start space-x-2.5 text-[11px] text-app-muted">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <strong className="text-app-heading">Seamless Zero-Friction Onboarding:</strong> An email OTP will be sent to confirm your identity. After email OTP, you configure your bio & Cloudflare R2 media. KYC documents are only requested when requesting your first earnings payout.
-                </div>
-              </div>
-
               <button
                 type="submit"
                 disabled={
@@ -904,7 +896,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </>
                 ) : (
                   <>
-                    <span>Send Verification Email & Continue</span>
+                    <span>Send OTP & Continue</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}

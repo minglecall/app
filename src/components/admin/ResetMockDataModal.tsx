@@ -527,9 +527,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             </div>
             <div>
               <h2 id="reset-mock-data-title" className="text-lg font-bold text-white flex items-center gap-2">
-                <span className="px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-500/50 text-rose-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                  AD-15
-                </span>
                 <span>Destructive Data Reset</span>
                 <span
                   className={`px-2 py-0.5 text-[10px] font-mono border rounded-full ${
@@ -682,9 +679,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-indigo-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-indigo-950/80 border border-indigo-500/40 text-indigo-300 font-mono text-[9px] font-bold">
-                    RS-1
-                  </span>
                   <Users className="w-4 h-4" />
                   <span>1. Users & Accounts</span>
                 </div>
@@ -766,9 +760,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-pink-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-pink-950/80 border border-pink-500/40 text-pink-300 font-mono text-[9px] font-bold">
-                    RS-2
-                  </span>
                   <Sparkles className="w-4 h-4" />
                   <span>2. Profiles & Custom Media</span>
                 </div>
@@ -852,9 +843,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-amber-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/40 text-amber-300 font-mono text-[9px] font-bold">
-                    RS-3
-                  </span>
                   <Coins className="w-4 h-4" />
                   <span>3. Coins & Wallet Balances</span>
                 </div>
@@ -934,9 +922,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-emerald-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 font-mono text-[9px] font-bold">
-                    RS-4
-                  </span>
                   <DollarSign className="w-4 h-4" />
                   <span>4. Transactions, SKUs & Gifts</span>
                 </div>
@@ -1018,9 +1003,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-cyan-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 font-mono text-[9px] font-bold">
-                    RS-5
-                  </span>
                   <MessageSquare className="w-4 h-4" />
                   <span>5. Chats & Social</span>
                 </div>
@@ -1124,9 +1106,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-violet-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-violet-950/80 border border-violet-500/40 text-violet-300 font-mono text-[9px] font-bold">
-                    RS-6
-                  </span>
                   <PhoneCall className="w-4 h-4" />
                   <span>6. Matches, Calls & Surveillance</span>
                 </div>
@@ -1230,9 +1209,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-yellow-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-yellow-950/80 border border-yellow-500/40 text-yellow-300 font-mono text-[9px] font-bold">
-                    RS-7
-                  </span>
                   <Trophy className="w-4 h-4" />
                   <span>7. Analytics, Reviews & Quests</span>
                 </div>
@@ -1314,9 +1290,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-rose-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-500/40 text-rose-300 font-mono text-[9px] font-bold">
-                    RS-8
-                  </span>
                   <Flame className="w-4 h-4" />
                   <span>8. Feed Moments & Posts</span>
                 </div>
@@ -1354,9 +1327,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
             <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3 md:col-span-2">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                 <div className="flex items-center space-x-2 text-blue-400 font-semibold text-sm">
-                  <span className="px-1.5 py-0.5 rounded bg-blue-950/80 border border-blue-500/40 text-blue-300 font-mono text-[9px] font-bold">
-                    RS-9
-                  </span>
                   <Sliders className="w-4 h-4" />
                   <span>9. CMS, Policies & Taxonomy Configuration</span>
                 </div>
@@ -1480,9 +1450,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
           {/* Category 10: Client Storage Purge */}
           <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 hover:border-slate-700 transition-colors space-y-3">
             <div className="flex items-center space-x-2 text-purple-400 font-semibold text-sm">
-              <span className="px-1.5 py-0.5 rounded bg-purple-950/80 border border-purple-500/40 text-purple-300 font-mono text-[9px] font-bold">
-                RS-10
-              </span>
               <span>Client Storage Purge (local/session/cookies)</span>
             </div>
 
@@ -1514,9 +1481,6 @@ export const ResetMockDataModal: React.FC<ResetMockDataModalProps> = ({ isOpen, 
           {/* Sync Targets & Safety Box */}
           <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
             <div className="flex items-center space-x-2 text-xs font-semibold text-slate-300">
-              <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 font-mono text-[9px] font-bold">
-                RS-10
-              </span>
               <Database className="w-4 h-4 text-emerald-400" />
               <span>Storage & Synchronization Destinations</span>
             </div>

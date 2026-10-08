@@ -267,9 +267,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-indigo-300 font-mono text-[9px] font-bold select-all">
-              UR-1
-            </span>
             <Coins className="w-3.5 h-3.5" />
             <span>Financial & Spending Ledger</span>
           </button>
@@ -282,9 +279,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-pink-300 font-mono text-[9px] font-bold select-all">
-              UR-2
-            </span>
             <PhoneCall className="w-3.5 h-3.5" />
             <span>Call Logs & Consumed Minutes</span>
           </button>
@@ -297,9 +291,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 font-mono text-[9px] font-bold select-all">
-              UR-3
-            </span>
             <Star className="w-3.5 h-3.5" />
             <span>Favorite Hosts</span>
           </button>
@@ -312,9 +303,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-950 text-emerald-300 font-mono text-[9px] font-bold select-all">
-              UR-4
-            </span>
             <FileText className="w-3.5 h-3.5" />
             <span>Call Spending Statements ({transactionReceipts.length})</span>
           </button>
@@ -327,9 +315,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-indigo-400 font-mono text-[9px] font-bold select-all">
-                UR-0.1
-              </span>
               <span>Total Talk Time</span>
             </span>
             <Clock className="w-4 h-4 text-indigo-400" />
@@ -347,9 +332,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                UR-0.2
-              </span>
               <span>Monthly Expenditure</span>
             </span>
             <TrendingDown className="w-4 h-4 text-amber-400" />
@@ -366,9 +348,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-pink-400 font-mono text-[9px] font-bold select-all">
-                UR-0.3
-              </span>
               <span>Coins Spent on Calls</span>
             </span>
             <Coins className="w-4 h-4 text-pink-400" />
@@ -386,9 +365,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
         <div className="p-4 sm:p-5 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-[11px] font-bold font-mono uppercase flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-yellow-400 font-mono text-[9px] font-bold select-all">
-                UR-0.4
-              </span>
               <span>Friend Rate Savings</span>
             </span>
             <Award className="w-4 h-4 text-yellow-400" />
@@ -411,9 +387,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
                 <h3 className="text-base font-black text-white font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-indigo-400 font-mono text-[9px] font-bold select-all">
-                    UR-1.1
-                  </span>
                   <BarChart3 className="w-4 h-4 text-indigo-400" />
                   <span>Spending Distribution & Habits (Coins)</span>
                 </h3>
@@ -497,9 +470,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
             <div className="p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl opacity-80">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                    UR-1.2
-                  </span>
                   <Zap className="w-5 h-5 text-amber-400" />
                   <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                     Auto-Recharge
@@ -530,9 +500,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
             <div className="lg:col-span-2 p-5 sm:p-6 bg-[#13161F] border border-slate-800 rounded-3xl space-y-4 shadow-xl">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-indigo-400 font-mono text-[9px] font-bold select-all">
-                    UR-1.3
-                  </span>
                   <History className="w-5 h-5 text-indigo-400" />
                   <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider">
                     Coin Debits & Credits Ledger
@@ -632,9 +599,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
                 <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-pink-400 font-mono text-[9px] font-bold select-all">
-                    UR-2.1
-                  </span>
                   <PhoneCall className="w-4 h-4 text-pink-400" />
                   <span>Call Logs Timeline & Session Ledger</span>
                 </h3>
@@ -767,9 +731,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-400 font-mono text-[9px] font-bold select-all">
-                    UR-3.1
-                  </span>
                   <Star className="w-4 h-4 text-amber-400 fill-amber-400/20" />
                   <span>Favorite Creators Ledger</span>
                 </h3>
@@ -865,9 +826,6 @@ export const MaleUserAnalyticsDashboard: React.FC<MaleUserAnalyticsDashboardProp
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
                 <h3 className="text-sm font-black text-white font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-400 font-mono text-[9px] font-bold select-all">
-                    UR-4.1
-                  </span>
                   <FileText className="w-4 h-4 text-emerald-400" />
                   <span>Call Spending Statements</span>
                 </h3>

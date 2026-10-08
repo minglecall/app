@@ -413,10 +413,7 @@ export const AdminFinancialModule: React.FC = () => {
           <div className="flex items-center gap-2">
             <Landmark className="w-5 h-5 text-emerald-400" />
             <h2 className="text-lg font-black text-white">Financial Module</h2>
-            <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-[10px] font-mono font-bold">
-              API-DRIVEN
-            </span>
-          </div>
+            </div>
           <p className="text-xs text-slate-400 mt-1">
             Period settlements, immutable ledger, and admin remittance — all amounts from{' '}
             <span className="font-mono text-emerald-300">/api/v1/finance</span>.

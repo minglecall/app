@@ -56,9 +56,6 @@ export const CreatorDailyChecklistWidget: React.FC = () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-2">
-          <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-purple-400 font-mono text-[9px] font-bold select-all">
-            CR-1.2
-          </span>
           <div className="p-2 rounded-xl bg-purple-500/15 text-purple-400 border border-purple-500/30">
             <Flame className="w-5 h-5" />
           </div>

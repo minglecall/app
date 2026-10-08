@@ -115,9 +115,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-amber-300 border border-amber-400/40 text-[9px] font-mono font-bold tracking-wider shrink-0 select-all">
-              TB-1
-            </span>
             <BarChart3 className="w-4 h-4 text-slate-950" />
             <span>👑 Creator Performance & Intelligence</span>
             <span className="px-1.5 py-0.2 rounded-full bg-slate-950 text-amber-300 text-[10px] font-mono">
@@ -134,9 +131,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-indigo-300 border border-indigo-400/40 text-[9px] font-mono font-bold tracking-wider shrink-0 select-all">
-              TB-2
-            </span>
             <Zap className="w-4 h-4 text-amber-300" />
             <span>⚡ Rotational Priority & Diversity Matrix</span>
             <span className="px-1.5 py-0.2 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-[10px]">
@@ -153,9 +147,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-emerald-300 border border-emerald-400/40 text-[9px] font-mono font-bold tracking-wider shrink-0 select-all">
-              TB-3
-            </span>
             <Crown className="w-4 h-4 text-yellow-300" />
             <span>🎯 Target Thresholds & Cash Bonuses</span>
           </button>
@@ -187,9 +178,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
               </div>
               <div>
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/50 text-amber-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                    TB-3
-                  </span>
                   <h2 className="text-lg sm:text-xl font-black text-white">Female Creator Targets & Algorithmic Boost Governance</h2>
                   <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-mono font-extrabold uppercase">
                     ADMIN CONTROL
@@ -216,9 +204,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
             <div className="flex items-start justify-between">
               <div className="space-y-1">
                 <h3 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                    TB-3.1
-                  </span>
                   <Calendar className="w-4 h-4 text-indigo-400" />
                   <span>1. Global Target Engine Cycle (Weekly vs Monthly)</span>
                 </h3>
@@ -311,9 +296,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
             <div className="flex items-start justify-between">
               <div className="space-y-1">
                 <h3 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                    TB-3.2
-                  </span>
                   <Crown className="w-4 h-4 text-yellow-400" />
                   <span>2. Dual-Metric Target Thresholds & Cash Bonuses</span>
                 </h3>
@@ -331,9 +313,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
               <div className="p-4 bg-[#0F1115] border border-amber-800/50 rounded-xl space-y-3.5 shadow-md">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <span className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/40 text-amber-300 text-[9px] font-mono font-bold select-all">
-                      TB-3.2.1
-                    </span>
                     <span className="px-2 py-0.5 rounded bg-amber-800/20 text-amber-300 border border-amber-800/50 text-xs font-black uppercase font-mono">
                       🥉 Bronze Tier
                     </span>
@@ -413,9 +392,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
               <div className="p-4 bg-[#0F1115] border border-slate-500/50 rounded-xl space-y-3.5 shadow-md">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-500/40 text-slate-200 text-[9px] font-mono font-bold select-all">
-                      TB-3.2.2
-                    </span>
                     <span className="px-2 py-0.5 rounded bg-slate-300/20 text-slate-200 border border-slate-400/50 text-xs font-black uppercase font-mono">
                       🥈 Silver Tier
                     </span>
@@ -495,9 +471,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
               <div className="p-4 bg-[#0F1115] border border-yellow-500/50 rounded-xl space-y-3.5 shadow-md">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <span className="px-1.5 py-0.5 rounded bg-yellow-950/80 border border-yellow-500/40 text-yellow-300 text-[9px] font-mono font-bold select-all">
-                      TB-3.2.3
-                    </span>
                     <span className="px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-300 border border-yellow-500/50 text-xs font-black uppercase font-mono">
                       👑 Gold Tier
                     </span>
@@ -580,9 +553,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
             <div className="flex items-start justify-between">
               <div className="space-y-1">
                 <h3 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                    TB-3.3
-                  </span>
                   <Flame className="w-4 h-4 text-orange-400" />
                   <span>3. Peak Traffic Hours & Ready Now Surge Engine</span>
                 </h3>
@@ -636,7 +606,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
               <div className="bg-[#0F1115] p-3.5 rounded-xl border border-slate-800 space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-slate-300 font-bold flex items-center gap-1">
-                    <span className="px-1 py-0.2 rounded bg-slate-800 text-[8px] font-mono text-slate-400 select-all">TB-3.4</span>
                     <span>Call Ring Timeout (Seconds)</span>
                   </label>
                   <span className="text-[10px] text-slate-500 font-mono">10 - 120s</span>
@@ -661,9 +630,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
             <div className="flex items-start justify-between">
               <div className="space-y-1">
                 <h3 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                    TB-3.5
-                  </span>
                   <Sparkles className="w-4 h-4 text-pink-400" />
                   <span>4. Daily Gamification, 1st Paid Call Bonus & Consecutive Streaks</span>
                 </h3>
@@ -773,9 +739,6 @@ export const AdminCreatorTargetConfig: React.FC = () => {
           {/* 5. Settlement Compatibility */}
           <div className="p-5 bg-[#161922] border border-slate-800 rounded-2xl space-y-3 shadow-lg">
             <div className="flex items-center space-x-2">
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                TB-3.6
-              </span>
               <Wallet className="w-4 h-4 text-emerald-400" />
               <h4 className="text-sm font-bold text-white">Period-end settlement compatibility</h4>
             </div>

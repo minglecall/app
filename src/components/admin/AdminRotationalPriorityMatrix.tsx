@@ -250,9 +250,6 @@ export const AdminRotationalPriorityMatrix: React.FC = () => {
               </div>
               <div>
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-indigo-950/80 border border-indigo-500/50 text-indigo-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                    TB-2
-                  </span>
                   <h3 className="text-base sm:text-lg font-black text-white">
                     Rotational Priority, Scoring & Diversity Engine
                   </h3>
@@ -297,9 +294,6 @@ export const AdminRotationalPriorityMatrix: React.FC = () => {
         {/* Real-time Telemetry Metrics Strip */}
         <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
           <div className="flex items-center space-x-2">
-            <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-              TB-2.1
-            </span>
             <span className="text-[10px] font-mono uppercase font-bold text-slate-400">Discovery Rotation Live Telemetry</span>
           </div>
 
@@ -385,9 +379,6 @@ export const AdminRotationalPriorityMatrix: React.FC = () => {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
             <div className="space-y-0.5">
               <h4 className="text-sm font-bold text-white flex items-center space-x-2">
-                <span className="px-1.5 py-0.5 rounded bg-indigo-950/80 border border-indigo-500/50 text-indigo-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                  TB-2.2
-                </span>
                 <Sliders className="w-4 h-4 text-indigo-400" />
                 <span>Dynamic Weight Multipliers (Real-Time Control)</span>
               </h4>
@@ -665,9 +656,6 @@ export const AdminRotationalPriorityMatrix: React.FC = () => {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
           <div className="space-y-0.5">
             <h4 className="text-sm font-bold text-white flex items-center space-x-2">
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                TB-2.3
-              </span>
               <Layers className="w-4 h-4 text-emerald-400" />
               <span>Real-Time Host Priority & Discovery Positioning Table</span>
             </h4>

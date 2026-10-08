@@ -343,9 +343,6 @@ export const AdminTaxonomyManager: React.FC = () => {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center space-x-2">
-              <span className="px-1.5 py-0.5 rounded bg-indigo-950/80 border border-indigo-500/50 text-indigo-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                AD-6/7
-              </span>
               <span className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
                 <Globe className="w-5 h-5" />
               </span>
@@ -421,9 +418,6 @@ export const AdminTaxonomyManager: React.FC = () => {
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-            AD-6.1
-          </span>
           <Globe className="w-3.5 h-3.5" />
           <span>Countries & Flags ({selectedCountries.size})</span>
         </button>
@@ -437,9 +431,6 @@ export const AdminTaxonomyManager: React.FC = () => {
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-            AD-6.2
-          </span>
           <Ruler className="w-3.5 h-3.5 text-amber-400" />
           <span>SVG Flag Sizing (Dynamic)</span>
         </button>
@@ -453,9 +444,6 @@ export const AdminTaxonomyManager: React.FC = () => {
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-            AD-7.1
-          </span>
           <Languages className="w-3.5 h-3.5" />
           <span>Spoken Languages ({selectedLanguages.size})</span>
         </button>
@@ -469,9 +457,6 @@ export const AdminTaxonomyManager: React.FC = () => {
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-            AD-7.2
-          </span>
           <Sparkles className="w-3.5 h-3.5" />
           <span>Zodiac Signs & SVGs ({selectedZodiacs.size})</span>
         </button>
@@ -485,9 +470,6 @@ export const AdminTaxonomyManager: React.FC = () => {
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-            AD-7.3
-          </span>
           <Heart className="w-3.5 h-3.5" />
           <span>Categorized Interests ({selectedInterests.size})</span>
         </button>
@@ -501,9 +483,6 @@ export const AdminTaxonomyManager: React.FC = () => {
               : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
           }`}
         >
-          <span className="px-1.5 py-0.5 rounded bg-slate-950 text-slate-300 font-mono text-[9px] font-bold select-all">
-            AD-7.4
-          </span>
           <Banknote className="w-3.5 h-3.5 text-emerald-400" />
           <span>Currencies ({currencyRows.filter((c) => c.enabled).length})</span>
         </button>

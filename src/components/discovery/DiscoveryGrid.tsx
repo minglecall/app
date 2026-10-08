@@ -525,7 +525,11 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                           <Flame className="w-2.5 h-2.5" /> Ready
                         </Badge>
                       ) : isUserOnline ? (
-                        <Badge tone="online" className={`${statusBadgeClass} !bg-emerald-500 !text-white !border-emerald-200/70`}>
+                        <Badge tone="neutral" className={`${statusBadgeClass} !bg-emerald-500 !text-white !border-emerald-200/70`}>
+                          <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/80" />
+                            <span className="relative inline-flex h-2 w-2 rounded-full bg-white shadow-sm" />
+                          </span>
                           Online
                         </Badge>
                       ) : isUserBusy ? (
@@ -538,12 +542,8 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                         </Badge>
                       )}
                       {user.isVerified && (
-                        <span
-                          title="Verified"
-                          className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-sky-500 text-white shadow-md shadow-black/40 border border-sky-200/70 ml-auto"
-                          aria-label="Verified"
-                        >
-                          <ShieldCheck className="w-3.5 h-3.5" strokeWidth={2.5} />
+                        <span title="Verified" aria-label="Verified" className="ml-auto drop-shadow-md">
+                          <ShieldCheck className="w-4 h-4 text-emerald-400" strokeWidth={2.5} />
                         </span>
                       )}
                     </>
@@ -567,22 +567,29 @@ export const DiscoveryGrid: React.FC<DiscoveryGridProps> = ({ onStartCall, onOpe
                     </div>
                   }
                   footer={
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onStartCall(user.id);
-                      }}
-                      className={`h-9 w-full rounded-app text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                        isUserOnline
-                          ? 'bg-flirt text-white shadow-brand active:scale-[0.98]'
-                          : isUserBusy
-                          ? 'bg-amber-500 text-white shadow-md'
-                          : 'bg-black/55 text-white/80 border border-white/25 backdrop-blur-md'
-                      }`}
-                    >
-                      {isUserBusy ? <PhoneCall className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
-                      <span>{isUserBusy ? 'Busy' : 'Call'}</span>
-                    </button>
+                    <div className="flex justify-center">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onStartCall(user.id);
+                        }}
+                        title={isUserBusy ? 'Busy' : 'Call'}
+                        aria-label={isUserBusy ? 'Busy' : 'Call'}
+                        className={`w-11 h-11 sm:w-12 sm:h-12 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                          isUserOnline
+                            ? 'bg-flirt text-white shadow-brand active:scale-95'
+                            : isUserBusy
+                            ? 'bg-amber-500 text-white shadow-md'
+                            : 'bg-black/55 text-white/80 border border-white/25 backdrop-blur-md'
+                        }`}
+                      >
+                        {isUserBusy ? (
+                          <PhoneCall className="w-5 h-5" />
+                        ) : (
+                          <Video className="w-5 h-5" />
+                        )}
+                      </button>
+                    </div>
                   }
                 />
               );

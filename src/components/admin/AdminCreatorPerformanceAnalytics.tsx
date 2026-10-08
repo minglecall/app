@@ -345,9 +345,6 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
               </div>
               <div>
                 <div className="flex items-center space-x-2">
-                  <span className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/50 text-amber-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                    TB-1
-                  </span>
                   <h3 className="text-base sm:text-xl font-black text-white">
                     Female Creator Performance & Intelligence Dashboard
                   </h3>
@@ -378,9 +375,6 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
         {/* Executive 6-KPI Summary Strip */}
         <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
           <div className="flex items-center space-x-2">
-            <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-              TB-1.1
-            </span>
             <span className="text-[10px] font-mono uppercase font-bold text-slate-400">Executive Fleet KPI Strip</span>
           </div>
 
@@ -473,9 +467,6 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
             </div>
             <div>
               <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-indigo-950/80 border border-indigo-500/50 text-indigo-300 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                  TB-1.2
-                </span>
                 <span>AI-Powered Creator Performance Intelligence & Advisory Engine</span>
                 <span className="px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-700/50 text-[10px] font-mono">
                   AUTOMATED ADVICE
@@ -583,9 +574,6 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
         <div className="p-4 bg-[#161922] border border-slate-800 rounded-2xl space-y-3 shadow-xl font-mono text-xs">
           <div className="flex items-center justify-between">
             <h4 className="font-bold text-white uppercase text-xs flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                TB-1.3
-              </span>
               <BarChart3 className="w-3.5 h-3.5 text-yellow-400" />
               <span>Revenue Distribution by Tier</span>
             </h4>
@@ -613,9 +601,6 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
         <div className="p-4 bg-[#161922] border border-slate-800 rounded-2xl space-y-3 shadow-xl font-mono text-xs">
           <div className="flex items-center justify-between">
             <h4 className="font-bold text-white uppercase text-xs flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                TB-1.4
-              </span>
               <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
               <span>Top 5 Creators (Revenue vs Hours)</span>
             </h4>
@@ -639,9 +624,6 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
         <div className="p-4 bg-[#161922] border border-slate-800 rounded-2xl space-y-3 shadow-xl font-mono text-xs flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <h4 className="font-bold text-white uppercase text-xs flex items-center space-x-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                TB-1.5
-              </span>
               <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
               <span>Fleet Acceptance Health Distribution</span>
             </h4>
@@ -681,9 +663,6 @@ export const AdminCreatorPerformanceAnalytics: React.FC = () => {
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-slate-800">
           <div className="space-y-0.5">
             <h4 className="text-sm font-bold text-white flex items-center space-x-2">
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px] font-bold tracking-wider shrink-0 select-all">
-                TB-1.6
-              </span>
               <Crown className="w-4 h-4 text-amber-400" />
               <span>Female Creator Performance Standings & Full Leaderboard</span>
             </h4>
