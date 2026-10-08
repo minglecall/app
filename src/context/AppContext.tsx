@@ -870,6 +870,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const insufficientEndToastShownRef = useRef(false);
   /** Max call seconds from balance at media-connect (floor(coins/rate)*60). Cleared when call ends. */
   const billingCapSecondsRef = useRef<number | null>(null);
+  /** Caller billing function, invoked by the visible clock when a new minute starts. */
+  const requestBurnRef = useRef<(billingMinute: number) => void>(() => {});
   const endCallRef = useRef<() => void>(() => {});
   const syncCallEndAndPresenceRef = useRef<
     (payload: Record<string, unknown>, restoreIds: string[]) => Promise<void>
@@ -5449,7 +5451,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Keep endCallRef fresh for the billing interval (avoids stale closures)
   endCallRef.current = endCall;
 
-  /** LiveKit peer present — start billing clock. Idempotent per call. */
+  /** LiveKit peer present — enables coin burn. Idempotent per call. Does not reset the visible clock. */
   const markCallMediaConnected = useCallback((callId: string) => {
     const id = String(callId || '').trim();
     if (!id) return;
@@ -5459,8 +5461,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return {
         ...prev,
         mediaConnected: true,
-        durationSeconds: 0,
-        startTime: Date.now(),
+        startTime: prev.startTime || Date.now(),
       };
     });
   }, []);
@@ -5579,8 +5580,73 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   };
 
-  // Active call timer — CALLER ONLY triggers server-authoritative minute billing
-  // Billing starts only after LiveKit mediaConnected (peer present), not mere accept.
+  // Visible call clock — ticks every second as soon as the call is active.
+  // Not gated on LiveKit mediaConnected (that flag only gates coin burn).
+  useEffect(() => {
+    if (!activeCall || activeCall.status !== 'active') return;
+    const callId = activeCall.id;
+    const iAmCaller = currentUser.id === activeCall.callerId;
+
+    const timer = window.setInterval(() => {
+      const prev = activeCallRef.current;
+      if (!prev || prev.id !== callId || prev.status !== 'active') return;
+
+      const next = (Number(prev.durationSeconds) || 0) + 1;
+
+      if (iAmCaller && prev.mediaConnected) {
+        const cap = billingCapSecondsRef.current;
+        if (cap != null && cap > 0 && next >= cap) {
+          setActiveCall((p) =>
+            p && p.id === callId && p.status === 'active' ? { ...p, durationSeconds: cap } : p
+          );
+          if (!insufficientEndToastShownRef.current) {
+            insufficientEndToastShownRef.current = true;
+            showToastRef.current?.(
+              'Call Auto-Terminated',
+              'Coin time finished. Please recharge to continue calling.',
+              'error'
+            );
+          }
+          endCallRef.current();
+          return;
+        }
+
+        const expectedMinute = Math.floor(next / 60) + 1;
+        const billedMax = Math.max(
+          prev.billedMinutes || 0,
+          ...Array.from(billedMinutesRef.current),
+          0
+        );
+        if (expectedMinute > billedMax && expectedMinute > 1) {
+          const rateNeeded = getEffectiveCallRate(prev.receiverId, prev.callerId);
+          const callerRow = usersRef.current.find((u) => u.id === prev.callerId);
+          const localBalance = Number(callerRow?.coinBalance);
+          if (Number.isFinite(localBalance) && localBalance < rateNeeded) {
+            if (!insufficientEndToastShownRef.current) {
+              insufficientEndToastShownRef.current = true;
+              showToastRef.current?.(
+                'Call Auto-Terminated',
+                `Need ${rateNeeded} coins for the next minute. Please recharge.`,
+                'error'
+              );
+            }
+            endCallRef.current();
+            return;
+          }
+          requestBurnRef.current(expectedMinute);
+        }
+      }
+
+      setActiveCall((p) => {
+        if (!p || p.id !== callId || p.status !== 'active') return p;
+        return { ...p, durationSeconds: next };
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [activeCall?.id, activeCall?.status, activeCall?.callerId, currentUser.id]);
+
+  // Active call billing — CALLER ONLY, after LiveKit peer is present.
   useEffect(() => {
     if (!activeCall || activeCall.status !== 'active') {
       if (!activeCall) {
@@ -5588,25 +5654,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         burnInFlightRef.current.clear();
         insufficientEndToastShownRef.current = false;
         billingCapSecondsRef.current = null;
+        requestBurnRef.current = () => {};
       }
       return;
     }
 
-    // Duration HUD ticks for both parties once media is connected
-    if (!activeCall.mediaConnected) {
+    if (!activeCall.mediaConnected || currentUser.id !== activeCall.callerId) {
+      requestBurnRef.current = () => {};
       return;
-    }
-
-    // Single billing authority: only the caller runs burn checks
-    if (currentUser.id !== activeCall.callerId) {
-      // Receivers still tick duration for HUD, but never burn
-      const interval = setInterval(() => {
-        setActiveCall((prev) => {
-          if (!prev || prev.status !== 'active' || !prev.mediaConnected) return prev;
-          return { ...prev, durationSeconds: prev.durationSeconds + 1 };
-        });
-      }, 1000);
-      return () => clearInterval(interval);
     }
 
     const callId = activeCall.id;
@@ -5762,64 +5817,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     };
 
+    requestBurnRef.current = (minute: number) => {
+      void requestBurn(minute);
+    };
+
     // Bill minute 1 immediately when LiveKit peer is connected
     if (!billedMinutesRef.current.has(1)) {
       void requestBurn(1);
     }
 
-    const interval = setInterval(() => {
-      setActiveCall((prev) => {
-        if (!prev || prev.status !== 'active' || !prev.mediaConnected) return prev;
-
-        const newDuration = prev.durationSeconds + 1;
-        const cap = billingCapSecondsRef.current;
-
-        // Hard auto-end: floor(startBalance/rate)*60 seconds elapsed
-        if (cap != null && cap > 0 && newDuration >= cap) {
-          window.setTimeout(() => {
-            const still = activeCallRef.current;
-            if (still && still.id === callId && still.status === 'active') {
-              endForInsufficient('Coin time finished. Please recharge to continue calling.');
-            }
-          }, 0);
-          return {
-            ...prev,
-            durationSeconds: cap,
-          };
-        }
-
-        const expectedMinute = Math.floor(newDuration / tickCheckSeconds) + 1;
-        const billedMax = Math.max(prev.billedMinutes || 0, ...Array.from(billedMinutesRef.current), 0);
-
-        if (expectedMinute > billedMax && expectedMinute > 1) {
-          const rateNeeded = getEffectiveCallRate(prev.receiverId, prev.callerId);
-          const callerRow = usersRef.current.find((u) => u.id === prev.callerId);
-          const localBalance = Number(callerRow?.coinBalance);
-          if (Number.isFinite(localBalance) && localBalance < rateNeeded) {
-            window.setTimeout(() => {
-              const still = activeCallRef.current;
-              if (still && still.id === callId && still.status === 'active') {
-                endForInsufficient(
-                  `Need ${rateNeeded} coins for the next minute. Please recharge.`
-                );
-              }
-            }, 0);
-            return {
-              ...prev,
-              durationSeconds: newDuration,
-            };
-          }
-          void requestBurn(expectedMinute);
-        }
-
-        return {
-          ...prev,
-          durationSeconds: newDuration,
-        };
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
+    return () => {
+      requestBurnRef.current = () => {};
+    };
   }, [
     activeCall?.id,
     activeCall?.status,

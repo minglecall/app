@@ -296,6 +296,8 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
     let isMounted = true;
     const abortController = new AbortController();
     const billingCallId = activeCall.id;
+    let billingMarked = false;
+    let billingFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
     const clearVideoElements = () => {
       if (remoteVideoRef.current) {
@@ -598,8 +600,47 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
           adminQualityProfile === 'high_720p' ? 'LiveKit 720p' :
           'LiveKit 480p';
 
+        /**
+         * Start coin burn when the call is truly live:
+         * 1) Peer already/joined in the LiveKit room (preferred)
+         * 2) Fallback: local room connected + call already accepted — peer may arrive a moment later
+         */
+        const markBillingReady = (reason: string) => {
+          if (!isMounted || billingMarked) return;
+          billingMarked = true;
+          if (billingFallbackTimer != null) {
+            clearTimeout(billingFallbackTimer);
+            billingFallbackTimer = null;
+          }
+          console.info('[LiveKit] mediaConnected / billing ready:', reason, billingCallId);
+          markCallMediaConnectedRef.current(billingCallId);
+        };
+
+        const tryMarkBillingReady = (opts?: { allowWithoutPeer?: boolean }) => {
+          if (!isMounted || billingMarked) return;
+          if (room.remoteParticipants.size >= 1) {
+            markBillingReady('peer-in-room');
+            return;
+          }
+          if (opts?.allowWithoutPeer) {
+            markBillingReady('local-connected-fallback');
+          }
+        };
+
+        const scheduleBillingFallback = () => {
+          if (billingMarked || billingFallbackTimer != null) return;
+          // Peer often joins 1–3s after the first party; don't wait forever.
+          billingFallbackTimer = setTimeout(() => {
+            billingFallbackTimer = null;
+            if (!isMounted || billingMarked) return;
+            tryMarkBillingReady({ allowWithoutPeer: true });
+          }, 3000);
+        };
+
         room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
           void attachRemoteTrack(track);
+          // Remote A/V subscribed = peer is live in the room
+          tryMarkBillingReady();
         });
 
         room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
@@ -637,18 +678,13 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
           if (isMounted) setConnectionStatusText('Reconnecting…');
         });
 
-        const tryMarkBillingReady = () => {
-          if (!isMounted) return;
-          if (room.remoteParticipants.size < 1) return;
-          markCallMediaConnectedRef.current(billingCallId);
-        };
-
         room.on(RoomEvent.Reconnected, () => {
           if (isMounted) {
             setLiveKitConnected(true);
             setConnectionStatusText(`${baseStatus} · Reconnected`);
             attachExistingRemoteTracks(room);
             tryMarkBillingReady();
+            scheduleBillingFallback();
           }
         });
 
@@ -756,7 +792,9 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
           setLiveKitConnected(true);
           setIsPreviewOnly(false);
           setConnectionStatusText(`${baseStatus} · Connected`);
+          // Prefer peer-present; if alone in room, start billing after short fallback
           tryMarkBillingReady();
+          scheduleBillingFallback();
         }
 
         // Capture + publish local media after room join (non-fatal on permission errors)
@@ -828,6 +866,9 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
           await room.localParticipant.setCameraEnabled(cameraEnabled);
         }
 
+        // Peer may have joined while we published — re-check before relying on fallback timer
+        tryMarkBillingReady();
+
         if (isMounted) {
           setConnectionStatusText(
             localTracks.length
@@ -839,6 +880,10 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
         if (abortController.signal.aborted) return;
         console.warn('LiveKit connection failed:', err);
         stopLocalTracks();
+        if (billingFallbackTimer != null) {
+          clearTimeout(billingFallbackTimer);
+          billingFallbackTimer = null;
+        }
         if (liveKitRoomRef.current) {
           try {
             await liveKitRoomRef.current.disconnect();
@@ -856,6 +901,10 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
     return () => {
       isMounted = false;
       abortController.abort();
+      if (billingFallbackTimer != null) {
+        clearTimeout(billingFallbackTimer);
+        billingFallbackTimer = null;
+      }
       const room = liveKitRoomRef.current;
       liveKitRoomRef.current = null;
       if (room) {
@@ -2296,10 +2345,10 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
           <RefreshCw className={`w-5 h-5 ${isFlippingCamera ? 'animate-spin' : ''}`} />
         </button>
 
-        {/* Center timer + burn rate pill */}
-        <div className="px-3 sm:px-4 py-2 rounded-full glass-pill flex flex-col items-center min-w-[4.5rem] sm:min-w-[5.5rem]">
-          <span className="font-ticker font-bold text-sm text-white leading-none">
-            {formatTime(activeCall.durationSeconds)}
+        {/* Single call clock (seconds) */}
+        <div className="px-3 sm:px-4 py-2 rounded-full glass-pill flex flex-col items-center min-w-[5.5rem]">
+          <span className="font-ticker font-bold text-base text-white leading-none tabular-nums">
+            {formatTime(activeCall.durationSeconds || 0)}
           </span>
           <span className="font-ticker text-[9px] text-amber-300 mt-0.5 leading-none">
             {currentRatePerMin}/m
