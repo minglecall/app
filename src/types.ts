@@ -258,6 +258,8 @@ export interface CallSession {
   giftsSent: { giftId: string; giftName: string; cost: number; timestamp: number }[];
   status: 'ringing' | 'connecting' | 'active' | 'ended' | 'rejected';
   warningMessage?: string;
+  /** True only after LiveKit room connected with a remote participant — gates coin burn. */
+  mediaConnected?: boolean;
 }
 
 export interface AdminActiveCall {

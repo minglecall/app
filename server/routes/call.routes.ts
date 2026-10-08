@@ -301,6 +301,16 @@ export function createCallRouter(ctx: ServerRuntime): Router {
         });
       }
 
+      if (call.status !== 'active') {
+        return res.status(409).json({
+          success: false,
+          error: {
+            message: 'Call is not active — billing starts after accept and media connect',
+            code: 'CALL_NOT_ACTIVE',
+          },
+        });
+      }
+
       if (call.callerId !== callerId) {
         return res.status(403).json({
           success: false,

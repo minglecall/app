@@ -233,6 +233,8 @@ interface AppContextType {
   acceptCall: () => void;
   rejectCall: () => void;
   endCall: () => void;
+  /** Mark LiveKit peer connected — starts coin burn clock (caller billing). */
+  markCallMediaConnected: (callId: string) => void;
   sendGiftInCall: (giftId: string) => boolean;
   getEffectiveCallRate: (hostId?: string, callerId?: string) => number;
 
@@ -816,6 +818,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const activateCallLocally = (startTime?: number) => {
     billedMinutesRef.current.clear();
     burnInFlightRef.current.clear();
+    insufficientEndToastShownRef.current = false;
     const accepted = activeCallRef.current;
     setActiveCall((prev) => {
       if (!prev) return null;
@@ -824,6 +827,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         status: 'active',
         startTime: startTime || Date.now(),
         billedMinutes: 0,
+        mediaConnected: false,
+        durationSeconds: prev.mediaConnected ? prev.durationSeconds : 0,
       };
     });
     if (accepted) {
@@ -860,6 +865,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const preferredStatusRef = useRef<'online' | 'busy' | 'offline'>('online');
   const billedMinutesRef = useRef<Set<number>>(new Set());
   const burnInFlightRef = useRef<Set<number>>(new Set());
+  /** Prevents stacked insufficient-balance end toasts for the same call. */
+  const insufficientEndToastShownRef = useRef(false);
   const endCallRef = useRef<() => void>(() => {});
   const syncCallEndAndPresenceRef = useRef<
     (payload: Record<string, unknown>, restoreIds: string[]) => Promise<void>
@@ -1453,6 +1460,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (cur && cur.status === 'active') return;
       if (cur && cur.id === callId && cur.status === 'ringing') return;
 
+      billedMinutesRef.current.clear();
+      burnInFlightRef.current.clear();
+      insufficientEndToastShownRef.current = false;
       setActiveCall({
         id: callId,
         callerId,
@@ -1463,6 +1473,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         coinsEarned: 0,
         giftsSent: [],
         status: 'ringing',
+        mediaConnected: false,
       });
       setUsers((prev) =>
         prev.map((u) =>
@@ -3678,7 +3689,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               });
             }
             if (data.code === 'INSUFFICIENT_BALANCE' || data.reason === 'INSUFFICIENT_BALANCE') {
-              showToast('Call Ended', 'Call ended due to insufficient coin balance.', 'error');
+              if (!insufficientEndToastShownRef.current) {
+                insufficientEndToastShownRef.current = true;
+                showToast('Call Ended', 'Call ended due to insufficient coin balance. Please recharge.', 'error');
+              }
             } else if (data.endedBy === 'admin_moderator' || outcomeStatus === 'terminated') {
               showToast(
                 'Call Terminated',
@@ -4888,6 +4902,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             : u
         )
       );
+      billedMinutesRef.current.clear();
+      burnInFlightRef.current.clear();
+      insufficientEndToastShownRef.current = false;
       setActiveCall({
         id: callId,
         callerId: currentUser.id,
@@ -4898,6 +4915,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         coinsEarned: 0,
         giftsSent: [],
         status: 'ringing',
+        mediaConnected: false,
       });
     };
 
@@ -5128,7 +5146,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return;
       }
 
-      // Flip local UI to active → VideoCallStudio connects LiveKit
+      // Flip local UI to active → VideoCallStudio connects LiveKit (burn waits for mediaConnected)
+      billedMinutesRef.current.clear();
+      burnInFlightRef.current.clear();
+      insufficientEndToastShownRef.current = false;
       setActiveCall((prev) => {
         if (!prev) return null;
         return {
@@ -5138,6 +5159,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           billedMinutes: 0,
           coinsSpent: 0,
           coinsEarned: 0,
+          mediaConnected: false,
+          durationSeconds: 0,
         };
       });
       setUsers((prev) =>
@@ -5387,7 +5410,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
     billedMinutesRef.current.clear();
     burnInFlightRef.current.clear();
+    // Keep insufficientEndToastShownRef so remote call:ended does not double-toast
     setActiveCall(null);
+
+    // Skip generic end toast when insufficient path already notified the initiator
+    if (insufficientEndToastShownRef.current && !wasRinging) {
+      return;
+    }
 
     showToast(
       wasRinging
@@ -5410,6 +5439,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Keep endCallRef fresh for the billing interval (avoids stale closures)
   endCallRef.current = endCall;
+
+  /** LiveKit peer present — start billing clock. Idempotent per call. */
+  const markCallMediaConnected = useCallback((callId: string) => {
+    const id = String(callId || '').trim();
+    if (!id) return;
+    setActiveCall((prev) => {
+      if (!prev || prev.id !== id || prev.status !== 'active') return prev;
+      if (prev.mediaConnected) return prev;
+      return {
+        ...prev,
+        mediaConnected: true,
+        durationSeconds: 0,
+        startTime: Date.now(),
+      };
+    });
+  }, []);
+
+  const showInsufficientEndToastOnce = useCallback(
+    (title: string, message: string, type: 'error' | 'warning' = 'error') => {
+      if (insufficientEndToastShownRef.current) return;
+      insufficientEndToastShownRef.current = true;
+      showToast(title, message, type);
+    },
+    [showToast]
+  );
 
   // Apply authoritative burn balances from server response / WS broadcast
   const applyBurnBalances = useCallback((payload: {
@@ -5515,12 +5569,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   // Active call timer — CALLER ONLY triggers server-authoritative minute billing
+  // Billing starts only after LiveKit mediaConnected (peer present), not mere accept.
   useEffect(() => {
     if (!activeCall || activeCall.status !== 'active') {
       if (!activeCall) {
         billedMinutesRef.current.clear();
         burnInFlightRef.current.clear();
+        insufficientEndToastShownRef.current = false;
       }
+      return;
+    }
+
+    // Duration HUD ticks for both parties once media is connected
+    if (!activeCall.mediaConnected) {
       return;
     }
 
@@ -5529,7 +5590,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // Receivers still tick duration for HUD, but never burn
       const interval = setInterval(() => {
         setActiveCall((prev) => {
-          if (!prev || prev.status !== 'active') return prev;
+          if (!prev || prev.status !== 'active' || !prev.mediaConnected) return prev;
           return { ...prev, durationSeconds: prev.durationSeconds + 1 };
         });
       }, 1000);
@@ -5559,10 +5620,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const localBalance = Number(callerRow?.coinBalance);
         if (Number.isFinite(localBalance) && localBalance < rateNeeded) {
           burnInFlightRef.current.delete(billingMinute);
-          showToast(
+          showInsufficientEndToastOnce(
             'Call Auto-Terminated',
-            `Need ${rateNeeded} coins for the next minute (friend ${systemSettings.coinBurnRateFriendPerMin ?? 80} / standard ${systemSettings.coinBurnRatePerMin ?? 120}).`,
-            'error'
+            `Need ${rateNeeded} coins for the next minute. Please recharge.`
           );
           endCallRef.current();
           return;
@@ -5630,10 +5690,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ) {
           // Do not mark minute as billed — unpaid minute must not increment coinsSpent
           burnInFlightRef.current.delete(billingMinute);
-          showToast(
+          showInsufficientEndToastOnce(
             'Call Auto-Terminated',
-            'Insufficient coin balance for the next minute.',
-            'error'
+            'Insufficient coin balance for the next minute. Please recharge.'
           );
           endCallRef.current();
           return;
@@ -5669,9 +5728,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const nextBalance = Number(data.newCallerBalance);
         const ratePerMin = Number(data.ratePerMin) || rateNeeded;
         if (Number.isFinite(nextBalance) && nextBalance < ratePerMin) {
-          showToast(
+          showInsufficientEndToastOnce(
             'Call Ending',
-            'Not enough coins for another minute. Ending call.',
+            'Not enough coins for another minute. Please recharge.',
             'warning'
           );
           // Allow current minute to finish visually; end shortly so peer gets signal
@@ -5688,14 +5747,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     };
 
-    // Bill minute 1 immediately when call becomes active
+    // Bill minute 1 immediately when LiveKit peer is connected
     if (!billedMinutesRef.current.has(1)) {
       requestBurn(1);
     }
 
     const interval = setInterval(() => {
       setActiveCall((prev) => {
-        if (!prev || prev.status !== 'active') return prev;
+        if (!prev || prev.status !== 'active' || !prev.mediaConnected) return prev;
 
         const newDuration = prev.durationSeconds + 1;
         const expectedMinute = Math.floor(newDuration / tickCheckSeconds) + 1;
@@ -5713,7 +5772,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [activeCall?.id, activeCall?.status, activeCall?.callerId, currentUser.id, applyBurnBalances]);
+  }, [
+    activeCall?.id,
+    activeCall?.status,
+    activeCall?.mediaConnected,
+    activeCall?.callerId,
+    currentUser.id,
+    applyBurnBalances,
+    showInsufficientEndToastOnce,
+  ]);
 
   // Real-time synchronization of current activeCall with adminActiveCalls
   useEffect(() => {
@@ -9629,6 +9696,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         acceptCall,
         rejectCall,
         endCall,
+        markCallMediaConnected,
         sendGiftInCall,
         getEffectiveCallRate,
         sendMessage,

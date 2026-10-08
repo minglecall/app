@@ -772,30 +772,12 @@ async function handleCalls(path, req, res) {
         });
       }
       let callStatus = String(callRow.status || '').toLowerCase();
-      // Caller only bills after local accept — promote ringing → active if race with sync
-      if (['ringing', 'connecting'].includes(callStatus)) {
-        const nowIso = new Date().toISOString();
-        const promoteErr = await updateCallLogs(
-          auth.client,
-          {
-            status: 'active',
-            ended_at: null,
-            end_time: null,
-            updated_at: nowIso,
-          },
-          (q) => q.eq('id', callId).eq('caller_id', callerId)
-        );
-        if (promoteErr) {
-          console.warn('[api/calls/burn] promote active', promoteErr.message);
-        } else {
-          callStatus = 'active';
-        }
-      }
-      if (!['active', 'accepted', 'in_call', 'connecting'].includes(callStatus)) {
+      // Do not promote ringing/connecting → active on burn (client must accept + sync first)
+      if (!['active', 'accepted', 'in_call'].includes(callStatus)) {
         return send(res, 409, {
           success: false,
           error: {
-            message: 'Call is not active — billing starts after accept',
+            message: 'Call is not active — billing starts after accept and media connect',
             code: 'CALL_NOT_ACTIVE',
           },
         });

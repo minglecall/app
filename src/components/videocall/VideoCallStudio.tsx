@@ -13,7 +13,6 @@ import {
   MessageSquare,
   ShieldAlert,
   Lock,
-  Zap,
   Coins,
   Sparkles,
   Send,
@@ -49,12 +48,13 @@ interface VideoCallStudioProps {
   onOpenStore: () => void;
 }
 
-export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore }) => {
+export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _onOpenStore }) => {
   const {
     activeCall,
     acceptCall,
     rejectCall,
     endCall,
+    markCallMediaConnected,
     currentUser,
     users,
     systemSettings,
@@ -69,6 +69,10 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
     getEffectiveCallRate,
     showToast,
   } = useApp();
+  const markCallMediaConnectedRef = useRef(markCallMediaConnected);
+  useEffect(() => {
+    markCallMediaConnectedRef.current = markCallMediaConnected;
+  }, [markCallMediaConnected]);
 
   const [micEnabled, setMicEnabled] = useState(true);
   const [cameraEnabled, setCameraEnabled] = useState(true);
@@ -291,6 +295,7 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
 
     let isMounted = true;
     const abortController = new AbortController();
+    const billingCallId = activeCall.id;
 
     const clearVideoElements = () => {
       if (remoteVideoRef.current) {
@@ -632,12 +637,25 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
           if (isMounted) setConnectionStatusText('Reconnecting…');
         });
 
+        const tryMarkBillingReady = () => {
+          if (!isMounted) return;
+          if (room.remoteParticipants.size < 1) return;
+          markCallMediaConnectedRef.current(billingCallId);
+        };
+
         room.on(RoomEvent.Reconnected, () => {
           if (isMounted) {
             setLiveKitConnected(true);
             setConnectionStatusText(`${baseStatus} · Reconnected`);
             attachExistingRemoteTracks(room);
+            tryMarkBillingReady();
           }
+        });
+
+        room.on(RoomEvent.ParticipantConnected, () => {
+          if (!isMounted) return;
+          setLiveKitConnected(true);
+          tryMarkBillingReady();
         });
 
         room.on(RoomEvent.ParticipantDisconnected, () => {
@@ -738,6 +756,7 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
           setLiveKitConnected(true);
           setIsPreviewOnly(false);
           setConnectionStatusText(`${baseStatus} · Connected`);
+          tryMarkBillingReady();
         }
 
         // Capture + publish local media after room join (non-fatal on permission errors)
@@ -1532,32 +1551,43 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
   const currentRatePerMin = getEffectiveCallRate(otherUserId, currentUser.id);
   const isFriendCall = isFriend(otherUserId);
 
-  // Exact 1-Minute Warning & Low Balance Calculations
+  // Exact 1-Minute Warning & Low Balance Calculations (initiator only, after billing started)
   const tickDuration = 60;
+  const isCallInitiator = currentUser.id === activeCall.callerId;
   const currentMinuteEndSeconds = (activeCall.billedMinutes || 1) * tickDuration;
   const secondsLeftInCurrentMinute = Math.max(0, currentMinuteEndSeconds - activeCall.durationSeconds);
   const affordableFutureMinutes = Math.floor((currentUser.coinBalance || 0) / currentRatePerMin);
   const totalSecondsRemaining = secondsLeftInCurrentMinute + (affordableFutureMinutes * tickDuration);
 
-  // Trigger 1-minute warning when total affordable time is <= 60 seconds
-  const isFinalMinuteWarning = isMaleCaller && totalSecondsRemaining <= tickDuration;
+  // Single once-per-call recharge toast for the call initiator (no banner/pill stack)
+  const isFinalMinuteWarning =
+    isCallInitiator &&
+    Boolean(activeCall.mediaConnected) &&
+    totalSecondsRemaining <= tickDuration;
 
-  // Proactive 1-minute audio/toast warning trigger
   const hasAlertedRef = useRef(false);
+  const rechargeWarnCallIdRef = useRef<string | null>(null);
   useEffect(() => {
+    if (!activeCall?.id) {
+      hasAlertedRef.current = false;
+      rechargeWarnCallIdRef.current = null;
+      return;
+    }
+    if (rechargeWarnCallIdRef.current !== activeCall.id) {
+      rechargeWarnCallIdRef.current = activeCall.id;
+      hasAlertedRef.current = false;
+    }
     if (isFinalMinuteWarning && !hasAlertedRef.current) {
       hasAlertedRef.current = true;
       if (showToast) {
         showToast(
-          '⚠️ 1-Minute Coin Warning!',
-          `Coins finishing soon (~${totalSecondsRemaining}s left). Quick recharge now to keep the call connected!`,
+          'Low coins',
+          `About ${totalSecondsRemaining}s left — please recharge to continue.`,
           'warning'
         );
       }
-    } else if (!isFinalMinuteWarning) {
-      hasAlertedRef.current = false;
     }
-  }, [isFinalMinuteWarning, totalSecondsRemaining, showToast]);
+  }, [activeCall?.id, isFinalMinuteWarning, totalSecondsRemaining, showToast]);
 
   // Format MM:SS
   const formatTime = (seconds: number) => {
@@ -1719,7 +1749,7 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
               </span>
             </div>
             <p className="text-[10px] text-slate-400 italic pt-1 border-t border-slate-800/80">
-              * Coins start burning only when the call is accepted.
+              * Coins start burning only when both sides connect on the call.
             </p>
           </div>
 
@@ -1896,49 +1926,11 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
         </div>
       </div>
 
-      {/* 1-Minute Quick Recharge Warning Banner for Male Caller */}
-      {isFinalMinuteWarning && (
-        <div className="absolute left-3 right-3 sm:left-6 sm:right-6 z-40 bg-gradient-to-r from-rose-950/95 via-amber-950/95 to-rose-950/95 border-2 border-amber-500/80 backdrop-blur-xl px-4 py-3 rounded-2xl shadow-2xl animate-in slide-in-from-top duration-300"
-          style={{ top: 'var(--vc-header-offset)' }}
-        >
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5">
-            <div className="flex items-center space-x-3 text-left w-full sm:w-auto min-w-0">
-              <div className="p-2 bg-amber-500/20 border border-amber-400/40 rounded-xl shrink-0 animate-pulse">
-                <Zap className="w-5 h-5 text-amber-400" />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center flex-wrap gap-2">
-                  <span className="font-extrabold text-xs sm:text-sm text-white flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-                    Coins Ending in {totalSecondsRemaining}s!
-                  </span>
-                  <span className="px-2 py-0.5 bg-rose-500/30 border border-rose-500/50 rounded-full text-[10px] font-bold text-rose-300">
-                    {currentUser.coinBalance} 🪙 left
-                  </span>
-                </div>
-                <p className="text-[11px] text-amber-200/90 mt-0.5">
-                  Recharge now to prevent call disconnection (Need {currentRatePerMin} 🪙/min)
-                </p>
-              </div>
-            </div>
-
-            <button
-              id="quick-recharge-call-banner-btn"
-              onClick={onOpenStore}
-              className="w-full sm:w-auto px-5 py-2 bg-gradient-to-r from-amber-400 via-amber-500 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-black text-xs rounded-xl shadow-lg hover:shadow-amber-500/30 hover:scale-105 active:scale-95 transition-all flex items-center justify-center space-x-1.5 shrink-0"
-            >
-              <Zap className="w-3.5 h-3.5 fill-current" />
-              <span>⚡ Quick Recharge</span>
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Safety Warning Notification Banner */}
       {activeCall.warningMessage && (
         <div
           className="absolute left-4 right-4 z-40 bg-amber-950/90 border border-amber-500/60 backdrop-blur-md px-4 py-2.5 rounded-2xl text-amber-200 text-xs flex items-center justify-between shadow-2xl animate-fade-in font-sans"
-          style={{ top: isFinalMinuteWarning ? 'calc(var(--vc-header-offset) + 5.5rem)' : 'var(--vc-header-offset)' }}
+          style={{ top: 'var(--vc-header-offset)' }}
         >
           <div className="flex items-center space-x-2.5 min-w-0">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
@@ -2011,26 +2003,6 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore })
             style={{ top: 'calc(var(--vc-header-offset) + 0.25rem)' }}
           >
             Preview only — LiveKit unavailable (not a live 2-party call)
-          </div>
-        )}
-
-        {/* Floating In-Call 1-Minute Quick Recharge Pill */}
-        {isFinalMinuteWarning && (
-          <div
-            className="absolute left-1/2 -translate-x-1/2 z-30 flex items-center space-x-2 bg-slate-950/95 border-2 border-amber-500/80 backdrop-blur-xl px-4 py-2 rounded-2xl shadow-2xl animate-pulse max-w-[calc(100%-2rem)]"
-            style={{ bottom: 'var(--vc-float-bottom)' }}
-          >
-            <Zap className="w-4 h-4 text-amber-400 shrink-0" />
-            <span className="text-xs font-bold text-amber-300 whitespace-nowrap">
-              Low Coins: ~{totalSecondsRemaining}s left
-            </span>
-            <button
-              id="low-balance-buy-coins-btn"
-              onClick={onOpenStore}
-              className="px-3 py-1 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-black text-xs rounded-xl shadow transition-transform hover:scale-105 active:scale-95 whitespace-nowrap"
-            >
-              ⚡ Refill
-            </button>
           </div>
         )}
 
