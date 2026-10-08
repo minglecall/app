@@ -57,10 +57,13 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   const countryName = getUserEffectiveLocation(user).country || user.nationality || '';
 
   const fallbackAvatar = getFallbackAvatar(user.name, user.gender, user.role);
-  const primaryAvatar =
-    normalizeMediaUrl(user.avatarUrl) ||
-    normalizeMediaUrl(user.gallery?.[0]) ||
-    fallbackAvatar;
+  const avatarUrl = normalizeMediaUrl(user.avatarUrl);
+  const galleryUrl = normalizeMediaUrl(user.gallery?.[0]);
+  const primaryAvatar = (() => {
+    if (layout.photoSource === 'avatar') return avatarUrl || fallbackAvatar;
+    if (layout.photoSource === 'galleryFirst') return galleryUrl || avatarUrl || fallbackAvatar;
+    return avatarUrl || galleryUrl || fallbackAvatar;
+  })();
 
   const wrapPad = (w: DiscoveryCardWidgetConfig, node: React.ReactNode): React.ReactNode => {
     if (node == null) return null;
@@ -258,6 +261,9 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       alt={user.name}
       aspectMobile={layout.cardAspectMobile}
       aspectDesktop={layout.cardAspectDesktop}
+      showPhoto={layout.showPhoto}
+      objectFit={layout.photoFit}
+      objectPosition={layout.photoPosition}
       onClick={previewMode ? undefined : () => onOpenProfile(user)}
       statusSlot={
         hasTop ? (

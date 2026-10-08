@@ -13,17 +13,39 @@ export interface MediaCardProps extends React.HTMLAttributes<HTMLDivElement> {
   aspectDesktop?: MediaCardAspect;
   /** Used when primary src fails or is empty — kept in React state so re-renders cannot wipe it. */
   fallbackSrc?: string;
+  /** Hide photo layer (gradient + overlays still render). */
+  showPhoto?: boolean;
+  objectFit?: 'cover' | 'contain';
+  objectPosition?: 'center' | 'top' | 'bottom';
   statusSlot?: React.ReactNode;
   metadata?: React.ReactNode;
   footer?: React.ReactNode;
   onImageError?: React.ReactEventHandler<HTMLImageElement>;
 }
 
-function aspectToClass(a: MediaCardAspect): string {
-  if (a === '9/16') return 'aspect-[9/16]';
-  if (a === '2/3') return 'aspect-[2/3]';
-  return 'aspect-[3/4]';
-}
+/** Full class strings so Tailwind JIT always emits them (no dynamic construction). */
+const ASPECT_PAIR_CLASS: Record<string, string> = {
+  '9/16__3/4': 'aspect-[9/16] sm:aspect-[3/4] min-h-[220px]',
+  '9/16__2/3': 'aspect-[9/16] sm:aspect-[2/3] min-h-[220px]',
+  '9/16__9/16': 'aspect-[9/16] sm:aspect-[9/16] min-h-[220px]',
+  '2/3__3/4': 'aspect-[2/3] sm:aspect-[3/4] min-h-[200px]',
+  '2/3__2/3': 'aspect-[2/3] sm:aspect-[2/3] min-h-[200px]',
+  '2/3__9/16': 'aspect-[2/3] sm:aspect-[9/16] min-h-[200px]',
+  '3/4__3/4': 'aspect-[3/4] sm:aspect-[3/4] min-h-[200px]',
+  '3/4__2/3': 'aspect-[3/4] sm:aspect-[2/3] min-h-[200px]',
+  '3/4__9/16': 'aspect-[3/4] sm:aspect-[9/16] min-h-[200px]',
+};
+
+const OBJECT_FIT_CLASS: Record<'cover' | 'contain', string> = {
+  cover: 'object-cover',
+  contain: 'object-contain',
+};
+
+const OBJECT_POS_CLASS: Record<'center' | 'top' | 'bottom', string> = {
+  center: 'object-center',
+  top: 'object-top',
+  bottom: 'object-bottom',
+};
 
 export const MediaCard: React.FC<MediaCardProps> = ({
   src,
@@ -32,6 +54,9 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   aspectMobile,
   aspectDesktop,
   fallbackSrc,
+  showPhoto = true,
+  objectFit = 'cover',
+  objectPosition = 'center',
   statusSlot,
   metadata,
   footer,
@@ -42,13 +67,8 @@ export const MediaCard: React.FC<MediaCardProps> = ({
 }) => {
   const mobile = aspectMobile || (aspect === '9/16' || aspect === '2/3' ? aspect : '9/16');
   const desktop = aspectDesktop || (aspect === '3/4' || aspect === '2/3' ? aspect : '3/4');
-  // Full class strings required for Tailwind JIT
-  const dMap: Record<MediaCardAspect, string> = {
-    '3/4': 'sm:aspect-[3/4]',
-    '2/3': 'sm:aspect-[2/3]',
-    '9/16': 'sm:aspect-[9/16]',
-  };
-  const resolvedAspectClass = `${aspectToClass(mobile)} ${dMap[desktop]}`;
+  const resolvedAspectClass =
+    ASPECT_PAIR_CLASS[`${mobile}__${desktop}`] || ASPECT_PAIR_CLASS['9/16__3/4'];
 
   const resolvedSrc = (src && String(src).trim()) || fallbackSrc || '';
   const [imgSrc, setImgSrc] = useState(resolvedSrc);
@@ -85,14 +105,14 @@ export const MediaCard: React.FC<MediaCardProps> = ({
       onClick={onClick}
       {...rest}
     >
-      <div className={`relative w-full ${resolvedAspectClass} overflow-hidden bg-app`}>
-        {!loaded && (
+      <div className={`relative w-full ${resolvedAspectClass} overflow-hidden bg-slate-900`}>
+        {showPhoto && !loaded && (
           <div
             className="absolute inset-0 animate-pulse bg-gradient-to-br from-slate-800 via-slate-750 to-slate-900"
             aria-hidden
           />
         )}
-        {imgSrc ? (
+        {showPhoto && imgSrc ? (
           <img
             src={imgSrc}
             alt={alt}
@@ -101,11 +121,19 @@ export const MediaCard: React.FC<MediaCardProps> = ({
             onLoad={() => setLoaded(true)}
             onError={handleError}
             className={[
-              'absolute inset-0 w-full h-full object-cover transition-all duration-500 group-hover:scale-105',
+              'absolute inset-0 w-full h-full transition-all duration-500 group-hover:scale-105',
+              OBJECT_FIT_CLASS[objectFit],
+              OBJECT_POS_CLASS[objectPosition],
               loaded ? 'opacity-100' : 'opacity-0',
             ].join(' ')}
           />
         ) : null}
+        {!showPhoto && (
+          <div
+            className="absolute inset-0 bg-gradient-to-br from-slate-800 via-slate-900 to-black"
+            aria-hidden
+          />
+        )}
         <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-black/10 pointer-events-none" />
 
         {statusSlot ? (

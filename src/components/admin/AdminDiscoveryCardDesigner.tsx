@@ -43,8 +43,11 @@ const PREVIEW_USER = {
   nationality: 'United States',
   countryCode: 'US',
   bio: '',
-  avatarUrl: '',
-  gallery: [] as string[],
+  avatarUrl:
+    'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=600',
+  gallery: [
+    'https://images.unsplash.com/photo-1529626455594-64432c72bba4?auto=format&fit=crop&q=80&w=600',
+  ] as string[],
   interests: [] as string[],
   spokenLanguages: ['English'],
   createdAt: new Date().toISOString(),
@@ -478,10 +481,80 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
               </label>
             </div>
           </div>
+
+          {/* Picture */}
+          <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Card picture</h4>
+            <label className="flex items-center gap-2 text-xs font-semibold text-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={draft.showPhoto}
+                onChange={(e) =>
+                  setDraft((prev) =>
+                    parseDiscoveryCardLayout({ ...prev, showPhoto: e.target.checked })
+                  )
+                }
+                className="accent-pink-500 w-4 h-4"
+              />
+              Show host photo
+            </label>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <label className="space-y-1">
+                <span className="text-slate-400 font-semibold">Photo source</span>
+                <select
+                  disabled={!draft.showPhoto}
+                  value={draft.photoSource}
+                  onChange={(e) =>
+                    setDraft((prev) =>
+                      parseDiscoveryCardLayout({ ...prev, photoSource: e.target.value })
+                    )
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 disabled:opacity-40"
+                >
+                  <option value="avatarThenGallery">Avatar, then gallery</option>
+                  <option value="avatar">Avatar only</option>
+                  <option value="galleryFirst">Gallery first</option>
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-slate-400 font-semibold">Fit</span>
+                <select
+                  disabled={!draft.showPhoto}
+                  value={draft.photoFit}
+                  onChange={(e) =>
+                    setDraft((prev) =>
+                      parseDiscoveryCardLayout({ ...prev, photoFit: e.target.value })
+                    )
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 disabled:opacity-40"
+                >
+                  <option value="cover">Cover</option>
+                  <option value="contain">Contain</option>
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-slate-400 font-semibold">Position</span>
+                <select
+                  disabled={!draft.showPhoto}
+                  value={draft.photoPosition}
+                  onChange={(e) =>
+                    setDraft((prev) =>
+                      parseDiscoveryCardLayout({ ...prev, photoPosition: e.target.value })
+                    )
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 disabled:opacity-40"
+                >
+                  <option value="center">Center</option>
+                  <option value="top">Top</option>
+                  <option value="bottom">Bottom</option>
+                </select>
+              </label>
+            </div>
+          </div>
         </div>
 
-        {/* Preview */}
-        <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3 xl:sticky xl:top-4 h-fit">
+        {/* Preview — high z + offset so it stays above app header while scrolling */}
+        <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3 xl:sticky xl:top-24 xl:z-30 xl:self-start h-fit shadow-xl">
           <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Live preview</h4>
           <div className="max-w-[220px] mx-auto">
             <DiscoveryCard
@@ -495,7 +568,7 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
             />
           </div>
           <p className="text-[10px] text-slate-500 text-center">
-            Preview uses a sample Online + Verified host. Save to apply on Discovery.
+            Preview uses a sample Online + Verified host photo. Save to apply on Discovery.
           </p>
         </div>
       </div>

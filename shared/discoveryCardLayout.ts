@@ -78,6 +78,9 @@ export type DiscoveryFlagSize = 'xs' | 'sm' | 'md';
 export type DiscoveryAspectMobile = '2/3' | '9/16';
 export type DiscoveryAspectDesktop = '3/4' | '2/3';
 export type DiscoveryCallStyle = 'circle' | 'pill';
+export type DiscoveryPhotoSource = 'avatarThenGallery' | 'avatar' | 'galleryFirst';
+export type DiscoveryPhotoFit = 'cover' | 'contain';
+export type DiscoveryPhotoPosition = 'center' | 'top' | 'bottom';
 
 export interface DiscoveryCardWidgetConfig {
   id: DiscoveryCardWidgetId;
@@ -112,6 +115,12 @@ export interface DiscoveryCardLayout {
   cardAspectMobile: DiscoveryAspectMobile;
   cardAspectDesktop: DiscoveryAspectDesktop;
   callStyle: DiscoveryCallStyle;
+  /** Show host photo as card background */
+  showPhoto: boolean;
+  /** Which media field to prefer for the card image */
+  photoSource: DiscoveryPhotoSource;
+  photoFit: DiscoveryPhotoFit;
+  photoPosition: DiscoveryPhotoPosition;
 }
 
 export const SLOT_LABELS: Record<DiscoveryCardSlotId, string> = {
@@ -177,6 +186,10 @@ export const DEFAULT_DISCOVERY_CARD_LAYOUT: DiscoveryCardLayout = {
   cardAspectMobile: '9/16',
   cardAspectDesktop: '3/4',
   callStyle: 'circle',
+  showPhoto: true,
+  photoSource: 'avatarThenGallery',
+  photoFit: 'cover',
+  photoPosition: 'center',
 };
 
 function coerceFlagSize(v: unknown): DiscoveryFlagSize {
@@ -193,6 +206,18 @@ function coerceAspectDesktop(v: unknown): DiscoveryAspectDesktop {
 
 function coerceCallStyle(v: unknown): DiscoveryCallStyle {
   return v === 'pill' || v === 'circle' ? v : 'circle';
+}
+
+function coercePhotoSource(v: unknown): DiscoveryPhotoSource {
+  return v === 'avatar' || v === 'galleryFirst' || v === 'avatarThenGallery' ? v : 'avatarThenGallery';
+}
+
+function coercePhotoFit(v: unknown): DiscoveryPhotoFit {
+  return v === 'contain' || v === 'cover' ? v : 'cover';
+}
+
+function coercePhotoPosition(v: unknown): DiscoveryPhotoPosition {
+  return v === 'top' || v === 'bottom' || v === 'center' ? v : 'center';
 }
 
 function coerceHAlign(v: unknown, fallback: DiscoveryHAlign): DiscoveryHAlign {
@@ -310,6 +335,10 @@ export function parseDiscoveryCardLayout(raw: unknown): DiscoveryCardLayout {
     cardAspectMobile: coerceAspectMobile(obj.cardAspectMobile),
     cardAspectDesktop: coerceAspectDesktop(obj.cardAspectDesktop),
     callStyle: coerceCallStyle(obj.callStyle),
+    showPhoto: obj.showPhoto === undefined ? true : Boolean(obj.showPhoto),
+    photoSource: coercePhotoSource(obj.photoSource),
+    photoFit: coercePhotoFit(obj.photoFit),
+    photoPosition: coercePhotoPosition(obj.photoPosition),
   };
 }
 
