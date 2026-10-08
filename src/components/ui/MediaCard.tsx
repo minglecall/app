@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 export type MediaCardAspect = '3/4' | '9/16' | '2/3';
 
@@ -74,13 +74,24 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   const [imgSrc, setImgSrc] = useState(resolvedSrc);
   const [loaded, setLoaded] = useState(false);
   const [usedFallback, setUsedFallback] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     const next = (src && String(src).trim()) || fallbackSrc || '';
     setImgSrc(next);
-    setLoaded(false);
     setUsedFallback(!(src && String(src).trim()) && Boolean(fallbackSrc));
+    // Do not force opacity-0 if browser already has the image cached
+    setLoaded(false);
   }, [src, fallbackSrc]);
+
+  // After src changes / mount: mark loaded if image is already complete (cached)
+  useEffect(() => {
+    const el = imgRef.current;
+    if (!el || !imgSrc) return;
+    if (el.complete && el.naturalWidth > 0) {
+      setLoaded(true);
+    }
+  }, [imgSrc]);
 
   const handleError: React.ReactEventHandler<HTMLImageElement> = (e) => {
     if (!usedFallback && fallbackSrc && imgSrc !== fallbackSrc) {
@@ -89,6 +100,8 @@ export const MediaCard: React.FC<MediaCardProps> = ({
       setImgSrc(fallbackSrc);
       return;
     }
+    // Last resort: still show something rather than blank forever
+    setLoaded(true);
     onImageError?.(e);
   };
 
@@ -114,14 +127,16 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         )}
         {showPhoto && imgSrc ? (
           <img
+            key={imgSrc}
+            ref={imgRef}
             src={imgSrc}
             alt={alt}
-            loading="lazy"
+            loading="eager"
             decoding="async"
             onLoad={() => setLoaded(true)}
             onError={handleError}
             className={[
-              'absolute inset-0 w-full h-full transition-all duration-500 group-hover:scale-105',
+              'absolute inset-0 w-full h-full transition-opacity duration-300 group-hover:scale-105',
               OBJECT_FIT_CLASS[objectFit],
               OBJECT_POS_CLASS[objectPosition],
               loaded ? 'opacity-100' : 'opacity-0',

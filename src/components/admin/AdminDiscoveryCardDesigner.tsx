@@ -18,6 +18,7 @@ import {
   DiscoveryCardWidgetId,
   SIZE_BOUNDS,
   PAD_BOUNDS,
+  WIDTH_BOUNDS,
   SLOT_LABELS,
   H_ALIGN_LABELS,
   DiscoveryHAlign,
@@ -90,6 +91,7 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
       padR: number;
       padB: number;
       padL: number;
+      widthPercent: number;
     }>
   ) => {
     setDraft((prev) => {
@@ -110,6 +112,7 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
           padR: patch.padR !== undefined ? patch.padR : w.padR,
           padB: patch.padB !== undefined ? patch.padB : w.padB,
           padL: patch.padL !== undefined ? patch.padL : w.padL,
+          widthPercent: patch.widthPercent !== undefined ? patch.widthPercent : w.widthPercent,
         };
       });
       return parseDiscoveryCardLayout({ ...prev, widgets });
@@ -203,8 +206,8 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
           <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Widgets</h4>
             <p className="text-[10px] text-slate-500">
-              Zone = Meta Primary/Secondary or Top/Footer corners. <strong className="text-slate-400">Next line</strong> starts
-              that widget on a new row inside the zone (e.g. Name, then Flag+Country+Age). Align = Left/Right for that line.
+              Zone + Next line + Align + <strong className="text-slate-400">Width %</strong> (0=auto, 100=full row).
+              Example: Name 80% + Status 20% on one line; Country Next line + Width 100% for a full-width country row.
             </p>
             <div className="space-y-2">
               {DISCOVERY_CARD_WIDGETS.map((id) => {
@@ -267,6 +270,27 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                         Next line
                       </label>
                     </div>
+                    <label
+                      className={`space-y-0.5 ${w.enabled ? '' : 'opacity-40 pointer-events-none'}`}
+                    >
+                      <span className="text-[9px] font-bold text-slate-500 uppercase flex justify-between">
+                        <span>Line width</span>
+                        <span className="font-mono text-slate-400">
+                          {w.widthPercent <= 0 ? 'Auto' : `${w.widthPercent}%`}
+                        </span>
+                      </span>
+                      <input
+                        type="range"
+                        min={WIDTH_BOUNDS.min}
+                        max={WIDTH_BOUNDS.max}
+                        step={5}
+                        value={w.widthPercent}
+                        disabled={!w.enabled}
+                        onChange={(e) => updateWidget(id, { widthPercent: Number(e.target.value) })}
+                        className="w-full accent-pink-500"
+                        title="0 = auto; 100 = full width line"
+                      />
+                    </label>
                     <div
                       className={`grid grid-cols-4 gap-2 ${w.enabled ? '' : 'opacity-40 pointer-events-none'}`}
                     >
@@ -317,7 +341,10 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                         <span className="truncate">
                           {w.nextLine ? '↳ ' : ''}
                           {WIDGET_LABELS[w.id]}
-                          <span className="text-slate-500 ml-1">({w.hAlign})</span>
+                          <span className="text-slate-500 ml-1">
+                            ({w.hAlign}
+                            {w.widthPercent > 0 ? ` · ${w.widthPercent}%` : ''})
+                          </span>
                         </span>
                         <div className="flex gap-1 shrink-0">
                           <button

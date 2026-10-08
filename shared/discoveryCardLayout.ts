@@ -28,8 +28,8 @@ export const DISCOVERY_CARD_SLOTS = [
 export type DiscoveryCardSlotId = (typeof DISCOVERY_CARD_SLOTS)[number];
 
 export const WIDGET_ALLOWED_SLOTS: Record<DiscoveryCardWidgetId, readonly DiscoveryCardSlotId[]> = {
-  statusBadge: ['topLeft', 'topRight'],
-  verifiedIcon: ['topLeft', 'topRight'],
+  statusBadge: ['topLeft', 'topRight', 'metaPrimary', 'metaSecondary'],
+  verifiedIcon: ['topLeft', 'topRight', 'metaPrimary', 'metaSecondary'],
   name: ['metaPrimary', 'metaSecondary', 'topLeft', 'topRight'],
   age: ['metaPrimary', 'metaSecondary', 'topLeft', 'topRight'],
   flag: ['metaPrimary', 'metaSecondary', 'topLeft', 'topRight'],
@@ -74,6 +74,12 @@ export const SIZE_BOUNDS = {
 /** Per-widget padding (px), clamped so layout cannot blow out the card. */
 export const PAD_BOUNDS = { min: 0, max: 16, default: 0 } as const;
 
+/**
+ * Share of the line width (10–100). 0 = auto (content-sized).
+ * Example: Name 80 + Status 20 on one line; Country 100 on the next (full width).
+ */
+export const WIDTH_BOUNDS = { min: 0, max: 100, default: 0 } as const;
+
 export type DiscoveryFlagSize = 'xs' | 'sm' | 'md';
 export type DiscoveryAspectMobile = '2/3' | '9/16';
 export type DiscoveryAspectDesktop = '3/4' | '2/3';
@@ -100,6 +106,11 @@ export interface DiscoveryCardWidgetConfig {
   padR: number;
   padB: number;
   padL: number;
+  /**
+   * Line width share (0 = auto; 10–100 = %).
+   * Use 100 for a full-width row (e.g. long country name on its own line).
+   */
+  widthPercent: number;
 }
 
 export interface DiscoveryCardLayout {
@@ -163,13 +174,14 @@ function defaultWidgets(): DiscoveryCardWidgetConfig[] {
     enabled: id !== 'age',
     slot: WIDGET_DEFAULT_SLOT[id],
     order: index,
-    // Flag begins the secondary meta row visually when everything is in one slot
-    nextLine: id === 'flag',
+    // Flag then country: each can start a line; country is full width by default
+    nextLine: id === 'flag' || id === 'country',
     hAlign: id === 'verifiedIcon' || id === 'callButton' ? 'right' : 'left',
     padT: PAD_BOUNDS.default,
     padR: PAD_BOUNDS.default,
     padB: PAD_BOUNDS.default,
     padL: PAD_BOUNDS.default,
+    widthPercent: id === 'country' ? 100 : WIDTH_BOUNDS.default,
   }));
 }
 
@@ -263,7 +275,13 @@ function normalizeWidgets(raw: unknown): DiscoveryCardWidgetConfig[] {
       const padR = clampInt((item as any).padR, PAD_BOUNDS.min, PAD_BOUNDS.max, def.padR);
       const padB = clampInt((item as any).padB, PAD_BOUNDS.min, PAD_BOUNDS.max, def.padB);
       const padL = clampInt((item as any).padL, PAD_BOUNDS.min, PAD_BOUNDS.max, def.padL);
-      byId.set(id, { id, enabled, slot, order, nextLine, hAlign, padT, padR, padB, padL });
+      const widthPercent = clampInt(
+        (item as any).widthPercent,
+        WIDTH_BOUNDS.min,
+        WIDTH_BOUNDS.max,
+        def.widthPercent
+      );
+      byId.set(id, { id, enabled, slot, order, nextLine, hAlign, padT, padR, padB, padL, widthPercent });
     });
   }
 

@@ -67,8 +67,13 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
   const wrapPad = (w: DiscoveryCardWidgetConfig, node: React.ReactNode): React.ReactNode => {
     if (node == null) return null;
+    const full = w.widthPercent >= 100;
     return (
-      <span key={w.id} className="inline-flex items-center shrink-0 max-w-full" style={widgetPaddingStyle(w)}>
+      <span
+        key={w.id}
+        className={`inline-flex items-center max-w-full ${full ? 'w-full min-w-0' : 'shrink-0'}`}
+        style={widgetPaddingStyle(w)}
+      >
         {node}
       </span>
     );
@@ -144,8 +149,11 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         return wrapPad(
           w,
           <span
-            className="font-display font-bold text-on-media drop-shadow-md truncate leading-tight"
+            className={`font-display font-bold text-on-media drop-shadow-md leading-tight truncate ${
+              w.widthPercent >= 100 ? 'block w-full whitespace-nowrap' : 'block max-w-full'
+            }`}
             style={{ fontSize: layout.nameFontPx }}
+            title={user.name}
           >
             {user.name}
           </span>
@@ -173,7 +181,13 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       case 'country':
         return wrapPad(
           w,
-          <span className="text-white/90 font-medium truncate drop-shadow-sm" style={{ fontSize: layout.metaFontPx }}>
+          <span
+            className={`text-white/90 font-medium drop-shadow-sm ${
+              w.widthPercent >= 100 ? 'block w-full truncate whitespace-nowrap' : 'truncate'
+            }`}
+            style={{ fontSize: layout.metaFontPx }}
+            title={countryName}
+          >
             {countryName}
           </span>
         );
@@ -224,14 +238,40 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     const lines = splitSlotIntoLines(widgets);
     const lineNodes = lines
       .map((line, lineIdx) => {
-        const nodes = line.map(renderWidget).filter(Boolean);
-        if (!nodes.length) return null;
+        const cells = line
+          .map((w) => {
+            const node = renderWidget(w);
+            if (!node) return null;
+            const pct = w.widthPercent > 0 ? Math.min(100, Math.max(10, w.widthPercent)) : 0;
+            const style: React.CSSProperties =
+              pct > 0
+                ? {
+                    flex: `0 0 ${pct}%`,
+                    maxWidth: `${pct}%`,
+                    width: pct === 100 ? '100%' : undefined,
+                    minWidth: 0,
+                  }
+                : { flex: '0 1 auto', minWidth: 0, maxWidth: '100%' };
+            return (
+              <div key={w.id} className="min-w-0" style={style}>
+                {node}
+              </div>
+            );
+          })
+          .filter(Boolean);
+        if (!cells.length) return null;
+        const usesWidths = line.some((w) => w.widthPercent > 0);
         const lineAlign = line[0]?.hAlign === 'right' ? 'end' : fallbackJustify === 'center' ? 'center' : 'start';
         const justifyClass =
           lineAlign === 'center' ? 'justify-center' : lineAlign === 'end' ? 'justify-end' : 'justify-start';
         return (
-          <div key={`${slot}-line-${lineIdx}`} className={`flex items-center gap-1.5 flex-wrap min-w-0 w-full ${justifyClass}`}>
-            {nodes}
+          <div
+            key={`${slot}-line-${lineIdx}`}
+            className={`flex items-center gap-1.5 min-w-0 w-full ${
+              usesWidths ? 'flex-nowrap' : 'flex-wrap'
+            } ${justifyClass}`}
+          >
+            {cells}
           </div>
         );
       })
