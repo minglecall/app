@@ -2993,8 +2993,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               console.warn('[Realtime] signal handler error', e);
             }
           });
-          if (!ok && !isCancelled && retryAttempt < 5) {
-            setTimeout(() => connect(retryAttempt + 1), 500 * (retryAttempt + 1));
+          // Keep retrying — Vercel has no /ws; Realtime is optional for rings (DB poll works)
+          if (!ok && !isCancelled && retryAttempt < 12) {
+            setTimeout(() => connect(retryAttempt + 1), Math.min(8000, 600 * (retryAttempt + 1)));
           }
         })();
         // Continue to register the shared signal deliverer below (no native WebSocket on Vercel)
@@ -4711,16 +4712,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     };
 
-    if (isSignalOpen()) {
+    // Vercel has no /ws — Realtime may be slow/flaky. DB sync + callee /api/calls/incoming
+    // poll is enough to place a ring; do not hard-block on isSignalOpen().
+    const useRealtimeMode = shouldUseRealtimeSignaling();
+    const canPlaceViaDb = useRealtimeMode && isSupabaseConfigured();
+
+    const placeOutgoingRing = () => {
       void (async () => {
         // Persist ringing FIRST so callee postgres_changes / ring poll can recover
         // even when Realtime broadcast is dropped.
         markBusyLocal();
         const synced = await persistBusy();
-        const sent = realtimeRef.current?.isConnected()
-          ? await realtimeRef.current.send(initiatePayload)
-          : (signalSend(initiatePayload), true);
-        if (sent === false && !synced) {
+        let sent = false;
+        if (realtimeRef.current?.isConnected()) {
+          sent = (await realtimeRef.current.send(initiatePayload)) === true;
+        } else if (!useRealtimeMode) {
+          sent = (await signalSendAsync(initiatePayload)) === true;
+        } else {
+          // Kick Realtime reconnect in background; ring already in DB for callee poll
+          try {
+            wsConnectRef.current();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (!synced && !sent) {
           clearRingTimeout();
           activeCallRef.current = null;
           setActiveCall(null);
@@ -4733,7 +4749,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
         showToast(
           'Calling... 📞',
-          `Ringing ${receiver.name}. Waiting for call acceptance...`,
+          synced && !sent
+            ? `Ringing ${receiver.name} (secure channel)…`
+            : `Ringing ${receiver.name}. Waiting for call acceptance...`,
           'info'
         );
         // Auto-miss if host never accepts (Realtime/Vercel has no server ring reaper)
@@ -4802,10 +4820,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }, 1000);
         }
       })();
+    };
+
+    if (isSignalOpen() || canPlaceViaDb) {
+      placeOutgoingRing();
       return true;
     }
 
-    // Signaling not ready yet — queue the call and force a reconnect
+    // Local Express /ws mode only: wait briefly for socket, then fail clearly
     pendingCallReceiverRef.current = receiverId;
     wsConnectRef.current();
     showToast(
@@ -4815,8 +4837,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
     window.setTimeout(() => {
       if (pendingCallReceiverRef.current !== receiverId) return;
-      // Retry once if signaling came up
-      if (isSignalOpen()) {
+      if (isSignalOpen() || (shouldUseRealtimeSignaling() && isSupabaseConfigured())) {
         pendingCallReceiverRef.current = null;
         startCall(receiverId);
         return;
@@ -4827,7 +4848,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         'Could not reach the signaling server. Please refresh the page and try again.',
         'error'
       );
-    }, 8000);
+    }, 5000);
     return true;
   };
 

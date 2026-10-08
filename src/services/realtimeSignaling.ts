@@ -3,6 +3,9 @@
  * Channel naming:
  *  - presence: global "app-presence"
  *  - per-user inbox: "user:{profileId}"
+ *
+ * Call reliability: user inbox alone is enough to mark connected. Presence is
+ * best-effort. Callee also polls GET /api/calls/incoming when broadcast drops.
  */
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import type { RealtimeChannel } from '@supabase/supabase-js';
@@ -11,7 +14,7 @@ export type SignalHandler = (payload: any) => void;
 
 function waitForSubscribe(
   channel: RealtimeChannel,
-  timeoutMs = 8000
+  timeoutMs = 12000
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
@@ -24,11 +27,26 @@ function waitForSubscribe(
     const timer = setTimeout(() => done(false), timeoutMs);
     channel.subscribe((status) => {
       if (status === 'SUBSCRIBED') done(true);
-      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         done(false);
       }
+      // Ignore CLOSED during teardown/reconnect — timeout still bounds the wait
     });
   });
+}
+
+async function removeChannelSafe(channel: RealtimeChannel | null) {
+  if (!channel) return;
+  try {
+    await channel.untrack();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await supabase.removeChannel(channel);
+  } catch {
+    /* ignore */
+  }
 }
 
 export class RealtimeSignaling {
@@ -37,6 +55,7 @@ export class RealtimeSignaling {
   private profileId: string | null = null;
   private handler: SignalHandler | null = null;
   private connected = false;
+  private connectGeneration = 0;
 
   isConnected() {
     return this.connected;
@@ -44,45 +63,68 @@ export class RealtimeSignaling {
 
   async connect(profileId: string, accessToken: string, onMessage: SignalHandler): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
+    const generation = ++this.connectGeneration;
     this.handler = onMessage;
     this.profileId = profileId;
 
+    // Prefer Realtime JWT auth — do NOT setSession with access_token as refresh_token
+    // (that can corrupt/refresh-fail the client session and drop Realtime).
     try {
-      await supabase.auth.setSession({
-        access_token: accessToken,
-        refresh_token: (await supabase.auth.getSession()).data.session?.refresh_token || accessToken,
-      }).catch(() => {});
-    } catch {
-      // token may already be on client session
+      const rt = (supabase as any).realtime;
+      if (rt && typeof rt.setAuth === 'function' && accessToken) {
+        await rt.setAuth(accessToken);
+      }
+    } catch (e) {
+      console.warn('[RealtimeSignaling] setAuth notice:', e);
     }
 
-    this.disconnect();
+    // Await teardown so we do not double-subscribe the same topic (common Vercel flake)
+    await this.disconnectAsync();
+    if (generation !== this.connectGeneration) return false;
 
-    this.userChannel = supabase.channel(`user:${profileId}`, {
-      config: { broadcast: { self: false } },
-    });
-    this.userChannel.on('broadcast', { event: 'signal' }, ({ payload }) => {
-      if (payload && this.handler) this.handler(payload);
-    });
-
-    this.presenceChannel = supabase.channel('app-presence', {
-      config: { presence: { key: profileId } },
-    });
-    this.presenceChannel
-      .on('presence', { event: 'sync' }, () => {
-        const state = this.presenceChannel?.presenceState() || {};
-        if (this.handler) {
-          this.handler({ type: 'presence:sync', state });
-        }
-      })
-      .on('broadcast', { event: 'signal' }, ({ payload }) => {
+    const trySubscribePair = async (): Promise<{ userOk: boolean; presenceOk: boolean }> => {
+      const userChannel = supabase.channel(`user:${profileId}`, {
+        config: { broadcast: { self: false } },
+      });
+      userChannel.on('broadcast', { event: 'signal' }, ({ payload }) => {
         if (payload && this.handler) this.handler(payload);
       });
 
-    const [userOk, presenceOk] = await Promise.all([
-      waitForSubscribe(this.userChannel),
-      waitForSubscribe(this.presenceChannel),
-    ]);
+      const presenceChannel = supabase.channel('app-presence', {
+        config: { presence: { key: profileId } },
+      });
+      presenceChannel
+        .on('presence', { event: 'sync' }, () => {
+          const state = presenceChannel.presenceState() || {};
+          if (this.handler) {
+            this.handler({ type: 'presence:sync', state });
+          }
+        })
+        .on('broadcast', { event: 'signal' }, ({ payload }) => {
+          if (payload && this.handler) this.handler(payload);
+        });
+
+      this.userChannel = userChannel;
+      this.presenceChannel = presenceChannel;
+
+      const [userOk, presenceOk] = await Promise.all([
+        waitForSubscribe(userChannel, 12000),
+        waitForSubscribe(presenceChannel, 12000),
+      ]);
+      return { userOk, presenceOk };
+    };
+
+    let { userOk, presenceOk } = await trySubscribePair();
+    if (generation !== this.connectGeneration) return false;
+
+    // One retry — Realtime often flakes once after auth/page load on Vercel
+    if (!userOk) {
+      console.warn('[RealtimeSignaling] user channel failed; retrying once…');
+      await this.disconnectAsync();
+      if (generation !== this.connectGeneration) return false;
+      ({ userOk, presenceOk } = await trySubscribePair());
+      if (generation !== this.connectGeneration) return false;
+    }
 
     if (presenceOk && this.presenceChannel) {
       try {
@@ -94,13 +136,17 @@ export class RealtimeSignaling {
       } catch (e) {
         console.warn('[RealtimeSignaling] presence track failed', e);
       }
+    } else if (!presenceOk) {
+      console.warn('[RealtimeSignaling] presence channel unavailable — calls still use user inbox + DB poll');
     }
 
-    this.connected = Boolean(userOk && presenceOk);
+    // User inbox is enough for call signaling; presence is optional
+    this.connected = Boolean(userOk);
 
-    // Confirm auth only after channels are actually subscribed
     if (this.connected && this.handler) {
       this.handler({ type: 'auth:ok', userId: profileId });
+    } else {
+      console.warn('[RealtimeSignaling] connect failed — DB call sync/incoming poll remains available');
     }
     return this.connected;
   }
@@ -166,14 +212,10 @@ export class RealtimeSignaling {
             config: { broadcast: { self: false, ack: true } },
           });
           // CRITICAL: wait until SUBSCRIBED before broadcast — otherwise initiate/accept are dropped
-          const ok = await waitForSubscribe(targetChannel, 4000);
+          const ok = await waitForSubscribe(targetChannel, 5000);
           if (!ok) {
             console.warn('[RealtimeSignaling] target channel subscribe failed', targetId, type);
-            try {
-              await supabase.removeChannel(targetChannel);
-            } catch {
-              /* ignore */
-            }
+            await removeChannelSafe(targetChannel);
             continue;
           }
           const sendStatus = await targetChannel.send({
@@ -183,17 +225,13 @@ export class RealtimeSignaling {
           });
           // Keep the ephemeral channel briefly so the broadcast can flush to peers.
           await new Promise((r) => setTimeout(r, 350));
-          try {
-            await supabase.removeChannel(targetChannel);
-          } catch {
-            /* ignore */
-          }
+          await removeChannelSafe(targetChannel);
           if (sendStatus !== 'error') delivered = true;
           else console.warn('[RealtimeSignaling] target broadcast error', targetId, type);
         }
         // Presence fanout already attempted — treat as success so caller UX continues;
         // callee also polls GET /api/calls/incoming as hard fallback.
-        return delivered || Boolean(this.presenceChannel);
+        return delivered || Boolean(this.presenceChannel) || this.connected;
       }
 
       if (type === 'presence:update' || type === 'heartbeat' || type === 'user:update') {
@@ -204,19 +242,23 @@ export class RealtimeSignaling {
           } catch {
             /* ignore */
           }
-        } else {
-          await this.presenceChannel?.track({
+        } else if (this.presenceChannel) {
+          await this.presenceChannel.track({
             userId: this.profileId,
             online_at: new Date().toISOString(),
             status: nextStatus === 'busy' || nextStatus === 'in_call' ? 'busy' : 'online',
             ...(payload.user ? { user: payload.user } : {}),
           });
         }
-        await this.presenceChannel?.send({
-          type: 'broadcast',
-          event: 'signal',
-          payload,
-        });
+        try {
+          await this.presenceChannel?.send({
+            type: 'broadcast',
+            event: 'signal',
+            payload,
+          });
+        } catch {
+          /* ignore */
+        }
         return true;
       }
 
@@ -232,29 +274,19 @@ export class RealtimeSignaling {
     }
   }
 
+  /** Fire-and-forget disconnect (legacy callers). */
   disconnect() {
+    void this.disconnectAsync();
+  }
+
+  async disconnectAsync() {
     const presence = this.presenceChannel;
     const user = this.userChannel;
     this.presenceChannel = null;
     this.userChannel = null;
     this.connected = false;
-    void (async () => {
-      try {
-        if (presence) await presence.untrack();
-      } catch {
-        /* ignore */
-      }
-      try {
-        if (presence) await supabase.removeChannel(presence);
-      } catch {
-        /* ignore */
-      }
-      try {
-        if (user) await supabase.removeChannel(user);
-      } catch {
-        /* ignore */
-      }
-    })();
+    await removeChannelSafe(presence);
+    await removeChannelSafe(user);
   }
 }
 
