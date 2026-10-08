@@ -16,6 +16,8 @@ interface AnalyticsFilterBarProps {
   onChange: (next: AdminAnalyticsFilters) => void;
   teamLeaders: UserProfile[];
   countries: string[];
+  /** `full` = date + list filters; `date` = date presets only. */
+  mode?: 'full' | 'date';
 }
 
 const PRESETS: { id: DatePreset; label: string }[] = [
@@ -41,6 +43,7 @@ export const AnalyticsFilterBar: React.FC<AnalyticsFilterBarProps> = ({
   onChange,
   teamLeaders,
   countries,
+  mode = 'full',
 }) => {
   const [periodBusy, setPeriodBusy] = useState(false);
   const [periodError, setPeriodError] = useState<string | null>(null);
@@ -153,70 +156,72 @@ export const AnalyticsFilterBar: React.FC<AnalyticsFilterBarProps> = ({
         <p className="text-[10px] text-rose-300 font-mono">{periodError}</p>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-        <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-          <Search className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-          <input
-            value={filters.search}
-            onChange={(e) => onChange({ ...filters, search: e.target.value })}
-            placeholder="Search name, email, ID…"
-            className="bg-transparent outline-none text-slate-200 w-full placeholder:text-slate-600"
-          />
-        </label>
+      {mode === 'full' && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+          <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+            <Search className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            <input
+              value={filters.search}
+              onChange={(e) => onChange({ ...filters, search: e.target.value })}
+              placeholder="Search name, email, ID…"
+              className="bg-transparent outline-none text-slate-200 w-full placeholder:text-slate-600"
+            />
+          </label>
 
-        <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-          <span className="text-slate-500 font-mono shrink-0">Role</span>
-          <select
-            value={filters.role}
-            onChange={(e) =>
-              onChange({ ...filters, role: e.target.value as AdminAnalyticsFilters['role'] })
-            }
-            className="bg-transparent outline-none text-slate-200 w-full cursor-pointer"
-          >
-            {ROLES.map((r) => (
-              <option key={r.id} value={r.id} className="bg-slate-900">
-                {r.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+            <span className="text-slate-500 font-mono shrink-0">Role</span>
+            <select
+              value={filters.role}
+              onChange={(e) =>
+                onChange({ ...filters, role: e.target.value as AdminAnalyticsFilters['role'] })
+              }
+              className="bg-transparent outline-none text-slate-200 w-full cursor-pointer"
+            >
+              {ROLES.map((r) => (
+                <option key={r.id} value={r.id} className="bg-slate-900">
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </label>
 
-        <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-          <Globe className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-          <select
-            value={filters.country}
-            onChange={(e) => onChange({ ...filters, country: e.target.value })}
-            className="bg-transparent outline-none text-slate-200 w-full cursor-pointer"
-          >
-            <option value="all" className="bg-slate-900">
-              All countries
-            </option>
-            {countries.map((c) => (
-              <option key={c} value={c} className="bg-slate-900">
-                {c}
+          <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+            <Globe className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            <select
+              value={filters.country}
+              onChange={(e) => onChange({ ...filters, country: e.target.value })}
+              className="bg-transparent outline-none text-slate-200 w-full cursor-pointer"
+            >
+              <option value="all" className="bg-slate-900">
+                All countries
               </option>
-            ))}
-          </select>
-        </label>
+              {countries.map((c) => (
+                <option key={c} value={c} className="bg-slate-900">
+                  {c}
+                </option>
+              ))}
+            </select>
+          </label>
 
-        <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-          <Building2 className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-          <select
-            value={filters.agencyId}
-            onChange={(e) => onChange({ ...filters, agencyId: e.target.value })}
-            className="bg-transparent outline-none text-slate-200 w-full cursor-pointer"
-          >
-            <option value="all" className="bg-slate-900">
-              All agencies
-            </option>
-            {teamLeaders.map((tl) => (
-              <option key={tl.id} value={tl.id} className="bg-slate-900">
-                {tl.agencyName || tl.name}
+          <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+            <Building2 className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+            <select
+              value={filters.agencyId}
+              onChange={(e) => onChange({ ...filters, agencyId: e.target.value })}
+              className="bg-transparent outline-none text-slate-200 w-full cursor-pointer"
+            >
+              <option value="all" className="bg-slate-900">
+                All agencies
               </option>
-            ))}
-          </select>
-        </label>
-      </div>
+              {teamLeaders.map((tl) => (
+                <option key={tl.id} value={tl.id} className="bg-slate-900">
+                  {tl.agencyName || tl.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
     </div>
   );
 };

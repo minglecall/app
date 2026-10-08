@@ -82,9 +82,24 @@ function formatWhen(iso: string | null | undefined) {
   }
 }
 
-export const AdminFinancialModule: React.FC = () => {
+interface AdminFinancialModuleProps {
+  tab?: FinanceHubTab;
+  onTabChange?: (tab: FinanceHubTab) => void;
+  navPlacement?: 'inline' | 'sidebar';
+}
+
+export const AdminFinancialModule: React.FC<AdminFinancialModuleProps> = ({
+  tab: tabProp,
+  onTabChange,
+  navPlacement = 'inline',
+}) => {
   const { showToast, coinPackages, users } = useApp();
-  const [tab, setTab] = useState<FinanceHubTab>('live_ledger');
+  const [tabInternal, setTabInternal] = useState<FinanceHubTab>('live_ledger');
+  const tab = tabProp ?? tabInternal;
+  const setTab = (next: FinanceHubTab) => {
+    onTabChange?.(next);
+    if (tabProp === undefined) setTabInternal(next);
+  };
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -479,23 +494,25 @@ export const AdminFinancialModule: React.FC = () => {
         </div>
       </div>
 
-      <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-2 flex flex-wrap gap-2">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
-              tab === t.id
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/40'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/70'
-            }`}
-          >
-            {t.icon}
-            <span>{t.label}</span>
-          </button>
-        ))}
-      </div>
+      {navPlacement !== 'sidebar' && (
+        <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-2 flex flex-wrap gap-2">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+                tab === t.id
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/40'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/70'
+              }`}
+            >
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {tab === 'live_ledger' && (
         <div className="space-y-3">

@@ -44,12 +44,27 @@ import { getCategoryIcon } from '../common/InterestSelector';
 import { DEFAULT_FLAG_SIZES } from '../../constants/appDefaults';
 import { FlagSizesConfig, FlagSizeVariant } from '../../types';
 
-export const AdminTaxonomyManager: React.FC = () => {
+type TaxonomyTab = 'countries' | 'flag_sizes' | 'languages' | 'zodiac' | 'interests' | 'currencies';
+
+interface AdminTaxonomyManagerProps {
+  activeTab?: TaxonomyTab;
+  onTabChange?: (tab: TaxonomyTab) => void;
+  navPlacement?: 'inline' | 'sidebar';
+}
+
+export const AdminTaxonomyManager: React.FC<AdminTaxonomyManagerProps> = ({
+  activeTab: activeTabProp,
+  onTabChange,
+  navPlacement = 'inline',
+}) => {
   const { systemSettings, updateSystemSettings, showToast, currencyConfigs, saveCurrencyConfigs } = useApp();
 
-  const [activeTab, setActiveTab] = useState<
-    'countries' | 'flag_sizes' | 'languages' | 'zodiac' | 'interests' | 'currencies'
-  >('countries');
+  const [activeTabInternal, setActiveTabInternal] = useState<TaxonomyTab>('countries');
+  const activeTab = activeTabProp ?? activeTabInternal;
+  const setActiveTab = (tab: TaxonomyTab) => {
+    onTabChange?.(tab);
+    if (activeTabProp === undefined) setActiveTabInternal(tab);
+  };
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   // 0. Dynamic Flag Sizes State
@@ -407,86 +422,88 @@ export const AdminTaxonomyManager: React.FC = () => {
         </div>
       </div>
 
-      {/* Navigation Sub-Tabs */}
-      <div className="flex items-center space-x-2 border-b border-slate-800 pb-2 overflow-x-auto select-none scrollbar-none">
-        <button
-          type="button"
-          onClick={() => setActiveTab('countries')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
-            activeTab === 'countries'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <Globe className="w-3.5 h-3.5" />
-          <span>Countries & Flags ({selectedCountries.size})</span>
-        </button>
+      {/* Navigation Sub-Tabs — hidden when AdminShell sidebar owns L2 */}
+      {navPlacement !== 'sidebar' && (
+        <div className="flex items-center space-x-2 border-b border-slate-800 pb-2 overflow-x-auto select-none scrollbar-none">
+          <button
+            type="button"
+            onClick={() => setActiveTab('countries')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
+              activeTab === 'countries'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Globe className="w-3.5 h-3.5" />
+            <span>Countries & Flags ({selectedCountries.size})</span>
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('flag_sizes')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
-            activeTab === 'flag_sizes'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <Ruler className="w-3.5 h-3.5 text-amber-400" />
-          <span>SVG Flag Sizing (Dynamic)</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('flag_sizes')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
+              activeTab === 'flag_sizes'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Ruler className="w-3.5 h-3.5 text-amber-400" />
+            <span>SVG Flag Sizing (Dynamic)</span>
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('languages')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
-            activeTab === 'languages'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <Languages className="w-3.5 h-3.5" />
-          <span>Spoken Languages ({selectedLanguages.size})</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('languages')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
+              activeTab === 'languages'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Languages className="w-3.5 h-3.5" />
+            <span>Spoken Languages ({selectedLanguages.size})</span>
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('zodiac')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
-            activeTab === 'zodiac'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <Sparkles className="w-3.5 h-3.5" />
-          <span>Zodiac Signs & SVGs ({selectedZodiacs.size})</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('zodiac')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
+              activeTab === 'zodiac'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Zodiac Signs & SVGs ({selectedZodiacs.size})</span>
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('interests')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
-            activeTab === 'interests'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <Heart className="w-3.5 h-3.5" />
-          <span>Categorized Interests ({selectedInterests.size})</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('interests')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
+              activeTab === 'interests'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Heart className="w-3.5 h-3.5" />
+            <span>Categorized Interests ({selectedInterests.size})</span>
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('currencies')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
-            activeTab === 'currencies'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <Banknote className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Currencies ({currencyRows.filter((c) => c.enabled).length})</span>
-        </button>
-      </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('currencies')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center space-x-2 shrink-0 ${
+              activeTab === 'currencies'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Banknote className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Currencies ({currencyRows.filter((c) => c.enabled).length})</span>
+          </button>
+        </div>
+      )}
 
       {/* ========================================================================= */}
       {/* 1. COUNTRIES TAB */}

@@ -103,7 +103,10 @@ import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { AdminAnalyticsHub } from './analytics/AdminAnalyticsHub';
+import type { AnalyticsHubTab } from './analytics/AdminAnalyticsHub';
 import { AdminEconomyConfigHub } from './AdminEconomyConfigHub';
+import { AdminShell } from './AdminShell';
+import { AdminSubTabKey, defaultL2ForTab } from './adminNavConfig';
 
 /** Female hosts managed by a Team Leader — ID/authId first, agencyName only as fallback. */
 function getManagedCreatorsForLeader(leader: UserProfile, allUsers: UserProfile[]): UserProfile[] {
@@ -178,26 +181,117 @@ export const AdminDashboard: React.FC = () => {
   const [isSyncingFromDb, setIsSyncingFromDb] = useState(false);
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
 
-  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'monitoring' | 'financials' | 'finance-module' | 'gifts' | 'countries' | 'creator-ops' | 'livekit' | 'infra' | 'api-health' | 'email' | 'skus' | 'leaders' | 'payouts' | 'users' | 'cms'>('analytics');
+  const [activeSubTab, setActiveSubTab] = useState<AdminSubTabKey>('analytics');
   /** Deep-link section inside Coin Burn / Economy hub (A–F). */
   const [economySection, setEconomySection] = useState<'A' | 'B' | 'C' | 'D' | 'E' | 'F' | undefined>(undefined);
+  const [analyticsHubTab, setAnalyticsHubTab] = useState<AnalyticsHubTab>('overview');
+  const [taxonomyTab, setTaxonomyTab] = useState<
+    'countries' | 'flag_sizes' | 'languages' | 'zodiac' | 'interests' | 'currencies'
+  >('countries');
+  const [creatorOpsView, setCreatorOpsView] = useState<'analytics' | 'matrix' | 'targets'>('analytics');
+  const [infraTab, setInfraTab] = useState<
+    'db_pool' | 'r2_storage' | 'moderation' | 'features' | 'sql_schema'
+  >('db_pool');
+  const [financeModuleTab, setFinanceModuleTab] = useState<
+    | 'live_ledger'
+    | 'platform'
+    | 'team_leaders'
+    | 'hosts'
+    | 'funding'
+    | 'batches'
+    | 'settlement'
+    | 'period'
+  >('live_ledger');
+  const [cmsSection, setCmsSection] = useState<'banners' | 'policies' | 'shortcuts' | 'discovery_card'>(
+    'banners'
+  );
   const [activeSpectatorCall, setActiveSpectatorCall] = useState<AdminActiveCall | null>(null);
 
   // Deep-links from host target progress panels (Creator Ops / Economy shares)
   useEffect(() => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent).detail as
-        | { tab?: string; economySection?: 'A' | 'B' | 'C' | 'D' | 'E' | 'F' }
+        | {
+            tab?: string;
+            economySection?: 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
+            creatorOpsView?: 'analytics' | 'matrix' | 'targets';
+          }
         | undefined;
       if (!detail?.tab) return;
-      setActiveSubTab(detail.tab as typeof activeSubTab);
+      setActiveSubTab(detail.tab as AdminSubTabKey);
       if (detail.economySection) {
         setEconomySection(detail.economySection);
+      }
+      if (detail.creatorOpsView) {
+        setCreatorOpsView(detail.creatorOpsView);
       }
     };
     window.addEventListener('minglecall:admin-navigate', handler as EventListener);
     return () => window.removeEventListener('minglecall:admin-navigate', handler as EventListener);
   }, []);
+
+  const activeNestedKey = useMemo(() => {
+    switch (activeSubTab) {
+      case 'analytics':
+        return analyticsHubTab;
+      case 'financials':
+        return economySection ?? 'A';
+      case 'countries':
+        return taxonomyTab;
+      case 'creator-ops':
+        return creatorOpsView;
+      case 'infra':
+        return infraTab;
+      case 'finance-module':
+        return financeModuleTab;
+      case 'cms':
+        return cmsSection;
+      default:
+        return undefined;
+    }
+  }, [
+    activeSubTab,
+    analyticsHubTab,
+    economySection,
+    taxonomyTab,
+    creatorOpsView,
+    infraTab,
+    financeModuleTab,
+    cmsSection,
+  ]);
+
+  const navigateAdmin = (tab: AdminSubTabKey, nestedKey?: string) => {
+    setActiveSubTab(tab);
+    if (!nestedKey) {
+      if (tab === 'financials') setEconomySection(undefined);
+      return;
+    }
+    switch (tab) {
+      case 'analytics':
+        setAnalyticsHubTab(nestedKey as AnalyticsHubTab);
+        break;
+      case 'financials':
+        setEconomySection(nestedKey as 'A' | 'B' | 'C' | 'D' | 'E' | 'F');
+        break;
+      case 'countries':
+        setTaxonomyTab(nestedKey as typeof taxonomyTab);
+        break;
+      case 'creator-ops':
+        setCreatorOpsView(nestedKey as typeof creatorOpsView);
+        break;
+      case 'infra':
+        setInfraTab(nestedKey as typeof infraTab);
+        break;
+      case 'finance-module':
+        setFinanceModuleTab(nestedKey as typeof financeModuleTab);
+        break;
+      case 'cms':
+        setCmsSection(nestedKey as typeof cmsSection);
+        break;
+      default:
+        break;
+    }
+  };
 
   // Virtual Gift Modal state
   const [editingGift, setEditingGift] = useState<(Partial<VirtualGift> & { id?: string }) | null>(null);
@@ -582,317 +676,127 @@ export const AdminDashboard: React.FC = () => {
   }, [totalCoinBurnAcrossPlatform, payoutRequests, systemSettings.coinUsdPeg, systemSettings.femalePayoutRatioUSD, systemSettings.coinToUSDRatio]);
 
   return (
-    <div id="admin-dashboard-root" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-      {/* Admin Header & Metric Bar */}
-      <div className="bg-[#161920] border border-slate-800 rounded-xl p-5 shadow-2xl space-y-4">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div>
-            <div className="inline-flex items-center space-x-2 px-2.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-[10px] font-mono uppercase tracking-wider font-bold">
-              <Settings className="w-3 h-3" />
-              <span>TERMINAL v4.2 // PLATFORM ECONOMY MATRIX</span>
+    <AdminShell
+      activeSubTab={activeSubTab}
+      activeNestedKey={activeNestedKey}
+      onNavigateTab={navigateAdmin}
+      onSetupWizard={() => {
+        window.location.hash = 'server-setup';
+        window.location.reload();
+      }}
+      onResetData={() => setIsResetModalOpen(true)}
+      badges={{
+        monitoring: adminActiveCalls.length,
+        gifts: virtualGifts.length,
+        leaders: users.filter((u) => u.role === 'team_leader').length,
+        payouts: payoutRequests.length,
+        countries: systemSettings.allowedCountryCodes?.length ?? 'All',
+      }}
+      headerKpis={[
+        {
+          label: 'Net volume',
+          value: `$${totalPlatformVolumeUSD.toFixed(2)}`,
+          accentClass: 'text-emerald-400',
+        },
+        {
+          label: 'Active calls',
+          value: String(activeLiveCallsCount),
+          accentClass: 'text-indigo-400',
+        },
+        {
+          label: 'Coin burn',
+          value: totalCoinBurnAcrossPlatform.toLocaleString(),
+          accentClass: 'text-amber-400',
+        },
+      ]}
+    >
+      {/* Economy KPI snapshot — Overview only (avoid repeating on every admin menu) */}
+      {activeSubTab === 'analytics' && analyticsHubTab === 'overview' && (
+        <>
+          <div className="px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700/80 text-[11px] text-slate-400 font-mono">
+            Configured in Economy — cards below are read-only. Open{' '}
+            <button
+              type="button"
+              onClick={() => navigateAdmin('financials', defaultL2ForTab('financials'))}
+              className="text-amber-300 font-bold underline underline-offset-2 cursor-pointer hover:text-amber-200"
+            >
+              Coin Burn &amp; Economy
+            </button>{' '}
+            to edit burn, shares, or Coin USD Peg. Per-host absolute earn override is on Users (coin_earn_override_rate).
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <button
+              type="button"
+              onClick={() => navigateAdmin('financials', 'A')}
+              className="p-4 bg-[#13161F] border border-slate-800 border-l-[3px] border-l-amber-500/70 rounded-2xl text-left cursor-pointer hover:border-amber-500/40"
+            >
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Male Coin Burn Rates</div>
+              <div className="text-xl font-black text-amber-300 font-mono tracking-tight">
+                {systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN}
+                <span className="text-sm text-slate-400 font-semibold"> /m</span>
+              </div>
+              <div className="text-xs font-bold text-emerald-400 mt-1.5">
+                Friend: {systemSettings.coinBurnRateFriendPerMin ?? DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN}/m
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigateAdmin('financials', 'B')}
+              className="p-4 bg-[#13161F] border border-slate-800 border-l-[3px] border-l-emerald-500/70 rounded-2xl text-left cursor-pointer hover:border-pink-500/40"
+            >
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Host & Team Leader Shares</div>
+              <div className="text-xl font-black text-emerald-400 font-mono tracking-tight">
+                {systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT}%
+                <span className="text-sm text-slate-400 font-semibold"> base</span>
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1.5">
+                Target {systemSettings.femaleHostTargetSharePercent ?? DEFAULT_FEMALE_HOST_TARGET_SHARE_PERCENT}% · TL{' '}
+                {systemSettings.teamLeaderSharePercent ?? DEFAULT_TEAM_LEADER_SHARE_PERCENT}% · Platform{' '}
+                {100 -
+                  (systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT) -
+                  (systemSettings.teamLeaderSharePercent ?? DEFAULT_TEAM_LEADER_SHARE_PERCENT)}
+                %
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigateAdmin('financials', 'D')}
+              className="p-4 bg-[#13161F] border border-slate-800 border-l-[3px] border-l-purple-500/70 rounded-2xl text-left cursor-pointer hover:border-purple-500/40"
+            >
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Fixed Peg & Min Threshold</div>
+              <div className="text-xl font-black text-purple-300 font-mono tracking-tight">
+                ${getCoinUsdPeg(systemSettings)}
+                <span className="text-sm text-slate-400 font-semibold"> / coin</span>
+              </div>
+              <div className="text-[11px] text-purple-400/90 mt-1.5">
+                {formatPegExample(getCoinUsdPeg(systemSettings))} · Min ${systemSettings.minPayoutThresholdUSD ?? 50} (
+                {usdToCoins(systemSettings.minPayoutThresholdUSD ?? 50, getCoinUsdPeg(systemSettings)).toLocaleString()} coins)
+              </div>
+            </button>
+
+            <div className="p-4 bg-[#13161F] border border-slate-800 border-l-[3px] border-l-cyan-500/70 rounded-2xl">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Payout Queues & Dispatched</div>
+              <div className="text-xl font-black text-emerald-400 font-mono tracking-tight">
+                ${totalCompletedPayoutsUSD.toFixed(2)}
+              </div>
+              <div className="text-[11px] text-amber-300 mt-1.5">
+                Pending: ${totalPendingPayoutsUSD.toFixed(2)}
+              </div>
             </div>
-            <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight mt-1">Platform Control & Moderation</h1>
-            <p className="text-xs text-slate-400 font-sans">
-              Coin Burn &amp; Economy hub, SKU packages, gift catalog, and real-time payout verification.
-            </p>
           </div>
-
-          {/* Metric Bar Ticker */}
-          <div className="flex items-center gap-3 bg-[#0F1115] p-2 rounded-lg border border-slate-800 text-xs font-mono">
-            <div className="px-3 py-1 bg-slate-900 rounded border border-slate-800">
-              <div className="text-[9px] text-slate-500 uppercase tracking-widest font-bold">NET VOLUME</div>
-              <div className="text-emerald-400 font-extrabold text-sm">${totalPlatformVolumeUSD.toFixed(2)}</div>
-            </div>
-            <div className="px-3 py-1 bg-slate-900 rounded border border-slate-800">
-              <div className="text-[9px] text-slate-500 uppercase tracking-widest font-bold">ACTIVE CALLS</div>
-              <div className="text-indigo-400 font-extrabold text-sm">{activeLiveCallsCount}</div>
-            </div>
-            <div className="px-3 py-1 bg-slate-900 rounded border border-slate-800">
-              <div className="text-[9px] text-slate-500 uppercase tracking-widest font-bold">TOTAL COIN BURN</div>
-              <div className="text-amber-400 font-extrabold text-sm">{totalCoinBurnAcrossPlatform.toLocaleString()} 🪙</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Sub-Tabs Selector - Wrapped without horizontal scroll */}
-        <div className="flex flex-wrap items-center gap-1.5 bg-[#0F1115] p-2 rounded-xl border border-slate-800 text-xs font-semibold">
-          <button
-            id="admin-master-analytics-tab-btn"
-            onClick={() => setActiveSubTab('analytics')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'analytics'
-                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold shadow-md shadow-indigo-600/30 ring-1 ring-indigo-400'
-                : 'text-indigo-300 hover:text-white bg-indigo-950/40 border border-indigo-500/30 hover:bg-indigo-900/60'
-            }`}
-          >
-            <TrendingUp className="w-3.5 h-3.5 text-indigo-300" />
-            <span>Analytics Hub</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('monitoring')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'monitoring' ? 'bg-rose-600 text-white font-bold shadow-md shadow-rose-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Radio className="w-3.5 h-3.5 text-rose-400 animate-pulse" />
-            <span>Live Call Surveillance ({adminActiveCalls.length})</span>
-          </button>
-          <button
-            id="admin-economy-config-tab-btn"
-            onClick={() => {
-              setEconomySection(undefined);
-              setActiveSubTab('financials');
-            }}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'financials' ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-            title="Coin burn rates, revenue shares, peg & payout thresholds"
-          >
-            <Coins className="w-3.5 h-3.5 text-amber-400" />
-            <span>Coin Burn & Economy</span>
-          </button>
-          <button
-            id="admin-countries-tab-btn"
-            onClick={() => setActiveSubTab('countries')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'countries' ? 'bg-indigo-600 text-white font-bold shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Taxonomies & Attributes ({systemSettings.allowedCountryCodes?.length ?? 'All'} 🌍)</span>
-          </button>
-          <button
-            id="admin-creator-ops-tab-btn"
-            onClick={() => setActiveSubTab('creator-ops')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'creator-ops' ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Target className="w-3.5 h-3.5 text-amber-400" />
-            <span>Creator Ops</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('livekit')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'livekit' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Key className="w-3.5 h-3.5 text-amber-400" />
-            <span>LiveKit API Keys</span>
-          </button>
-          <button
-            onClick={() => {
-              window.location.hash = 'server-setup';
-              window.location.reload();
-            }}
-            className="px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold text-xs shadow-md shadow-purple-600/30 cursor-pointer"
-            title="Launch Full Server Setup & VPS Installation Wizard (/server-setup)"
-          >
-            <Rocket className="w-3.5 h-3.5 text-pink-200 animate-pulse" />
-            <span>Setup Wizard GUI</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('infra')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'infra' ? 'bg-emerald-600 text-white font-bold shadow-md shadow-emerald-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Database className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Settings</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('api-health')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'api-health' ? 'bg-cyan-600 text-white font-bold shadow-md shadow-cyan-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Activity className="w-3.5 h-3.5 text-cyan-400" />
-            <span>API Health</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('email')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'email' ? 'bg-pink-600 text-white font-bold shadow-md shadow-pink-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Mail className="w-3.5 h-3.5 text-pink-400" />
-            <span>Email</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('skus')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
-              activeSubTab === 'skus' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            SKU Bundles
-          </button>
-          <button
-            id="admin-virtual-gifts-tab-btn"
-            onClick={() => setActiveSubTab('gifts')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'gifts' ? 'bg-pink-600 text-white font-bold shadow-md shadow-pink-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Gift className="w-3.5 h-3.5 text-pink-400" />
-            <span>Virtual Gifts ({virtualGifts.length})</span>
-          </button>
-          <button
-            id="admin-leaders-tab-btn"
-            onClick={() => setActiveSubTab('leaders')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'leaders' ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Crown className="w-3.5 h-3.5 text-amber-400" />
-            <span>Team Leaders ({users.filter((u) => u.role === 'team_leader').length})</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('finance-module')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'finance-module' ? 'bg-emerald-600 text-white font-bold shadow-md shadow-emerald-600/30' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Landmark className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Financial Module</span>
-          </button>
-          <button
-            onClick={() => setActiveSubTab('payouts')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
-              activeSubTab === 'payouts' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            Legacy Payout History ({payoutRequests.length})
-          </button>
-          <button
-            onClick={() => setActiveSubTab('users')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
-              activeSubTab === 'users' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            User Directory
-          </button>
-          <button
-            onClick={() => setActiveSubTab('cms')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
-              activeSubTab === 'cms' ? 'bg-pink-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-800'
-            }`}
-          >
-            <Layers className="w-3.5 h-3.5 text-pink-400" />
-            <span>Home CMS & Policies</span>
-          </button>
-
-          <button
-            id="admin-open-reset-mock-modal-btn"
-            type="button"
-            onClick={() => setIsResetModalOpen(true)}
-            className="px-3.5 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 bg-rose-950/80 hover:bg-rose-900 border border-rose-700/60 text-rose-200 font-bold text-xs shadow-md shadow-rose-950/30 cursor-pointer"
-            title="Open Destructive Data Reset Manager (ALLOW_FACTORY_RESET required)"
-          >
-            <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-            <span>Reset Data</span>
-          </button>
-        </div>
-      </div>
-
-      {/* KPI Cards — read-only snapshot; global economy only editable in Coin Burn & Economy */}
-      <div className="px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700/80 text-[11px] text-slate-400 font-mono">
-        Configured in Economy — cards below are read-only. Open{' '}
-        <button
-          type="button"
-          onClick={() => {
-            setEconomySection(undefined);
-            setActiveSubTab('financials');
-          }}
-          className="text-amber-300 font-bold underline underline-offset-2 cursor-pointer hover:text-amber-200"
-        >
-          Coin Burn &amp; Economy
-        </button>{' '}
-        to edit burn, shares, or Coin USD Peg. Per-host absolute earn override is on Users (coin_earn_override_rate).
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <button
-          type="button"
-          onClick={() => {
-            setEconomySection('A');
-            setActiveSubTab('financials');
-          }}
-          className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg text-left cursor-pointer hover:border-amber-500/40"
-        >
-          <div className="text-xs font-semibold text-slate-400 mb-1">Male Coin Burn Rates</div>
-          <div className="text-xl font-black text-amber-300 flex items-center justify-between">
-            <span>
-              Standard: 🪙 {systemSettings.coinBurnRatePerMin ?? DEFAULT_COIN_BURN_RATE_PER_MIN}/m
-            </span>
-          </div>
-          <div className="text-xs font-bold text-emerald-400 mt-1">
-            Friend Discount: 🪙{' '}
-            {systemSettings.coinBurnRateFriendPerMin ?? DEFAULT_COIN_BURN_RATE_FRIEND_PER_MIN}/m
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setEconomySection('B');
-            setActiveSubTab('financials');
-          }}
-          className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg text-left cursor-pointer hover:border-pink-500/40"
-        >
-          <div className="text-xs font-semibold text-slate-400 mb-1">Host & Team Leader Shares</div>
-          <div className="text-xl font-black text-emerald-400">
-            Base {systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT}% · Target{' '}
-            {systemSettings.femaleHostTargetSharePercent ?? DEFAULT_FEMALE_HOST_TARGET_SHARE_PERCENT}% · TL{' '}
-            {systemSettings.teamLeaderSharePercent ?? DEFAULT_TEAM_LEADER_SHARE_PERCENT}%
-          </div>
-          <div className="text-[11px] text-slate-400 mt-1">
-            Platform Net:{' '}
-            {100 -
-              (systemSettings.femaleHostSharePercent ?? DEFAULT_FEMALE_HOST_SHARE_PERCENT) -
-              (systemSettings.teamLeaderSharePercent ?? DEFAULT_TEAM_LEADER_SHARE_PERCENT)}
-            % (base)
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setEconomySection('D');
-            setActiveSubTab('financials');
-          }}
-          className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg text-left cursor-pointer hover:border-purple-500/40"
-        >
-          <div className="text-xs font-semibold text-slate-400 mb-1">Fixed Peg & Min Threshold</div>
-          <div className="text-xl font-black text-purple-300">
-            ${getCoinUsdPeg(systemSettings)} / coin
-          </div>
-          <div className="text-[11px] text-purple-400 mt-1">
-            {formatPegExample(getCoinUsdPeg(systemSettings))} · Min cashout: $
-            {systemSettings.minPayoutThresholdUSD ?? 50} USD (
-            {usdToCoins(
-              systemSettings.minPayoutThresholdUSD ?? 50,
-              getCoinUsdPeg(systemSettings)
-            ).toLocaleString()}{' '}
-            🪙)
-          </div>
-        </button>
-
-        <div className="p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-lg">
-          <div className="text-xs font-semibold text-slate-400 mb-1">Payout Queues & Dispatched</div>
-          <div className="text-xl font-black text-emerald-400">${totalCompletedPayoutsUSD.toFixed(2)} USD</div>
-          <div className="text-[11px] text-amber-300 mt-1">
-            Pending Queue: ${totalPendingPayoutsUSD.toFixed(2)} USD
-          </div>
-        </div>
-      </div>
+        </>
+      )}
 
       {/* TAB -1: Admin Analytics Hub */}
       {activeSubTab === 'analytics' && (
         <AdminAnalyticsHub
-          onOpenFinancialModule={() => setActiveSubTab('finance-module')}
-          onOpenEconomyConfig={() => {
-            setEconomySection(undefined);
-            setActiveSubTab('financials');
-          }}
+          navPlacement="sidebar"
+          hubTab={analyticsHubTab}
+          onHubTabChange={setAnalyticsHubTab}
+          onOpenFinancialModule={() => navigateAdmin('finance-module', defaultL2ForTab('finance-module'))}
+          onOpenEconomyConfig={() => navigateAdmin('financials', defaultL2ForTab('financials'))}
           onOverrideEarning={(u) => {
             setOverrideEarningUser(u);
             const systemRate = deriveHostEarnPerMin(
@@ -1244,8 +1148,8 @@ export const AdminDashboard: React.FC = () => {
       {activeSubTab === 'financials' && (
         <AdminEconomyConfigHub
           initialSection={economySection}
-          onOpenSkuBundles={() => setActiveSubTab('skus')}
-          onOpenGiftsCatalog={() => setActiveSubTab('gifts')}
+          onOpenSkuBundles={() => navigateAdmin('skus')}
+          onOpenGiftsCatalog={() => navigateAdmin('gifts')}
         />
       )}
 
@@ -3428,17 +3332,47 @@ export const AdminDashboard: React.FC = () => {
       )}
 
       {/* Sub-Tab 6: Home CMS & Policies Management */}
-      {activeSubTab === 'cms' && <AdminHomeCMS />}
+      {activeSubTab === 'cms' && (
+        <AdminHomeCMS
+          navPlacement="sidebar"
+          cmsSection={cmsSection}
+          onCmsSectionChange={setCmsSection}
+        />
+      )}
 
       {/* Sub-Tab: Worldwide Countries, Languages, Zodiac & Interests Control */}
-      {activeSubTab === 'countries' && <AdminTaxonomyManager />}
+      {activeSubTab === 'countries' && (
+        <AdminTaxonomyManager
+          navPlacement="sidebar"
+          activeTab={taxonomyTab}
+          onTabChange={setTaxonomyTab}
+        />
+      )}
 
       {/* Sub-Tab: Creator targets, rotational matrix, performance */}
-      {activeSubTab === 'creator-ops' && <AdminCreatorTargetConfig />}
-      {activeSubTab === 'finance-module' && <AdminFinancialModule />}
+      {activeSubTab === 'creator-ops' && (
+        <AdminCreatorTargetConfig
+          navPlacement="sidebar"
+          activeSubView={creatorOpsView}
+          onSubViewChange={setCreatorOpsView}
+        />
+      )}
+      {activeSubTab === 'finance-module' && (
+        <AdminFinancialModule
+          navPlacement="sidebar"
+          tab={financeModuleTab}
+          onTabChange={setFinanceModuleTab}
+        />
+      )}
 
       {/* Settings: database, R2, moderation, features, schema */}
-      {activeSubTab === 'infra' && <AdminDatabaseStorageConfig />}
+      {activeSubTab === 'infra' && (
+        <AdminDatabaseStorageConfig
+          navPlacement="sidebar"
+          activeTab={infraTab}
+          onTabChange={setInfraTab}
+        />
+      )}
       {activeSubTab === 'api-health' && <AdminApiHealthPanel />}
       {/* Email: OTP / transactional templates, policy, logs */}
       {activeSubTab === 'email' && <AdminEmailPanel />}
@@ -3698,6 +3632,6 @@ export const AdminDashboard: React.FC = () => {
           </div>
         </div>
       )}
-    </div>
+    </AdminShell>
   );
 };

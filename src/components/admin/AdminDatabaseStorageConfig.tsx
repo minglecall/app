@@ -39,11 +39,27 @@ import { ResetMockDataModal } from './ResetMockDataModal';
 import { getMasterSchemaSql, getMigrationSchemaSql } from '../../utils/schemaSql';
 import { authFetch } from '../../utils/apiClient';
 
-export const AdminDatabaseStorageConfig: React.FC = () => {
+type InfraTab = 'db_pool' | 'r2_storage' | 'moderation' | 'features' | 'sql_schema';
+
+interface AdminDatabaseStorageConfigProps {
+  activeTab?: InfraTab;
+  onTabChange?: (tab: InfraTab) => void;
+  navPlacement?: 'inline' | 'sidebar';
+}
+
+export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProps> = ({
+  activeTab: activeTabProp,
+  onTabChange,
+  navPlacement = 'inline',
+}) => {
   const { showToast, syncAllProfilesToSupabase, purgeAllMockData, users, systemSettings } = useApp();
 
-  // Active inner tab
-  const [activeTab, setActiveTab] = useState<'db_pool' | 'r2_storage' | 'moderation' | 'features' | 'sql_schema'>('db_pool');
+  const [activeTabInternal, setActiveTabInternal] = useState<InfraTab>('db_pool');
+  const activeTab = activeTabProp ?? activeTabInternal;
+  const setActiveTab = (tab: InfraTab) => {
+    onTabChange?.(tab);
+    if (activeTabProp === undefined) setActiveTabInternal(tab);
+  };
 
   // Modal State
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
@@ -876,60 +892,60 @@ export const AdminDatabaseStorageConfig: React.FC = () => {
           </div>
         </div>
 
-        {/* Sub-Tabs Nav */}
-        <div className="flex bg-[#0F1115] p-1 rounded-lg border border-slate-800 text-xs font-semibold space-x-1 mt-6 overflow-x-auto">
-          <button
-            onClick={() => setActiveTab('db_pool')}
-            className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
-              activeTab === 'db_pool' ? 'bg-emerald-600 text-white font-bold shadow-md shadow-emerald-600/30' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Database className="w-4 h-4" />
-            <span>Database & Pooling</span>
-          </button>
+        {/* Sub-Tabs Nav — hidden when AdminShell sidebar owns L2 */}
+        {navPlacement !== 'sidebar' && (
+          <div className="flex bg-[#0F1115] p-1 rounded-lg border border-slate-800 text-xs font-semibold space-x-1 mt-6 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab('db_pool')}
+              className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
+                activeTab === 'db_pool' ? 'bg-emerald-600 text-white font-bold shadow-md shadow-emerald-600/30' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Database className="w-4 h-4" />
+              <span>Database & Pooling</span>
+            </button>
 
-          <button
-            onClick={() => setActiveTab('r2_storage')}
-            className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
-              activeTab === 'r2_storage' ? 'bg-cyan-600 text-white font-bold shadow-md shadow-cyan-600/30' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Cloud className="w-4 h-4" />
-            <span>Cloudflare R2 Storage</span>
-          </button>
+            <button
+              onClick={() => setActiveTab('r2_storage')}
+              className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
+                activeTab === 'r2_storage' ? 'bg-cyan-600 text-white font-bold shadow-md shadow-cyan-600/30' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Cloud className="w-4 h-4" />
+              <span>Cloudflare R2 Storage</span>
+            </button>
 
-          
+            <button
+              onClick={() => setActiveTab('moderation')}
+              className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
+                activeTab === 'moderation' ? 'bg-rose-600 text-white font-bold shadow-md shadow-rose-600/30' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Shield className="w-4 h-4" />
+              <span>Content Moderation & Flags</span>
+            </button>
 
-          <button
-            onClick={() => setActiveTab('moderation')}
-            className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
-              activeTab === 'moderation' ? 'bg-rose-600 text-white font-bold shadow-md shadow-rose-600/30' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Shield className="w-4 h-4" />
-            <span>Content Moderation & Flags</span>
-          </button>
+            <button
+              onClick={() => setActiveTab('features')}
+              className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
+                activeTab === 'features' ? 'bg-indigo-600 text-white font-bold shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Sliders className="w-4 h-4" />
+              <span>Global Feature Toggles</span>
+            </button>
 
-          <button
-            onClick={() => setActiveTab('features')}
-            className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
-              activeTab === 'features' ? 'bg-indigo-600 text-white font-bold shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Sliders className="w-4 h-4" />
-            <span>Global Feature Toggles</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('sql_schema')}
-            className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
-              activeTab === 'sql_schema' ? 'bg-purple-600 text-white font-bold shadow-md shadow-purple-600/30' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <FileCode2 className="w-4 h-4" />
-            <span>SQL Schema & RLS Policies</span>
-          </button>
-        </div>
+            <button
+              onClick={() => setActiveTab('sql_schema')}
+              className={`px-4 py-2 rounded-md transition-all whitespace-nowrap flex items-center space-x-2 ${
+                activeTab === 'sql_schema' ? 'bg-purple-600 text-white font-bold shadow-md shadow-purple-600/30' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <FileCode2 className="w-4 h-4" />
+              <span>SQL Schema & RLS Policies</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* TAB 1: DATABASE & POOLING PARAMETERS */}

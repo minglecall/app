@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { TrendingUp, LayoutDashboard, Users, Landmark, Award, Building2, ShieldAlert } from 'lucide-react';
+import { LayoutDashboard, Users, Landmark, Award, Building2, ShieldAlert } from 'lucide-react';
 import { useApp } from '../../../context/AppContext';
 import { UserProfile } from '../../../types';
 import {
@@ -41,6 +41,11 @@ interface AdminAnalyticsHubProps {
   onOpenFinancialModule?: () => void;
   /** Jump to Admin → Economy Config (rates only). */
   onOpenEconomyConfig?: () => void;
+  /** Controlled hub tab (sidebar L2). */
+  hubTab?: AnalyticsHubTab;
+  onHubTabChange?: (tab: AnalyticsHubTab) => void;
+  /** Hide inline tab bar when nav lives in AdminShell sidebar. */
+  navPlacement?: 'inline' | 'sidebar';
 }
 
 const HUB_TABS: { id: AnalyticsHubTab; label: string; icon: React.ReactNode }[] = [
@@ -57,6 +62,9 @@ export const AdminAnalyticsHub: React.FC<AdminAnalyticsHubProps> = ({
   onInspectUser,
   onOpenFinancialModule,
   onOpenEconomyConfig,
+  hubTab: hubTabProp,
+  onHubTabChange,
+  navPlacement = 'inline',
 }) => {
   const {
     users,
@@ -66,7 +74,12 @@ export const AdminAnalyticsHub: React.FC<AdminAnalyticsHubProps> = ({
     adminActiveCalls,
   } = useApp();
 
-  const [hubTab, setHubTab] = useState<AnalyticsHubTab>('overview');
+  const [hubTabInternal, setHubTabInternal] = useState<AnalyticsHubTab>('overview');
+  const hubTab = hubTabProp ?? hubTabInternal;
+  const setHubTab = (tab: AnalyticsHubTab) => {
+    onHubTabChange?.(tab);
+    if (hubTabProp === undefined) setHubTabInternal(tab);
+  };
   const [filters, setFilters] = useState<AdminAnalyticsFilters>(() => ({
     range: buildDateRange('7d'),
     role: 'all',
@@ -151,53 +164,40 @@ export const AdminAnalyticsHub: React.FC<AdminAnalyticsHubProps> = ({
     }
   };
 
+  const showFullFilters = hubTab === 'users';
+  const showDateFilters = hubTab === 'creators' || hubTab === 'agencies' || hubTab === 'risk';
+
   return (
     <div id="admin-analytics-hub" className="space-y-5">
-      <div className="bg-[#121622] border border-indigo-500/30 rounded-3xl p-5 sm:p-6 shadow-2xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-80 h-80 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="relative z-10 space-y-2">
-          <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-xs font-mono font-bold tracking-wider">
-            <TrendingUp className="w-3.5 h-3.5 text-indigo-400" />
-            <span>ADMIN ANALYTICS HUB</span>
-          </div>
-          <h2 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
-            Platform Analytics (ops)
-          </h2>
-          <p className="text-xs text-slate-300 max-w-3xl leading-relaxed">
-            Product &amp; ops insight: users, calls, supply, agencies, and risk. Money of record —
-            Funding, Live ledger, and Settlement — lives in{' '}
-            <span className="font-mono text-emerald-300">Financial Module</span>. Rates / Coin USD Peg
-            only in <span className="font-mono text-indigo-300">Coin Burn &amp; Economy</span> (USD
-            estimates here use that peg). Filters use{' '}
-            <span className="font-mono text-indigo-300">UTC</span> bounds.
-          </p>
+      {navPlacement !== 'sidebar' && (
+        <div className="flex flex-wrap items-center gap-1.5 bg-[#0F1115] p-1.5 rounded-xl border border-slate-800">
+          {HUB_TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setHubTab(t.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                hubTab === t.id
+                  ? 'bg-indigo-600 text-white font-bold shadow-md'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+          ))}
         </div>
-      </div>
+      )}
 
-      <AnalyticsFilterBar
-        filters={filters}
-        onChange={setFilters}
-        teamLeaders={teamLeaders}
-        countries={countries}
-      />
-
-      <div className="flex flex-wrap items-center gap-1.5 bg-[#0F1115] p-1.5 rounded-xl border border-slate-800">
-        {HUB_TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setHubTab(t.id)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-              hubTab === t.id
-                ? 'bg-indigo-600 text-white font-bold shadow-md'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            {t.icon}
-            <span>{t.label}</span>
-          </button>
-        ))}
-      </div>
+      {(showFullFilters || showDateFilters) && (
+        <AnalyticsFilterBar
+          filters={filters}
+          onChange={setFilters}
+          teamLeaders={teamLeaders}
+          countries={countries}
+          mode={showFullFilters ? 'full' : 'date'}
+        />
+      )}
 
       {hubTab === 'overview' && (
         <OverviewTab

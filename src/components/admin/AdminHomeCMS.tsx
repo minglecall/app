@@ -20,7 +20,19 @@ import { HomeBanner, PolicyDocument, HomeQuickLink } from '../../types';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { AdminDiscoveryCardDesigner } from './AdminDiscoveryCardDesigner';
 
-export const AdminHomeCMS: React.FC = () => {
+type CmsSection = 'banners' | 'policies' | 'shortcuts' | 'discovery_card';
+
+interface AdminHomeCMSProps {
+  cmsSection?: CmsSection;
+  onCmsSectionChange?: (section: CmsSection) => void;
+  navPlacement?: 'inline' | 'sidebar';
+}
+
+export const AdminHomeCMS: React.FC<AdminHomeCMSProps> = ({
+  cmsSection: cmsSectionProp,
+  onCmsSectionChange,
+  navPlacement = 'inline',
+}) => {
   const {
     homeBanners,
     saveHomeBanner,
@@ -36,7 +48,12 @@ export const AdminHomeCMS: React.FC = () => {
     seedHomeCmsDefaults,
   } = useApp();
 
-  const [cmsSection, setCmsSection] = useState<'banners' | 'policies' | 'shortcuts' | 'discovery_card'>('banners');
+  const [cmsSectionInternal, setCmsSectionInternal] = useState<CmsSection>('banners');
+  const cmsSection = cmsSectionProp ?? cmsSectionInternal;
+  const setCmsSection = (section: CmsSection) => {
+    onCmsSectionChange?.(section);
+    if (cmsSectionProp === undefined) setCmsSectionInternal(section);
+  };
   const [isSaving, setIsSaving] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
 
@@ -156,44 +173,46 @@ export const AdminHomeCMS: React.FC = () => {
             <Sparkles className="w-3.5 h-3.5 text-amber-300" />
             <span>{isSeeding ? 'Seeding…' : 'Load starter content'}</span>
           </button>
-          <div className="flex bg-[#0B0D13] p-1 rounded-xl border border-slate-800 text-xs font-bold space-x-1">
-          <button
-            onClick={() => setCmsSection('banners')}
-            className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
-              cmsSection === 'banners' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Image className="w-3.5 h-3.5" />
-            <span>Hero Banners ({homeBanners.length})</span>
-          </button>
-          <button
-            onClick={() => setCmsSection('policies')}
-            className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
-              cmsSection === 'policies' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <FileText className="w-3.5 h-3.5" />
-            <span>Policies & Terms ({policyDocuments.length})</span>
-          </button>
-          <button
-            onClick={() => setCmsSection('shortcuts')}
-            className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
-              cmsSection === 'shortcuts' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            <span>Quick Shortcuts ({homeQuickLinks.length})</span>
-          </button>
-          <button
-            onClick={() => setCmsSection('discovery_card')}
-            className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
-              cmsSection === 'discovery_card' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <LayoutTemplate className="w-3.5 h-3.5" />
-            <span>Discovery Card</span>
-          </button>
-          </div>
+          {navPlacement !== 'sidebar' && (
+            <div className="flex bg-[#0B0D13] p-1 rounded-xl border border-slate-800 text-xs font-bold space-x-1">
+              <button
+                onClick={() => setCmsSection('banners')}
+                className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
+                  cmsSection === 'banners' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Image className="w-3.5 h-3.5" />
+                <span>Hero Banners ({homeBanners.length})</span>
+              </button>
+              <button
+                onClick={() => setCmsSection('policies')}
+                className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
+                  cmsSection === 'policies' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Policies & Terms ({policyDocuments.length})</span>
+              </button>
+              <button
+                onClick={() => setCmsSection('shortcuts')}
+                className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
+                  cmsSection === 'shortcuts' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Quick Shortcuts ({homeQuickLinks.length})</span>
+              </button>
+              <button
+                onClick={() => setCmsSection('discovery_card')}
+                className={`px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1.5 ${
+                  cmsSection === 'discovery_card' ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <LayoutTemplate className="w-3.5 h-3.5" />
+                <span>Discovery Card</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

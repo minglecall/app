@@ -43,19 +43,20 @@ const KpiCard: React.FC<{
   sub?: string;
   icon: React.ReactNode;
   onClick?: () => void;
-}> = ({ label, value, sub, icon, onClick }) => (
+  accent?: string;
+}> = ({ label, value, sub, icon, onClick, accent = 'border-l-indigo-500/70' }) => (
   <button
     type="button"
     onClick={onClick}
-    className={`text-left p-4 bg-[#13161F] border border-slate-800 rounded-2xl shadow-lg space-y-1 w-full ${
+    className={`text-left p-4 bg-[#13161F] border border-slate-800 border-l-[3px] ${accent} rounded-2xl space-y-1.5 w-full ${
       onClick ? 'hover:border-slate-600 cursor-pointer' : 'cursor-default'
     }`}
   >
     <div className="flex items-center justify-between text-slate-400">
-      <span className="text-[10px] font-bold uppercase font-mono">{label}</span>
+      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</span>
       {icon}
     </div>
-    <div className="text-lg sm:text-xl font-black text-white font-mono">{value}</div>
+    <div className="text-xl sm:text-2xl font-black text-white font-mono tracking-tight">{value}</div>
     {sub && <div className="text-[10px] text-slate-400 font-mono">{sub}</div>}
   </button>
 );
@@ -95,6 +96,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           sub={formatCoins(finance.burn.burnedCoins)}
           icon={<Coins className="w-3.5 h-3.5 text-amber-400" />}
           onClick={onOpenFinancialModule}
+          accent="border-l-amber-500/70"
         />
         <KpiCard
           label="Active callers / hosts"
@@ -102,12 +104,14 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           sub={`Live calls: ${finance.liveCalls}`}
           icon={<Users className="w-3.5 h-3.5 text-pink-400" />}
           onClick={() => onGotoUsers?.()}
+          accent="border-l-pink-500/70"
         />
         <KpiCard
           label="Period calls"
           value={String(finance.callCount)}
           sub={`${finance.totalMinutes} live mins`}
           icon={<PhoneCall className="w-3.5 h-3.5 text-rose-400" />}
+          accent="border-l-rose-500/70"
         />
         <KpiCard
           label="New creators"
@@ -115,6 +119,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           sub={`TLs +${finance.newUsersByRole.team_leader}`}
           icon={<TrendingUp className="w-3.5 h-3.5 text-emerald-400" />}
           onClick={() => onGotoUsers?.('female_creator')}
+          accent="border-l-emerald-500/70"
         />
         <KpiCard
           label="New males"
@@ -122,6 +127,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           sub={`Regular ♀ +${finance.newUsersByRole.female_user}`}
           icon={<Users className="w-3.5 h-3.5 text-indigo-400" />}
           onClick={() => onGotoUsers?.('male_user')}
+          accent="border-l-indigo-500/70"
         />
       </div>
 

@@ -29,10 +29,27 @@ import { AdminRotationalPriorityMatrix } from './AdminRotationalPriorityMatrix';
 import { AdminCreatorPerformanceAnalytics } from './AdminCreatorPerformanceAnalytics';
 import { patchFinanceConfig } from '../../services/financeApi';
 
-export const AdminCreatorTargetConfig: React.FC = () => {
+type CreatorOpsSubView = 'analytics' | 'matrix' | 'targets';
+
+interface AdminCreatorTargetConfigProps {
+  activeSubView?: CreatorOpsSubView;
+  onSubViewChange?: (view: CreatorOpsSubView) => void;
+  navPlacement?: 'inline' | 'sidebar';
+}
+
+export const AdminCreatorTargetConfig: React.FC<AdminCreatorTargetConfigProps> = ({
+  activeSubView: activeSubViewProp,
+  onSubViewChange,
+  navPlacement = 'inline',
+}) => {
   const { systemSettings, updateSystemSettings, showToast } = useApp();
 
-  const [activeSubView, setActiveSubView] = useState<'analytics' | 'matrix' | 'targets'>('analytics');
+  const [activeSubViewInternal, setActiveSubViewInternal] = useState<CreatorOpsSubView>('analytics');
+  const activeSubView = activeSubViewProp ?? activeSubViewInternal;
+  const setActiveSubView = (view: CreatorOpsSubView) => {
+    onSubViewChange?.(view);
+    if (activeSubViewProp === undefined) setActiveSubViewInternal(view);
+  };
 
   useEffect(() => {
     const handler = (ev: Event) => {
@@ -43,7 +60,7 @@ export const AdminCreatorTargetConfig: React.FC = () => {
     };
     window.addEventListener('minglecall:admin-navigate', handler as EventListener);
     return () => window.removeEventListener('minglecall:admin-navigate', handler as EventListener);
-  }, []);
+  }, [activeSubViewProp, onSubViewChange]);
 
   const [formData, setFormData] = useState({
     creatorTargetCycle: systemSettings.creatorTargetCycle || 'weekly',
@@ -103,59 +120,64 @@ export const AdminCreatorTargetConfig: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* 3-Way Sub-Navigation Switcher: Performance Analytics vs Rotational Matrix vs Target Thresholds */}
-      <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-2 flex flex-wrap items-center justify-between gap-2 shadow-lg">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Tab 1: Creator Performance & Intelligence Analytics */}
-          <button
-            onClick={() => setActiveSubView('analytics')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-mono font-bold transition-all flex items-center space-x-2 cursor-pointer ${
-              activeSubView === 'analytics'
-                ? 'bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500 text-slate-950 shadow-lg shadow-amber-950/60 font-black ring-1 ring-amber-300'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4 text-slate-950" />
-            <span>👑 Creator Performance & Intelligence</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-slate-950 text-amber-300 text-[10px] font-mono">
-              ANALYTICS
-            </span>
-          </button>
+      {/* 3-Way Sub-Navigation — hidden when AdminShell sidebar owns L2 */}
+      {navPlacement !== 'sidebar' ? (
+        <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-2 flex flex-wrap items-center justify-between gap-2 shadow-lg">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setActiveSubView('analytics')}
+              className={`px-4 py-2.5 rounded-xl text-xs font-mono font-bold transition-all flex items-center space-x-2 cursor-pointer ${
+                activeSubView === 'analytics'
+                  ? 'bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500 text-slate-950 shadow-lg shadow-amber-950/60 font-black ring-1 ring-amber-300'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4 text-slate-950" />
+              <span>Creator Performance & Intelligence</span>
+              <span className="px-1.5 py-0.2 rounded-full bg-slate-950 text-amber-300 text-[10px] font-mono">
+                ANALYTICS
+              </span>
+            </button>
 
-          {/* Tab 2: Rotational Priority, Scoring & Diversity System */}
-          <button
-            onClick={() => setActiveSubView('matrix')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-mono font-bold transition-all flex items-center space-x-2 cursor-pointer ${
-              activeSubView === 'matrix'
-                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-950/60 ring-1 ring-indigo-400'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-            }`}
-          >
-            <Zap className="w-4 h-4 text-amber-300" />
-            <span>⚡ Rotational Priority & Diversity Matrix</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-[10px]">
-              LIVE
-            </span>
-          </button>
+            <button
+              onClick={() => setActiveSubView('matrix')}
+              className={`px-4 py-2.5 rounded-xl text-xs font-mono font-bold transition-all flex items-center space-x-2 cursor-pointer ${
+                activeSubView === 'matrix'
+                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-950/60 ring-1 ring-indigo-400'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <Zap className="w-4 h-4 text-amber-300" />
+              <span>Rotational Priority & Diversity Matrix</span>
+              <span className="px-1.5 py-0.2 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-[10px]">
+                LIVE
+              </span>
+            </button>
 
-          {/* Tab 3: Target Engine Thresholds & Cash Bonuses */}
-          <button
-            onClick={() => setActiveSubView('targets')}
-            className={`px-4 py-2.5 rounded-xl text-xs font-mono font-bold transition-all flex items-center space-x-2 cursor-pointer ${
-              activeSubView === 'targets'
-                ? 'bg-gradient-to-r from-emerald-600 to-teal-500 text-white shadow-lg shadow-emerald-950/60 font-black ring-1 ring-emerald-400'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-            }`}
-          >
-            <Crown className="w-4 h-4 text-yellow-300" />
-            <span>🎯 Target Thresholds & Cash Bonuses</span>
-          </button>
+            <button
+              onClick={() => setActiveSubView('targets')}
+              className={`px-4 py-2.5 rounded-xl text-xs font-mono font-bold transition-all flex items-center space-x-2 cursor-pointer ${
+                activeSubView === 'targets'
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-500 text-white shadow-lg shadow-emerald-950/60 font-black ring-1 ring-emerald-400'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <Crown className="w-4 h-4 text-yellow-300" />
+              <span>Target Thresholds & Cash Bonuses</span>
+            </button>
+          </div>
+
+          <div className="text-xs text-slate-400 font-mono px-3 py-1 bg-[#0F1115] border border-slate-800 rounded-xl hidden xl:block">
+            Active Cycle:{' '}
+            <span className="text-white font-bold uppercase">{systemSettings.creatorTargetCycle || 'weekly'}</span>
+          </div>
         </div>
-
-        <div className="text-xs text-slate-400 font-mono px-3 py-1 bg-[#0F1115] border border-slate-800 rounded-xl hidden xl:block">
-          Active Cycle: <span className="text-white font-bold uppercase">{systemSettings.creatorTargetCycle || 'weekly'}</span>
+      ) : (
+        <div className="text-xs text-slate-400 font-mono px-3 py-2 bg-[#0F1115] border border-slate-800 rounded-xl">
+          Active Cycle:{' '}
+          <span className="text-white font-bold uppercase">{systemSettings.creatorTargetCycle || 'weekly'}</span>
         </div>
-      </div>
+      )}
 
       {/* VIEW 1: Dedicated Female Creator Performance Analytics & Intelligence Dashboard */}
       {activeSubView === 'analytics' && (
