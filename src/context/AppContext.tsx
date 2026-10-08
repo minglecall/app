@@ -5724,23 +5724,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           duplicate: data.duplicate,
         });
 
-        // End before next minute if remaining balance cannot cover the rate
-        const nextBalance = Number(data.newCallerBalance);
-        const ratePerMin = Number(data.ratePerMin) || rateNeeded;
-        if (Number.isFinite(nextBalance) && nextBalance < ratePerMin) {
-          showInsufficientEndToastOnce(
-            'Call Ending',
-            'Not enough coins for another minute. Please recharge.',
-            'warning'
-          );
-          // Allow current minute to finish visually; end shortly so peer gets signal
-          window.setTimeout(() => {
-            const still = activeCallRef.current;
-            if (still && still.id === callId && still.status === 'active') {
-              endCallRef.current();
-            }
-          }, 800);
-        }
+        // Do NOT end here when remaining balance < next minute rate.
+        // The paid minute must run the full 60s; disconnect only on the next-minute pre-check.
       } catch (err) {
         burnInFlightRef.current.delete(billingMinute);
         console.warn('[billing] burn request error:', err);
