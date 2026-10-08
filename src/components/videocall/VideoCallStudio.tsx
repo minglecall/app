@@ -634,7 +634,7 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
             billingFallbackTimer = null;
             if (!isMounted || billingMarked) return;
             tryMarkBillingReady({ allowWithoutPeer: true });
-          }, 3000);
+          }, 10_000);
         };
 
         room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
@@ -1915,13 +1915,17 @@ export const VideoCallStudio: React.FC<VideoCallStudioProps> = ({ onOpenStore: _
           </div>
         </div>
 
-        {/* Creator earning badge only — single call clock lives in the bottom bar */}
-        {!isMaleCaller && canEarnCoins ? (
-          <div className="flex items-center gap-1.5 sm:gap-3 bg-app-card/90 border border-app backdrop-blur-md px-2.5 sm:px-4 py-1.5 rounded-app shadow-app-sm shrink-0">
-            <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-ticker font-bold">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <span>+{(activeCall.coinsEarned || 0)}</span>
-            </div>
+        {/* Host session earnings — updates from burn / call_logs (coins_earned) */}
+        {currentUser.id === activeCall.receiverId && canEarnCoins ? (
+          <div
+            className="flex items-center gap-1.5 bg-app-card/90 border border-app backdrop-blur-md px-2.5 sm:px-3 py-1.5 rounded-app shadow-app-sm shrink-0"
+            title="Coins earned this call (updates each billed minute)"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-emerald-400 text-xs font-ticker font-bold tabular-nums">
+              +{Math.max(0, Math.round(activeCall.coinsEarned || 0))} 🪙
+            </span>
+            <span className="hidden sm:inline text-[9px] text-app-muted font-medium">this call</span>
           </div>
         ) : (
           <div className="shrink-0 w-0 sm:w-auto" aria-hidden />

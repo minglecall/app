@@ -1623,6 +1623,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       if (CALL_TERMINAL_STATUSES.has(st)) {
         closeCallFromRemoteRef.current({ callId, status: st });
+        return;
+      }
+
+      // Live session earnings/spend — host UI needs this when burn fanout is missing (Vercel)
+      if (st === 'active' || st === 'accepted' || st === 'in_call') {
+        const cur = activeCallRef.current;
+        if (!cur || cur.id !== callId) return;
+        const earned = Number(row.coins_earned);
+        const spent = Number(row.coins_spent);
+        if (!Number.isFinite(earned) && !Number.isFinite(spent)) return;
+        setActiveCall((prev) => {
+          if (!prev || prev.id !== callId) return prev;
+          const nextEarned =
+            Number.isFinite(earned) ? Math.max(prev.coinsEarned || 0, earned) : prev.coinsEarned;
+          const nextSpent =
+            Number.isFinite(spent) ? Math.max(prev.coinsSpent || 0, spent) : prev.coinsSpent;
+          if (nextEarned === prev.coinsEarned && nextSpent === prev.coinsSpent) return prev;
+          const next = { ...prev, coinsEarned: nextEarned, coinsSpent: nextSpent };
+          activeCallRef.current = next;
+          return next;
+        });
       }
     };
 
@@ -1789,7 +1810,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     CALL_TERMINAL_STATUSES,
   ]);
 
-  // While in a call (ringing or active), poll call_logs so peer hangup closes UI even if Realtime drops
+  // While in a call, poll call_logs for hangup + live coins_earned/spent (host badge on Vercel)
   useEffect(() => {
     if (!isLoggedIn || !activeCall?.id || !isSupabaseConfigured()) return;
     const callId = activeCall.id;
@@ -1802,14 +1823,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       try {
         const { data, error } = await supabase
           .from('call_logs')
-          .select('status')
+          .select('status, coins_earned, coins_spent')
           .eq('id', callId)
           .maybeSingle();
         if (error || !data) return;
-        const st = String((data as { status?: string }).status || '').toLowerCase();
+        const row = data as { status?: string; coins_earned?: number; coins_spent?: number };
+        const st = String(row.status || '').toLowerCase();
         if (CALL_TERMINAL_STATUSES.has(st)) {
           closeCallFromRemoteRef.current({ callId, status: st });
+          return;
         }
+        if (cur.status !== 'active') return;
+        const earned = Number(row.coins_earned);
+        const spent = Number(row.coins_spent);
+        if (!Number.isFinite(earned) && !Number.isFinite(spent)) return;
+        setActiveCall((prev) => {
+          if (!prev || prev.id !== callId || prev.status !== 'active') return prev;
+          const nextEarned =
+            Number.isFinite(earned) ? Math.max(prev.coinsEarned || 0, earned) : prev.coinsEarned;
+          const nextSpent =
+            Number.isFinite(spent) ? Math.max(prev.coinsSpent || 0, spent) : prev.coinsSpent;
+          if (nextEarned === prev.coinsEarned && nextSpent === prev.coinsSpent) return prev;
+          const next = { ...prev, coinsEarned: nextEarned, coinsSpent: nextSpent };
+          activeCallRef.current = next;
+          return next;
+        });
       } catch (e) {
         console.warn('[call] end-status poll failed', e);
       }
@@ -5502,6 +5540,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       callCoinsSpent,
       callCoinsEarned,
       billingMinute,
+      hostCoinsEarned,
     } = payload;
 
     if (typeof newCallerBalance === 'number' || typeof newHostEarnings === 'number' || typeof newTlEarnings === 'number') {
@@ -5538,18 +5577,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setActiveCall((prev) => {
       if (!prev) return null;
       if (callId && prev.id !== callId) return prev;
-      return {
+      let nextEarned = prev.coinsEarned || 0;
+      if (typeof callCoinsEarned === 'number') {
+        nextEarned = Math.max(nextEarned, callCoinsEarned);
+      } else if (typeof hostCoinsEarned === 'number' && hostCoinsEarned > 0 && !payload.duplicate) {
+        // Fallback when fanout only sends per-minute host credit
+        nextEarned = nextEarned + hostCoinsEarned;
+      }
+      const next = {
         ...prev,
         billedMinutes: Math.max(prev.billedMinutes || 0, billingMinute || 0),
         coinsSpent:
           typeof callCoinsSpent === 'number'
             ? Math.max(prev.coinsSpent || 0, callCoinsSpent)
             : prev.coinsSpent,
-        coinsEarned:
-          typeof callCoinsEarned === 'number'
-            ? Math.max(prev.coinsEarned || 0, callCoinsEarned)
-            : prev.coinsEarned,
+        coinsEarned: nextEarned,
       };
+      activeCallRef.current = next;
+      return next;
     });
   }, [systemSettings.coinUsdPeg, systemSettings.femalePayoutRatioUSD]);
 
