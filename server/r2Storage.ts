@@ -126,6 +126,7 @@ export function isR2Configured(configOverride?: R2CredentialsConfig): boolean {
 export const STORAGE_UPLOAD_CATEGORIES = [
   'avatar',
   'gallery',
+  'gallery_video',
   'chat_media',
   'moment',
   'verification',
@@ -138,6 +139,7 @@ export type StorageUploadCategory = (typeof STORAGE_UPLOAD_CATEGORIES)[number];
 export const PUBLIC_MEDIA_CATEGORIES = new Set([
   'avatar',
   'gallery',
+  'gallery_video',
   'moment',
   'intro_video',
   'chat_media',
@@ -154,6 +156,7 @@ export const PRIVATE_MEDIA_CATEGORIES = new Set(['verification']);
 const CATEGORY_MAX_BYTES: Record<StorageUploadCategory, number> = {
   avatar: 5 * 1024 * 1024,
   gallery: 10 * 1024 * 1024,
+  gallery_video: 100 * 1024 * 1024,
   moment: 10 * 1024 * 1024,
   chat_media: 10 * 1024 * 1024,
   verification: 15 * 1024 * 1024,
@@ -163,6 +166,7 @@ const CATEGORY_MAX_BYTES: Record<StorageUploadCategory, number> = {
 const CATEGORY_ALLOWED_MIMES: Record<StorageUploadCategory, readonly string[]> = {
   avatar: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
   gallery: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+  gallery_video: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v'],
   moment: ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm'],
   chat_media: [
     'image/jpeg',
@@ -187,6 +191,7 @@ const MIME_EXTENSIONS: Record<string, readonly string[]> = {
   'video/mp4': ['mp4', 'm4v'],
   'video/webm': ['webm'],
   'video/quicktime': ['mov'],
+  'video/x-m4v': ['m4v'],
   'audio/mpeg': ['mp3', 'mpeg'],
   'audio/mp4': ['m4a', 'mp4'],
   'audio/webm': ['webm'],
@@ -194,7 +199,7 @@ const MIME_EXTENSIONS: Record<string, readonly string[]> = {
 
 const SAFE_USER_ID_RE = /^[A-Za-z0-9_-]+$/;
 const MEDIA_KEY_RE =
-  /^uploads\/(avatar|gallery|chat_media|moment|verification|intro_video|media)\/[A-Za-z0-9_-]+\//;
+  /^uploads\/(avatar|gallery|gallery_video|chat_media|moment|verification|intro_video|media)\/[A-Za-z0-9_-]+\//;
 
 export class StorageValidationError extends Error {
   status: number;
@@ -274,12 +279,19 @@ export function validateUploadMimeAndExtension(
 ): string {
   const mime = normalizeContentType(contentType);
   const allowed = CATEGORY_ALLOWED_MIMES[category];
+  if (!allowed) {
+    throw new StorageValidationError(
+      `Unknown upload category "${category}"`,
+      400,
+      'INVALID_CATEGORY'
+    );
+  }
   if (!mime || !allowed.includes(mime)) {
     throw new StorageValidationError(
       `Content-Type "${mime || '(empty)'}" is not allowed for category "${category}"`,
       400,
       'INVALID_MIME',
-      { allowedMimes: allowed }
+      { allowedMimes: [...allowed] }
     );
   }
 
@@ -301,6 +313,13 @@ export function validateUploadFileSize(category: StorageUploadCategory, fileSize
     throw new StorageValidationError('fileSize must be a positive number', 400, 'INVALID_FILE_SIZE');
   }
   const max = CATEGORY_MAX_BYTES[category];
+  if (!max) {
+    throw new StorageValidationError(
+      `Unknown upload category "${category}"`,
+      400,
+      'INVALID_CATEGORY'
+    );
+  }
   if (size > max) {
     throw new StorageValidationError(
       `File exceeds max size for "${category}" (${max} bytes)`,

@@ -1,7 +1,44 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 export { isSupabaseConfigured };
 import { Database } from '../types/database.types';
-import { UserProfile, ChatMessage, OnlineStatus, DailyRewardRecord } from '../types';
+import {
+  UserProfile,
+  ChatMessage,
+  OnlineStatus,
+  DailyRewardRecord,
+  GalleryVideoItem,
+} from '../types';
+
+function normalizeGalleryVideos(raw: unknown): GalleryVideoItem[] {
+  if (!raw) return [];
+  let arr: unknown[] = [];
+  if (typeof raw === 'string') {
+    try {
+      arr = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  } else if (Array.isArray(raw)) {
+    arr = raw;
+  } else {
+    return [];
+  }
+  return arr
+    .map((item: any) => {
+      if (!item || typeof item !== 'object') return null;
+      const url = String(item.url || '').trim();
+      if (!url) return null;
+      const sizeBytes = Number(item.sizeBytes ?? item.size_bytes ?? 0);
+      return {
+        url,
+        storageKey: item.storageKey || item.storage_key || undefined,
+        sizeBytes: Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : 0,
+        contentType: item.contentType || item.content_type || undefined,
+        createdAt: item.createdAt || item.created_at || undefined,
+      } as GalleryVideoItem;
+    })
+    .filter(Boolean) as GalleryVideoItem[];
+}
 import {
   ALL_WORLDWIDE_COUNTRIES,
   ALL_LANGUAGES,
@@ -84,6 +121,7 @@ export function mapDbProfileToUserProfile(db: DbProfile): UserProfile {
     tags: db.tags || [],
     avatarUrl: db.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
     gallery: db.gallery || [],
+    galleryVideos: normalizeGalleryVideos((db as any).gallery_videos),
     introVideoUrl: db.intro_video_url || undefined,
     verificationVideoUrl: db.verification_video_url || undefined,
     isVerified: db.is_verified,
@@ -159,6 +197,7 @@ export function mapUserProfileToDbInsert(profile: UserProfile): Database['public
     spoken_languages: profile.spokenLanguages,
     avatar_url: profile.avatarUrl,
     gallery: profile.gallery,
+    gallery_videos: (profile.galleryVideos || []) as any,
     intro_video_url: profile.introVideoUrl || null,
     verification_video_url: profile.verificationVideoUrl || null,
     is_verified: profile.isVerified,
@@ -423,6 +462,8 @@ export async function updateUserProfileInSupabase(
     if (updates.tags !== undefined) payload.tags = updates.tags;
     if (updates.avatarUrl !== undefined) payload.avatar_url = updates.avatarUrl;
     if (updates.gallery !== undefined) payload.gallery = updates.gallery;
+    if (updates.galleryVideos !== undefined) payload.gallery_videos = updates.galleryVideos;
+    if (updates.introVideoUrl !== undefined) payload.intro_video_url = updates.introVideoUrl || null;
     if (updates.isVerified !== undefined) payload.is_verified = updates.isVerified;
     if (updates.role !== undefined) payload.role = updates.role === 'female_host' ? 'female_creator' : updates.role;
     if (updates.coinBalance !== undefined) payload.coin_balance = Number(updates.coinBalance);
@@ -1455,6 +1496,13 @@ export async function updateSystemConfigsInSupabase(
     if (updates.period_close_utc_time !== undefined) payload.period_close_utc_time = updates.period_close_utc_time;
     if (updates.settlementEnabled !== undefined) payload.settlement_enabled = updates.settlementEnabled;
     if (updates.settlement_enabled !== undefined) payload.settlement_enabled = updates.settlement_enabled;
+    if (updates.profileVideoQuotaMb !== undefined) payload.r2_profile_video_quota_mb = Number(updates.profileVideoQuotaMb);
+    if (updates.r2_profile_video_quota_mb !== undefined) payload.r2_profile_video_quota_mb = Number(updates.r2_profile_video_quota_mb);
+    if (updates.r2ProfileVideoQuotaMb !== undefined) payload.r2_profile_video_quota_mb = Number(updates.r2ProfileVideoQuotaMb);
+    if (updates.r2MaxVideoSizeMb !== undefined) payload.r2_max_video_size_mb = Number(updates.r2MaxVideoSizeMb);
+    if (updates.r2_max_video_size_mb !== undefined) payload.r2_max_video_size_mb = Number(updates.r2_max_video_size_mb);
+    if (updates.r2MaxImageSizeMb !== undefined) payload.r2_max_image_size_mb = Number(updates.r2MaxImageSizeMb);
+    if (updates.r2_max_image_size_mb !== undefined) payload.r2_max_image_size_mb = Number(updates.r2_max_image_size_mb);
     if (updates.creatorTargetBronzeHours !== undefined) payload.creator_target_bronze_hours = updates.creatorTargetBronzeHours;
     if (updates.creator_target_bronze_hours !== undefined) payload.creator_target_bronze_hours = updates.creator_target_bronze_hours;
     if (updates.creatorTargetBronzeCoins !== undefined) payload.creator_target_bronze_coins = updates.creatorTargetBronzeCoins;

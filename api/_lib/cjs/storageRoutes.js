@@ -190,6 +190,7 @@ function decodeBase64Payload(base64Data) {
 const PUBLIC_MEDIA_CATEGORIES = new Set([
   'avatar',
   'gallery',
+  'gallery_video',
   'moment',
   'intro_video',
   'chat_media',

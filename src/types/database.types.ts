@@ -32,6 +32,7 @@ export interface Database {
           spoken_languages: string[];
           avatar_url: string | null;
           gallery: string[];
+          gallery_videos: Json;
           intro_video_url: string | null;
           verification_video_url: string | null;
           is_verified: boolean;
@@ -98,6 +99,7 @@ export interface Database {
           spoken_languages?: string[];
           avatar_url?: string | null;
           gallery?: string[];
+          gallery_videos?: Json;
           intro_video_url?: string | null;
           verification_video_url?: string | null;
           is_verified?: boolean;
@@ -330,6 +332,7 @@ export interface Database {
           r2_bucket_name: string;
           r2_max_image_size_mb: number;
           r2_max_video_size_mb: number;
+          r2_profile_video_quota_mb: number;
           r2_allowed_mime_types: string[];
           r2_cdn_cache_ttl_seconds: number;
           smtp_host?: string;

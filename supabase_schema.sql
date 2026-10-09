@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     spoken_languages TEXT[] DEFAULT '{"English"}',
     avatar_url TEXT DEFAULT 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
     gallery TEXT[] DEFAULT '{}',
+    -- Profile gallery videos: [{url, storageKey, sizeBytes, contentType, createdAt}]
+    gallery_videos JSONB NOT NULL DEFAULT '[]'::jsonb,
     intro_video_url TEXT,
     verification_video_url TEXT,
     is_verified BOOLEAN NOT NULL DEFAULT false,
@@ -84,6 +86,7 @@ ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS auth_id UUID REFERENCES auth.users(id) ON DELETE SET NULL;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS interested_in TEXT[] DEFAULT '{}';
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS gallery_videos JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS intro_video_url TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS is_onboarded BOOLEAN DEFAULT true;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS agreed_to_terms BOOLEAN DEFAULT true;
@@ -429,7 +432,9 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     r2_bucket_name TEXT DEFAULT 'datingappbucket',
     r2_max_image_size_mb INT DEFAULT 15,
     r2_max_video_size_mb INT DEFAULT 100,
-    r2_allowed_mime_types TEXT[] DEFAULT '{"image/jpeg","image/png","image/webp","video/mp4"}',
+    -- Per-user total storage quota for profile gallery videos (all videos combined)
+    r2_profile_video_quota_mb INT DEFAULT 30,
+    r2_allowed_mime_types TEXT[] DEFAULT '{"image/jpeg","image/png","image/webp","video/mp4","video/webm","video/quicktime"}',
     r2_cdn_cache_ttl_seconds INT DEFAULT 86400,
     smtp_host TEXT DEFAULT '',
     smtp_port INT DEFAULT 587, 
@@ -510,6 +515,9 @@ ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS streak_boost_duration
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS min_daily_active_hours_for_streak NUMERIC DEFAULT 2.0;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS period_close_utc_time TEXT DEFAULT '00:00';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS settlement_enabled BOOLEAN DEFAULT true;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS r2_profile_video_quota_mb INT DEFAULT 30;
+COMMENT ON COLUMN public.system_configs.r2_profile_video_quota_mb IS
+  'Per-user total MB quota for all profile gallery videos combined. Admin-configurable; default 30.';
 -- Phase 1 host true-up: base share on live burns; target share at period close
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS female_host_target_share_percent NUMERIC DEFAULT 40;
 COMMENT ON COLUMN public.system_configs.female_host_share_percent IS

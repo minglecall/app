@@ -65,6 +65,15 @@ export interface CreatorMoment {
   isLiked?: boolean;
 }
 
+/** One entry in profiles.gallery_videos (JSON). sizeBytes used for per-user quota. */
+export interface GalleryVideoItem {
+  url: string;
+  storageKey?: string;
+  sizeBytes: number;
+  contentType?: string;
+  createdAt?: string;
+}
+
 export interface UserProfile {
   id: string;
   authId?: string;
@@ -88,6 +97,8 @@ export interface UserProfile {
   tags?: string[]; // Creator tags/categories e.g. ['Singer', 'Gamer', 'Model', 'Dancer', 'Traveler']
   avatarUrl: string;
   gallery: string[];
+  /** Profile gallery videos (multiple). Total sizeBytes capped by systemSettings.profileVideoQuotaMb. */
+  galleryVideos?: GalleryVideoItem[];
   introVideoUrl?: string; // Cloudflare R2 uploaded video introduction
   verificationVideoUrl?: string;
   isVerified: boolean;
@@ -557,6 +568,10 @@ export interface SystemSettings {
   algoWeightDiversityJitterMax?: number;
   algoWeightVerified?: number;
   algoWeightHighRating?: number;
+  /** Per-user total MB quota for all profile gallery videos combined (admin-set; default 30). */
+  profileVideoQuotaMb?: number;
+  /** Max size of a single video file in MB (R2 policy). */
+  r2MaxVideoSizeMb?: number;
 }
 
 export type CreatorTier = 'bronze' | 'silver' | 'gold';
@@ -742,6 +757,8 @@ export interface InfraSystemConfig {
   dbQueryCachingEnabled: boolean;
   r2MaxImageSizeMb: number;
   r2MaxVideoSizeMb: number;
+  /** Per-user total MB for all profile gallery videos combined. */
+  r2ProfileVideoQuotaMb: number;
   r2AllowedMimeTypes: string[];
   r2CdnCacheTtlSeconds: number;
   autoModerationSensitivity: 'low' | 'medium' | 'high' | 'strict';

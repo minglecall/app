@@ -12,6 +12,7 @@ const AUTH_UUID_RE =
 const DEFAULT_R2_PURGE_PREFIXES = [
   'uploads/avatar/',
   'uploads/gallery/',
+  'uploads/gallery_video/',
   'uploads/chat_media/',
   'uploads/moment/',
   'uploads/verification/',
@@ -370,6 +371,7 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
       spoken_languages: Array.isArray(profile.spokenLanguages) ? profile.spokenLanguages : ['English'],
       avatar_url: profile.avatarUrl || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
       gallery: Array.isArray(profile.gallery) ? profile.gallery : [],
+      gallery_videos: Array.isArray(profile.galleryVideos) ? profile.galleryVideos : [],
       intro_video_url: profile.introVideoUrl || null,
       verification_video_url: profile.verificationVideoUrl || null,
       is_verified: Boolean(profile.isVerified),
@@ -1632,6 +1634,9 @@ export async function updateUserProfileAdmin(
       payload.avatar_url = updates.avatarUrl !== undefined ? updates.avatarUrl : updates.avatar_url;
     }
     if (updates.gallery !== undefined) payload.gallery = updates.gallery;
+    if (updates.galleryVideos !== undefined || updates.gallery_videos !== undefined) {
+      payload.gallery_videos = updates.galleryVideos ?? updates.gallery_videos ?? [];
+    }
     if (updates.introVideoUrl !== undefined || updates.intro_video_url !== undefined) {
       payload.intro_video_url = updates.introVideoUrl ?? updates.intro_video_url ?? null;
     }

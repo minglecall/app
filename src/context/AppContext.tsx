@@ -137,6 +137,7 @@ const DEFAULT_FALLBACK_USER: UserProfile = {
   bio: '',
   avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
   gallery: [],
+  galleryVideos: [],
   isVerified: false,
   isOnboarded: false,
   agreedToTerms: true,
@@ -2349,6 +2350,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ...u,
             avatarUrl: DEFAULT_FALLBACK_USER.avatarUrl,
             gallery: [],
+            galleryVideos: [],
             verificationVideoUrl: undefined,
             introVideoUrl: undefined,
             isUsingMockLocation: false,
@@ -2935,6 +2937,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               creatorTargetCycle: (data as any).creator_target_cycle ?? prev.creatorTargetCycle,
               periodCloseUtcTime: (data as any).period_close_utc_time ?? prev.periodCloseUtcTime,
               settlementEnabled: (data as any).settlement_enabled !== undefined ? (data as any).settlement_enabled : prev.settlementEnabled,
+              profileVideoQuotaMb:
+                (data as any).r2_profile_video_quota_mb ?? prev.profileVideoQuotaMb ?? 30,
+              r2MaxVideoSizeMb:
+                (data as any).r2_max_video_size_mb ?? prev.r2MaxVideoSizeMb ?? 100,
               creatorTargetBronzeHours: (data as any).creator_target_bronze_hours ?? prev.creatorTargetBronzeHours,
               creatorTargetBronzeCoins: (data as any).creator_target_bronze_coins ?? prev.creatorTargetBronzeCoins,
               creatorTargetBronzeBonusUSD: (data as any).creator_target_bronze_bonus_usd ?? prev.creatorTargetBronzeBonusUSD,
@@ -4769,6 +4775,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'
           : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400'),
       gallery: userData.gallery || existing?.gallery || [],
+      galleryVideos: userData.galleryVideos || existing?.galleryVideos || [],
       introVideoUrl: userData.introVideoUrl || existing?.introVideoUrl || undefined,
       isVerified: userData.isVerified || existing?.isVerified || false,
       isOnboarded: userData.isOnboarded ?? existing?.isOnboarded ?? false,
@@ -4847,6 +4854,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (sanitizedUpdates.gallery) {
       sanitizedUpdates.gallery = sanitizedUpdates.gallery.filter(
         (url) => url && !url.startsWith('blob:') && !url.startsWith('data:')
+      );
+    }
+    if (sanitizedUpdates.galleryVideos) {
+      sanitizedUpdates.galleryVideos = sanitizedUpdates.galleryVideos.filter(
+        (v) => v?.url && !v.url.startsWith('blob:') && !v.url.startsWith('data:')
       );
     }
 

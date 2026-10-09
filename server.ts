@@ -200,6 +200,11 @@ async function startServer(): Promise<express.Express> {
       tags: Array.isArray(p.tags) ? p.tags : [],
       avatarUrl: p.avatarUrl || p.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
       gallery: Array.isArray(p.gallery) ? p.gallery : [],
+      galleryVideos: Array.isArray(p.galleryVideos)
+        ? p.galleryVideos
+        : Array.isArray(p.gallery_videos)
+          ? p.gallery_videos
+          : [],
       introVideoUrl: p.introVideoUrl || p.intro_video_url || undefined,
       verificationVideoUrl: p.verificationVideoUrl || p.verification_video_url || undefined,
       isVerified: Boolean(p.isVerified ?? p.is_verified),

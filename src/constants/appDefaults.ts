@@ -71,6 +71,8 @@ export const INITIAL_SYSTEM_SETTINGS: SystemSettings = {
   femaleEarningRatePerMin: 36, // LEGACY derived display only (not used by burn)
   coinToUSDRatio: 0.003, // LEGACY synced to coinUsdPeg
   enableRegularFemaleCoinEarning: false, // Coin earning disabled for regular female users by default; reserved for Team Leader created female hosts
+  profileVideoQuotaMb: 30, // Per-user total MB for all profile gallery videos
+  r2MaxVideoSizeMb: 100, // Max single video file MB
   aiNudityShieldEnabled: true,
   screenRecordingProtection: true,
   freeDailyLoginCoins: 20,

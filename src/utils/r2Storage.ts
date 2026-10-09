@@ -4,7 +4,14 @@ import { apiUrl } from './apiBase';
 export interface DirectUploadOptions {
   file: File;
   userId?: string;
-  category?: 'avatar' | 'gallery' | 'chat_media' | 'moment' | 'verification' | 'intro_video';
+  category?:
+    | 'avatar'
+    | 'gallery'
+    | 'gallery_video'
+    | 'chat_media'
+    | 'moment'
+    | 'verification'
+    | 'intro_video';
   onProgress?: (percent: number) => void;
 }
 
@@ -60,9 +67,10 @@ function isStorageNotConfiguredResponse(status: number, payload: any): boolean {
 // Normalize any media URL to ensure raw authenticated S3 endpoints are routed via proxy
 export function normalizeMediaUrl(url: string | undefined | null, storageKey?: string): string {
   if (!url) return '';
-  if (url.startsWith('blob:') || url.startsWith('data:')) return url;
-  if (url.includes('.r2.cloudflarestorage.com')) {
-    const parts = url.split('.r2.cloudflarestorage.com/');
+  const safeUrl = String(url);
+  if (safeUrl.startsWith('blob:') || safeUrl.startsWith('data:')) return safeUrl;
+  if (safeUrl.includes('.r2.cloudflarestorage.com')) {
+    const parts = safeUrl.split('.r2.cloudflarestorage.com/');
     if (parts[1]) {
       const rawPath = parts[1];
       const match = rawPath.match(/uploads\/.+$/);
@@ -70,7 +78,7 @@ export function normalizeMediaUrl(url: string | undefined | null, storageKey?: s
       return `/api/storage/media?key=${encodeURIComponent(key)}`;
     }
   }
-  return url;
+  return safeUrl;
 }
 
 // Fallback helper to upload via server API if direct PUT has CORS or signature issues
@@ -172,11 +180,27 @@ async function putFileWithProgress(
   });
 }
 
+function inferContentType(file: File, category: string): string {
+  if (file.type) return file.type;
+  const name = String(file.name || '').toLowerCase();
+  if (name.endsWith('.png')) return 'image/png';
+  if (name.endsWith('.webp')) return 'image/webp';
+  if (name.endsWith('.gif')) return 'image/gif';
+  if (name.endsWith('.webm')) return 'video/webm';
+  if (name.endsWith('.mov')) return 'video/quicktime';
+  if (name.endsWith('.m4v')) return 'video/x-m4v';
+  if (name.endsWith('.mp4') || category === 'gallery_video' || category === 'intro_video') {
+    return 'video/mp4';
+  }
+  return 'image/jpeg';
+}
+
 export async function uploadMediaDirectlyToR2(
   options: DirectUploadOptions
 ): Promise<DirectUploadResult> {
   const { file, userId, category = 'chat_media', onProgress } = options;
   const startTime = performance.now();
+  const contentType = inferContentType(file, category);
 
   try {
     // 1. Request presigned URL from server API (authenticated)
@@ -185,7 +209,7 @@ export async function uploadMediaDirectlyToR2(
       headers: await getAuthJsonHeaders(),
       body: JSON.stringify({
         filename: file.name,
-        contentType: file.type || 'image/jpeg',
+        contentType,
         fileSize: file.size,
         // Informational only — server always overrides with auth profile id
         userId,

@@ -52,7 +52,14 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
   onTabChange,
   navPlacement = 'inline',
 }) => {
-  const { showToast, syncAllProfilesToSupabase, purgeAllMockData, users, systemSettings } = useApp();
+  const {
+    showToast,
+    syncAllProfilesToSupabase,
+    purgeAllMockData,
+    users,
+    systemSettings,
+    updateSystemSettings,
+  } = useApp();
 
   const [activeTabInternal, setActiveTabInternal] = useState<InfraTab>('db_pool');
   const activeTab = activeTabProp ?? activeTabInternal;
@@ -172,6 +179,7 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
     dbQueryCachingEnabled: true,
     r2MaxImageSizeMb: 15,
     r2MaxVideoSizeMb: 100,
+    r2ProfileVideoQuotaMb: 30,
     r2AllowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm'],
     r2CdnCacheTtlSeconds: 86400,
     autoModerationSensitivity: 'medium',
@@ -193,6 +201,15 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
     fetchSmtpStatus();
     fetchStorageRuntimeStatus();
   }, []);
+
+  // Hydrate media quotas from live system settings (DB-backed)
+  useEffect(() => {
+    setConfig((prev) => ({
+      ...prev,
+      r2ProfileVideoQuotaMb: systemSettings.profileVideoQuotaMb ?? prev.r2ProfileVideoQuotaMb ?? 30,
+      r2MaxVideoSizeMb: systemSettings.r2MaxVideoSizeMb ?? prev.r2MaxVideoSizeMb ?? 100,
+    }));
+  }, [systemSettings.profileVideoQuotaMb, systemSettings.r2MaxVideoSizeMb]);
 
   const fetchStorageRuntimeStatus = async () => {
     try {
@@ -426,6 +443,7 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
           dbQueryCachingEnabled: config.dbQueryCachingEnabled,
           r2MaxImageSizeMb: config.r2MaxImageSizeMb,
           r2MaxVideoSizeMb: config.r2MaxVideoSizeMb,
+          r2ProfileVideoQuotaMb: config.r2ProfileVideoQuotaMb,
           r2AllowedMimeTypes: config.r2AllowedMimeTypes,
           r2CdnCacheTtlSeconds: config.r2CdnCacheTtlSeconds,
         }),
@@ -438,15 +456,15 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
         data = { message: text.substring(0, 200) };
       }
 
+      // Persist media quotas via system settings → system_configs (infra-config does not write quotas).
+      const quotaMb = Math.max(1, Number(config.r2ProfileVideoQuotaMb) || 30);
+      const maxVidMb = Math.max(1, Number(config.r2MaxVideoSizeMb) || 100);
+      updateSystemSettings({
+        profileVideoQuotaMb: quotaMb,
+        r2MaxVideoSizeMb: maxVidMb,
+      });
+
       if (res.ok && data.success !== false) {
-        showToast(
-          data.config?.vercel || data.config?.secretsWritable === false
-            ? 'Env status only (no secrets saved)'
-            : 'Infrastructure Status',
-          data.message ||
-            'Credentials are environment-backed. On Vercel, set VITE_SUPABASE_*, SUPABASE_SERVICE_ROLE_KEY, R2_*, and LIVEKIT_* in Project Settings → Environment Variables, then Redeploy. Nothing is written to .env.',
-          'info'
-        );
         await fetchConfig();
         await checkProfilesStatus();
         return;
@@ -1300,7 +1318,7 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
                 <span>Media Quotas, Max Sizes & MIME Policy</span>
               </h4>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <div>
                   <label className="block text-[11px] text-slate-400 font-mono uppercase mb-1 font-semibold">
                     MAX IMAGE SIZE (MB)
@@ -1317,16 +1335,35 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
 
                 <div>
                   <label className="block text-[11px] text-slate-400 font-mono uppercase mb-1 font-semibold">
-                    MAX VIDEO SIZE (MB)
+                    MAX SINGLE VIDEO (MB)
                   </label>
                   <input
                     type="number"
-                    min="10"
+                    min="1"
                     max="500"
                     value={config.r2MaxVideoSizeMb}
                     onChange={(e) => setConfig({ ...config, r2MaxVideoSizeMb: Number(e.target.value) })}
                     className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
                   />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] text-slate-400 font-mono uppercase mb-1 font-semibold">
+                    PROFILE VIDEO QUOTA / USER (MB)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="500"
+                    value={config.r2ProfileVideoQuotaMb}
+                    onChange={(e) =>
+                      setConfig({ ...config, r2ProfileVideoQuotaMb: Number(e.target.value) })
+                    }
+                    className="w-full bg-[#0F1115] border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                  <p className="mt-1 text-[10px] text-slate-500 font-mono">
+                    Total MB all profile videos may use per user (default 30).
+                  </p>
                 </div>
 
                 <div>

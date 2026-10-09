@@ -44,7 +44,9 @@ import {
   Trash2,
   X,
   FileText,
+  Film,
 } from 'lucide-react';
+import type { GalleryVideoItem } from '../../types';
 import {
   POPULAR_MOCK_LOCATIONS,
   detectExactBrowserLocation,
@@ -191,6 +193,16 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
   const [isAddGalleryModalOpen, setIsAddGalleryModalOpen] = useState(false);
+  const [isUploadingVideo, setIsUploadingVideo] = useState(false);
+  const [videoUploadProgress, setVideoUploadProgress] = useState(0);
+  const videoFileInputRef = useRef<HTMLInputElement>(null);
+
+  const profileVideoQuotaMb = Math.max(1, Number(systemSettings.profileVideoQuotaMb) || 30);
+  const maxSingleVideoMb = Math.max(1, Number(systemSettings.r2MaxVideoSizeMb) || 100);
+  const galleryVideos = currentUser.galleryVideos || [];
+  const usedVideoBytes = galleryVideos.reduce((sum, v) => sum + (Number(v.sizeBytes) || 0), 0);
+  const quotaBytes = profileVideoQuotaMb * 1024 * 1024;
+  const remainingVideoBytes = Math.max(0, quotaBytes - usedVideoBytes);
 
   // Direct file upload to Cloudflare R2
   const handleUploadAvatarFile = async (file: File) => {
@@ -262,6 +274,109 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     const updatedGallery = currentGallery.filter((_, i) => i !== indexToRemove);
     updateUserProfile(currentUser.id, { gallery: updatedGallery });
     showToast('Photo Removed', 'Gallery updated.', 'info');
+  };
+
+  const formatMb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 1 : 2);
+
+  const handleUploadGalleryVideos = async (files: FileList | File[]) => {
+    const list = Array.from(files || []);
+    if (!list.length) return;
+
+    const allowed = new Set([
+      'video/mp4',
+      'video/webm',
+      'video/quicktime',
+      'video/x-m4v',
+    ]);
+
+    setIsUploadingVideo(true);
+    setVideoUploadProgress(0);
+
+    try {
+      const nextVideos: GalleryVideoItem[] = [...(currentUser.galleryVideos || [])];
+      let used = nextVideos.reduce((s, v) => s + (Number(v.sizeBytes) || 0), 0);
+      let uploaded = 0;
+
+      for (const file of list) {
+        const mime = file.type || '';
+        if (!allowed.has(mime) && !/\.(mp4|webm|mov|m4v)$/i.test(file.name)) {
+          showToast('Unsupported Video', `${file.name} is not a supported video type.`, 'warning');
+          continue;
+        }
+
+        const singleCap = maxSingleVideoMb * 1024 * 1024;
+        if (file.size > singleCap) {
+          showToast(
+            'Video Too Large',
+            `${file.name} exceeds the ${maxSingleVideoMb} MB per-file limit.`,
+            'warning'
+          );
+          continue;
+        }
+
+        if (used + file.size > quotaBytes) {
+          showToast(
+            'Video Quota Full',
+            `Only ${formatMb(Math.max(0, quotaBytes - used))} MB left of your ${profileVideoQuotaMb} MB profile video quota.`,
+            'warning'
+          );
+          break;
+        }
+
+        // Some browsers leave file.type empty for videos — infer for R2 MIME validation.
+        let uploadFile = file;
+        if (!file.type) {
+          const lower = file.name.toLowerCase();
+          const inferred = lower.endsWith('.webm')
+            ? 'video/webm'
+            : lower.endsWith('.mov')
+              ? 'video/quicktime'
+              : lower.endsWith('.m4v')
+                ? 'video/x-m4v'
+                : 'video/mp4';
+          uploadFile = new File([file], file.name, { type: inferred, lastModified: file.lastModified });
+        }
+
+        const res = await uploadMediaDirectlyToR2({
+          file: uploadFile,
+          userId: currentUser.id,
+          category: 'gallery_video',
+          onProgress: (pct) => setVideoUploadProgress(pct),
+        });
+
+        nextVideos.push({
+          url: res.publicUrl,
+          storageKey: res.storageKey,
+          sizeBytes: res.fileSize || file.size,
+          contentType: res.contentType || file.type || 'video/mp4',
+          createdAt: new Date().toISOString(),
+        });
+        used += res.fileSize || file.size;
+        uploaded += 1;
+      }
+
+      if (uploaded > 0) {
+        await updateUserProfile(currentUser.id, { galleryVideos: nextVideos });
+        showToast(
+          'Videos Added',
+          `${uploaded} video(s) uploaded. ${formatMb(used)} / ${profileVideoQuotaMb} MB used.`,
+          'success'
+        );
+      }
+    } catch (err: any) {
+      console.error('Gallery video upload failed:', err);
+      showToast('Upload Failed', err?.message || 'Could not upload video to R2.', 'error');
+    } finally {
+      setIsUploadingVideo(false);
+      setVideoUploadProgress(0);
+      if (videoFileInputRef.current) videoFileInputRef.current.value = '';
+    }
+  };
+
+  const handleRemoveGalleryVideo = (indexToRemove: number) => {
+    const next = (currentUser.galleryVideos || []).filter((_, i) => i !== indexToRemove);
+    updateUserProfile(currentUser.id, { galleryVideos: next });
+    showToast('Video Removed', 'Profile video gallery updated.', 'info');
   };
 
   const handleAvatarFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1596,54 +1711,156 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
       {/* 6. TAB CONTENT 5: MEDIA & GALLERY */}
       {profileSection === 'media' && (
-        <div className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
-          <div className="border-b border-hairline pb-3">
-            <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
-              <ImageIcon className="w-4 h-4 text-pink-400" />
-              <span>Photo Gallery</span>
-            </h2>
-            <p className="text-xs text-app-muted mt-0.5">
-              Photos sync to your public profile via Cloudflare R2.
-            </p>
+        <div className="space-y-4">
+          <input
+            ref={videoFileInputRef}
+            type="file"
+            accept="video/mp4,video/webm,video/quicktime,video/x-m4v,.mp4,.webm,.mov,.m4v"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files?.length) handleUploadGalleryVideos(e.target.files);
+            }}
+          />
+
+          {/* Photos */}
+          <div className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
+            <div className="border-b border-hairline pb-3">
+              <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
+                <ImageIcon className="w-4 h-4 text-pink-400" />
+                <span>Photo Gallery</span>
+              </h2>
+              <p className="text-xs text-app-muted mt-0.5">
+                Photos sync to your public profile via Cloudflare R2.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              <button
+                type="button"
+                onClick={() => setIsAddGalleryModalOpen(true)}
+                className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-pink-500/10 group-hover:bg-pink-500/20 text-pink-400 flex items-center justify-center mb-1.5 transition-colors">
+                  <Plus className="w-5 h-5" />
+                </div>
+                <span className="font-bold text-app-heading text-xs">Add photo</span>
+              </button>
+
+              {(currentUser.gallery && currentUser.gallery.length > 0
+                ? currentUser.gallery
+                : [currentUser.avatarUrl]
+              ).map((img, idx) => (
+                <div
+                  key={`photo-${idx}`}
+                  className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
+                >
+                  <img
+                    src={normalizeMediaUrl(img)}
+                    alt="gallery"
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5">
+                    <span className="text-[10px] text-app-heading font-mono font-bold">
+                      Photo #{idx + 1}
+                    </span>
+                    {currentUser.gallery && currentUser.gallery.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveGalleryPhoto(idx)}
+                        className="p-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer"
+                        title="Remove from gallery"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-            <button
-              type="button"
-              onClick={() => setIsAddGalleryModalOpen(true)}
-              className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
-            >
-              <div className="w-10 h-10 rounded-xl bg-pink-500/10 group-hover:bg-pink-500/20 text-pink-400 flex items-center justify-center mb-1.5 transition-colors">
-                <Plus className="w-5 h-5" />
+          {/* Videos */}
+          <div className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
+            <div className="border-b border-hairline pb-3 space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
+                    <Film className="w-4 h-4 text-cyan-400" />
+                    <span>Video Gallery</span>
+                  </h2>
+                  <p className="text-xs text-app-muted mt-0.5">
+                    Multiple videos allowed. Shared quota: {profileVideoQuotaMb} MB total per account.
+                  </p>
+                </div>
+                <span className="shrink-0 text-[10px] font-mono font-bold text-cyan-300 bg-cyan-500/10 border border-cyan-500/30 px-2 py-1 rounded-lg">
+                  {formatMb(usedVideoBytes)} / {profileVideoQuotaMb} MB
+                </span>
               </div>
-              <span className="font-bold text-app-heading text-xs">Add photo</span>
-            </button>
+              <div className="h-1.5 rounded-full bg-app-input overflow-hidden border border-hairline">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    usedVideoBytes / quotaBytes > 0.9 ? 'bg-rose-500' : 'bg-cyan-500'
+                  }`}
+                  style={{
+                    width: `${Math.min(100, (usedVideoBytes / Math.max(quotaBytes, 1)) * 100)}%`,
+                  }}
+                />
+              </div>
+            </div>
 
-            {/* 2. Gallery Images */}
-            {(currentUser.gallery && currentUser.gallery.length > 0
-              ? currentUser.gallery
-              : [currentUser.avatarUrl]
-            ).map((img, idx) => (
-              <div
-                key={idx}
-                className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                disabled={isUploadingVideo || remainingVideoBytes <= 0}
+                onClick={() => videoFileInputRef.current?.click()}
+                className="min-h-[140px] rounded-2xl border-2 border-dashed border-hairline hover:border-cyan-500/60 bg-app-input flex flex-col items-center justify-center text-center p-4 transition-all cursor-pointer group disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <img src={img} alt="gallery" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5">
-                  <span className="text-[10px] text-app-heading font-mono font-bold">Photo #{idx + 1}</span>
-                  {currentUser.gallery && currentUser.gallery.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveGalleryPhoto(idx)}
-                      className="p-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer"
-                      title="Remove from gallery"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+                <div className="w-10 h-10 rounded-xl bg-cyan-500/10 group-hover:bg-cyan-500/20 text-cyan-400 flex items-center justify-center mb-1.5 transition-colors">
+                  {isUploadingVideo ? (
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <Plus className="w-5 h-5" />
                   )}
                 </div>
-              </div>
-            ))}
+                <span className="font-bold text-app-heading text-xs">
+                  {isUploadingVideo ? `Uploading… ${videoUploadProgress}%` : 'Add video'}
+                </span>
+                <span className="text-[10px] text-app-muted font-mono mt-1">
+                  {remainingVideoBytes > 0
+                    ? `${formatMb(remainingVideoBytes)} MB left · max ${maxSingleVideoMb} MB each`
+                    : 'Quota full — remove a video to free space'}
+                </span>
+              </button>
+
+              {galleryVideos.map((vid, idx) => (
+                <div
+                  key={`vid-${vid.storageKey || vid.url}-${idx}`}
+                  className="relative rounded-2xl overflow-hidden border border-hairline bg-app-input shadow-md"
+                >
+                  <video
+                    src={normalizeMediaUrl(vid.url, vid.storageKey)}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    className="w-full aspect-video object-cover bg-black"
+                  />
+                  <div className="flex items-center justify-between gap-2 px-2.5 py-2 border-t border-hairline">
+                    <span className="text-[10px] font-mono text-app-muted truncate">
+                      Video #{idx + 1} · {formatMb(vid.sizeBytes || 0)} MB
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveGalleryVideo(idx)}
+                      className="p-1.5 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer shrink-0"
+                      title="Remove video"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
