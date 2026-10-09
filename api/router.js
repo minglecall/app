@@ -29,7 +29,7 @@ const AVAILABLE = [
   'POST /api/supabase/* (update-status|profile|upsert|user-statuses|bulk)',
   'ALL /api/v1/matches|favorites|friends|blocks|feed|reviews|reports|admin/reports',
   'GET|POST|PATCH /api/v1/finance/* (periods, ledger, batches, funding, jobs, host/TL)',
-  'GET /api/storage/config|media; POST /api/storage/presigned-url|upload',
+  'GET /api/storage/config|media; POST /api/storage/presigned-url|upload|delete',
   'GET|POST|PATCH|DELETE /api/admin/* (schema bundled; granular-reset if ALLOW_FACTORY_RESET; CMS; spectator-token)',
   'GET|POST /api/creator/* (incl. first-call-bonus), /api/rewards/* (claims live)',
   'GET /api/setup/status; POST setup auth + connectivity tests; save-all blocked on Vercel',

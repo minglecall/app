@@ -175,6 +175,101 @@ async function putObjectToR2({ r2, key, buffer, contentType }) {
   }
 }
 
+/** Server-side SigV4 DELETE of an R2 object. */
+async function deleteObjectFromR2({ r2, key }) {
+  const host = `${r2.accountId}.r2.cloudflarestorage.com`;
+  const region = 'auto';
+  const service = 's3';
+  const method = 'DELETE';
+  const keyPath = key
+    .split('/')
+    .map((p) => encodeURIComponent(p))
+    .join('/');
+  const canonicalUri = `/${r2.bucketName}/${keyPath}`;
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const payloadHash = sha256Hex('');
+  const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+  const canonicalRequest = [
+    method,
+    canonicalUri,
+    '',
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join('\n');
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    credentialScope,
+    sha256Hex(canonicalRequest),
+  ].join('\n');
+  const kDate = hmac('AWS4' + r2.secretAccessKey, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, service);
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  const authorization =
+    `AWS4-HMAC-SHA256 Credential=${r2.accessKeyId}/${credentialScope}, ` +
+    `SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  const url = `https://${host}${canonicalUri}`;
+  const response = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      'x-amz-content-sha256': payloadHash,
+      'x-amz-date': amzDate,
+      Authorization: authorization,
+    },
+  });
+
+  // 404 = already gone — treat as success for gallery remove
+  if (response.status === 404) return { deleted: true, alreadyGone: true };
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => '')).slice(0, 400);
+    const err = new Error(`R2 DELETE failed (${response.status}): ${detail || response.statusText}`);
+    err.status = response.status;
+    throw err;
+  }
+  return { deleted: true, alreadyGone: false };
+}
+
+function tryExtractKeyFromUrl(rawUrl) {
+  const url = String(rawUrl || '').trim();
+  if (!url || url.startsWith('data:') || url.includes('unsplash.com')) return null;
+  try {
+    const parsed = new URL(url, 'http://localhost');
+    const keyParam = parsed.searchParams.get('key');
+    if (keyParam) {
+      const decoded = decodeURIComponent(keyParam).replace(/^\/+/, '');
+      if (decoded.startsWith('uploads/') && MEDIA_KEY_RE.test(decoded)) return decoded;
+    }
+  } catch {
+    /* fall through */
+  }
+  const uploadsIdx = url.indexOf('/uploads/');
+  if (uploadsIdx >= 0) {
+    const key = url.slice(uploadsIdx + 1).split('?')[0].split('#')[0];
+    if (key.startsWith('uploads/') && MEDIA_KEY_RE.test(key)) return key;
+  }
+  if (url.startsWith('uploads/') && MEDIA_KEY_RE.test(url.split('?')[0])) {
+    return url.split('?')[0];
+  }
+  return null;
+}
+
+/** Categories a user may delete from their own gallery / profile media. */
+const USER_DELETABLE_CATEGORIES = new Set([
+  'gallery',
+  'gallery_video',
+  'avatar',
+  'moment',
+  'intro_video',
+  'chat_media',
+]);
+
 function decodeBase64Payload(base64Data) {
   const raw = String(base64Data || '');
   const matches = raw.match(/^data:([A-Za-z0-9.+\/-]+);base64,(.+)$/);
@@ -674,6 +769,109 @@ async function handleStorage(path, req, res) {
       fileSize: buffer.length,
       contentType,
       isMock: false,
+    });
+  }
+
+  // Authenticated delete of owned R2 objects (gallery photo/video remove)
+  if (path === 'storage/delete' && req.method === 'POST') {
+    const auth = await requireAuth(req);
+    if (auth.ok === false) {
+      return send(res, auth.status, {
+        success: false,
+        error: (auth.error && auth.error.message) || 'Unauthorized',
+      });
+    }
+
+    const body = await readJsonBody(req);
+    const rawKeys = [];
+    if (Array.isArray(body && body.keys)) rawKeys.push(...body.keys);
+    if (body && body.key) rawKeys.push(body.key);
+    if (body && body.url) {
+      const fromUrl = tryExtractKeyFromUrl(body.url);
+      if (fromUrl) rawKeys.push(fromUrl);
+    }
+    if (Array.isArray(body && body.urls)) {
+      for (const u of body.urls) {
+        const fromUrl = tryExtractKeyFromUrl(u);
+        if (fromUrl) rawKeys.push(fromUrl);
+      }
+    }
+
+    const uniqueKeys = [...new Set(rawKeys.map((k) => String(k || '').trim()).filter(Boolean))];
+    if (!uniqueKeys.length) {
+      return send(res, 400, {
+        success: false,
+        error: 'key, keys, url, or urls required',
+        code: 'MISSING_KEY',
+      });
+    }
+
+    const admin = isAdminRole(auth.role, auth.email);
+    const resolved = [];
+    for (const raw of uniqueKeys) {
+      let key;
+      try {
+        key = sanitizeMediaObjectKey(raw);
+      } catch (err) {
+        return send(res, err.status || 400, {
+          success: false,
+          error: err.message || 'Invalid media key',
+          code: err.code || 'INVALID_KEY',
+        });
+      }
+      const { category, ownerUserId } = parseMediaKeyParts(key);
+      if (!USER_DELETABLE_CATEGORIES.has(category) && !admin) {
+        return send(res, 403, {
+          success: false,
+          error: `Category "${category}" cannot be deleted by users`,
+          code: 'CATEGORY_NOT_DELETABLE',
+        });
+      }
+      if (!admin && String(ownerUserId) !== String(auth.profileId)) {
+        return send(res, 403, {
+          success: false,
+          error: 'Not authorized to delete this media object',
+          code: 'KEY_OWNER_MISMATCH',
+        });
+      }
+      resolved.push(key);
+    }
+
+    const r2 = r2Env();
+    if (!r2.accountId || !r2.accessKeyId || !r2.secretAccessKey) {
+      return send(res, 503, {
+        success: false,
+        configured: false,
+        error: 'R2 is not configured',
+        code: 'STORAGE_NOT_CONFIGURED',
+      });
+    }
+
+    const deleted = [];
+    const errors = [];
+    for (const key of resolved) {
+      try {
+        await deleteObjectFromR2({ r2, key });
+        deleted.push(key);
+      } catch (err) {
+        console.error('[api/storage/delete] R2 DELETE failed:', key, err && err.message);
+        errors.push({ key, message: (err && err.message) || 'Delete failed' });
+      }
+    }
+
+    if (!deleted.length && errors.length) {
+      return send(res, 502, {
+        success: false,
+        error: errors[0].message,
+        errors,
+      });
+    }
+
+    return send(res, 200, {
+      success: true,
+      deletedKeys: deleted,
+      deletedCount: deleted.length,
+      errors: errors.length ? errors : undefined,
     });
   }
 

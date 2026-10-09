@@ -17,12 +17,24 @@ import {
   normalizeContentType,
   getCategoryAllowedMimes,
   getCategoryMaxBytes,
+  deleteObjectsByKeys,
+  tryExtractR2ObjectKeyFromUrl,
   StorageValidationError,
   StorageNotConfiguredError,
   PUBLIC_MEDIA_CATEGORIES,
   PRIVATE_MEDIA_CATEGORIES,
   isAllowedUploadCategory,
 } from '../r2Storage';
+
+/** Categories a non-admin user may delete from their own profile media. */
+const USER_DELETABLE_CATEGORIES = new Set([
+  'gallery',
+  'gallery_video',
+  'avatar',
+  'moment',
+  'intro_video',
+  'chat_media',
+]);
 import {
   requireAuth,
   requireAdmin,
@@ -270,6 +282,84 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
         fileSize: buffer.length,
         contentType: validated.contentType,
         isMock: !isR2Configured(),
+      });
+    } catch (err: any) {
+      return sendStorageError(res, err);
+    }
+  });
+
+  // Authenticated delete of owned R2 objects (gallery photo/video remove)
+  router.post('/delete', requireAuth, async (req, res) => {
+    try {
+      const ownerUserId = resolveUploadOwnerUserId(req);
+      if (!ownerUserId) {
+        return res.status(401).json({ success: false, error: 'Authenticated user is required' });
+      }
+      const admin = isAdminRequest(req);
+      const body = req.body || {};
+      const rawKeys: string[] = [];
+      if (Array.isArray(body.keys)) rawKeys.push(...body.keys.map(String));
+      if (body.key) rawKeys.push(String(body.key));
+      if (body.url) {
+        const fromUrl = tryExtractR2ObjectKeyFromUrl(body.url);
+        if (fromUrl) rawKeys.push(fromUrl);
+      }
+      if (Array.isArray(body.urls)) {
+        for (const u of body.urls) {
+          const fromUrl = tryExtractR2ObjectKeyFromUrl(u);
+          if (fromUrl) rawKeys.push(fromUrl);
+        }
+      }
+
+      const uniqueKeys = [...new Set(rawKeys.map((k) => String(k || '').trim()).filter(Boolean))];
+      if (!uniqueKeys.length) {
+        return res.status(400).json({
+          success: false,
+          error: 'key, keys, url, or urls required',
+          code: 'MISSING_KEY',
+        });
+      }
+
+      const resolved: string[] = [];
+      for (const raw of uniqueKeys) {
+        const key = sanitizeMediaObjectKey(raw);
+        const { category, ownerUserId: keyOwner } = parseMediaKeyParts(key);
+        if (!USER_DELETABLE_CATEGORIES.has(category) && !admin) {
+          throw new StorageValidationError(
+            `Category "${category}" cannot be deleted by users`,
+            403,
+            'CATEGORY_NOT_DELETABLE'
+          );
+        }
+        if (!admin && String(keyOwner) !== String(ownerUserId)) {
+          throw new StorageValidationError(
+            'Not authorized to delete this media object',
+            403,
+            'KEY_OWNER_MISMATCH'
+          );
+        }
+        resolved.push(key);
+      }
+
+      if (!isR2Configured() && !isMockStorageAllowed()) {
+        throw new StorageNotConfiguredError();
+      }
+
+      if (!isR2Configured() && isMockStorageAllowed()) {
+        // Local mock: nothing durable to delete; report success for UI flow.
+        return res.json({
+          success: true,
+          deletedKeys: resolved,
+          deletedCount: resolved.length,
+          isMock: true,
+        });
+      }
+
+      const result = await deleteObjectsByKeys(resolved);
+      return res.json({
+        success: true,
+        deletedKeys: result.deletedKeys,
+        deletedCount: result.deletedCount,
       });
     } catch (err: any) {
       return sendStorageError(res, err);

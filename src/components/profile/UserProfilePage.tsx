@@ -59,6 +59,7 @@ import {
   isPersistableMediaUrl,
   snapshotFilesForUpload,
   extractStorageKeyFromMediaUrl,
+  deleteMediaFromR2,
 } from '../../utils/r2Storage';
 import { getUserRoleLabel, getFemaleRoleMark } from '../../types';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
@@ -463,12 +464,27 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
   const handleRemoveGalleryPhoto = async (indexToRemove: number) => {
     const currentGallery = latestSelfGallery();
+    const removedUrl = currentGallery[indexToRemove];
+    if (!removedUrl) return;
     const updatedGallery = currentGallery.filter((_, i) => i !== indexToRemove);
+
+    // Best-effort R2 delete (skip silently for external/preset URLs)
+    const r2Result = await deleteMediaFromR2({ url: removedUrl });
+    if (!r2Result.success && !r2Result.skipped) {
+      console.warn('[Gallery] R2 photo delete failed:', r2Result.error);
+    }
+
     const saved = await updateUserProfile(currentUser.id, { gallery: updatedGallery }, {
       silentSuccess: true,
     });
     if (saved) {
-      showToast('Photo Removed', 'Gallery updated.', 'info');
+      showToast(
+        'Photo Removed',
+        r2Result.success && !r2Result.skipped
+          ? 'Removed from gallery and R2 storage.'
+          : 'Gallery updated.',
+        'info'
+      );
     } else {
       showToast('Remove Failed', 'Could not save gallery changes. Please try again.', 'error');
     }
@@ -616,6 +632,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const handleRemoveGalleryVideo = async (indexToRemove: number) => {
     const current = localGalleryVideos ?? currentUser.galleryVideos ?? [];
     const removed = current[indexToRemove];
+    if (!removed) return;
     const next = current.filter((_, i) => i !== indexToRemove);
     setLocalGalleryVideos(next);
     if (removed?.storageKey && videoBlobPreviews[removed.storageKey]) {
@@ -627,16 +644,33 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       setVideoBlobPreviews((prev) => {
         const copy = { ...prev };
         delete copy[removed.storageKey!];
+        if (removed.url) delete copy[removed.url];
         return copy;
       });
     }
+
+    // Best-effort R2 delete using storageKey and/or URL
+    const r2Result = await deleteMediaFromR2({
+      key: removed.storageKey,
+      url: removed.url,
+    });
+    if (!r2Result.success && !r2Result.skipped) {
+      console.warn('[Gallery] R2 video delete failed:', r2Result.error);
+    }
+
     const saved = await updateUserProfile(
       currentUser.id,
       { galleryVideos: next },
       { silentSuccess: true }
     );
     if (saved) {
-      showToast('Video Removed', 'Profile video gallery updated.', 'info');
+      showToast(
+        'Video Removed',
+        r2Result.success && !r2Result.skipped
+          ? 'Removed from gallery and R2 storage.'
+          : 'Profile video gallery updated.',
+        'info'
+      );
     } else {
       setLocalGalleryVideos(null);
       showToast('Remove Failed', 'Could not save gallery video changes. Please try again.', 'error');

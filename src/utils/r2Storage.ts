@@ -116,11 +116,13 @@ export async function snapshotFilesForUpload(files: FileList | File[] | null | u
   );
 }
 
-/** Pull storage key from a same-origin media proxy URL when gallery only stored the URL. */
+/** Pull storage key from a media proxy / CDN / uploads path URL. */
 export function extractStorageKeyFromMediaUrl(url?: string | null): string | undefined {
   if (!url) return undefined;
   const raw = String(url).trim();
-  if (!raw) return undefined;
+  if (!raw || raw.startsWith('blob:') || raw.startsWith('data:') || raw.includes('unsplash.com')) {
+    return undefined;
+  }
   try {
     const base =
       typeof window !== 'undefined' && window.location?.origin
@@ -129,7 +131,7 @@ export function extractStorageKeyFromMediaUrl(url?: string | null): string | und
     const u = new URL(raw, base);
     if (u.pathname.includes('/api/storage/media')) {
       const key = u.searchParams.get('key');
-      return key ? String(key).trim() : undefined;
+      if (key) return String(key).trim();
     }
   } catch {
     /* ignore */
@@ -142,7 +144,72 @@ export function extractStorageKeyFromMediaUrl(url?: string | null): string | und
       return m[1].trim();
     }
   }
+  const uploadsIdx = raw.indexOf('/uploads/');
+  if (uploadsIdx >= 0) {
+    const key = raw.slice(uploadsIdx + 1).split('?')[0].split('#')[0];
+    if (key.startsWith('uploads/')) return key;
+  }
+  if (raw.startsWith('uploads/')) return raw.split('?')[0];
   return undefined;
+}
+
+/**
+ * Delete owned R2 objects after gallery photo/video remove.
+ * Accepts storage keys and/or media URLs. Best-effort: returns false on failure.
+ */
+export async function deleteMediaFromR2(options: {
+  key?: string;
+  keys?: string[];
+  url?: string;
+  urls?: string[];
+}): Promise<{ success: boolean; deletedCount: number; skipped?: boolean; error?: string }> {
+  const keys = [
+    ...(options.keys || []),
+    ...(options.key ? [options.key] : []),
+  ]
+    .map((k) => String(k || '').trim())
+    .filter(Boolean);
+  const urls = [
+    ...(options.urls || []),
+    ...(options.url ? [options.url] : []),
+  ]
+    .map((u) => String(u || '').trim())
+    .filter(Boolean);
+
+  for (const u of urls) {
+    const extracted = extractStorageKeyFromMediaUrl(u);
+    if (extracted) keys.push(extracted);
+  }
+
+  const unique = [...new Set(keys)];
+  if (!unique.length) {
+    // External / preset URLs have nothing to delete in R2
+    return { success: true, deletedCount: 0, skipped: true };
+  }
+
+  try {
+    const res = await fetch(apiUrl('/api/storage/delete'), {
+      method: 'POST',
+      headers: await getAuthJsonHeaders(),
+      body: JSON.stringify({ keys: unique }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.success === false) {
+      const msg =
+        (typeof data?.error === 'string' && data.error) ||
+        data?.error?.message ||
+        `Delete failed (${res.status})`;
+      console.warn('[R2 Storage] deleteMediaFromR2 rejected:', msg);
+      return { success: false, deletedCount: 0, error: msg };
+    }
+    return {
+      success: true,
+      deletedCount: Number(data?.deletedCount) || unique.length,
+    };
+  } catch (err: any) {
+    console.warn('[R2 Storage] deleteMediaFromR2 failed:', err?.message || err);
+    return { success: false, deletedCount: 0, error: err?.message || 'Delete failed' };
+  }
 }
 
 // Normalize any media URL to ensure raw authenticated S3 endpoints are routed via proxy
