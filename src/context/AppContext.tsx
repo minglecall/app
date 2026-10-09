@@ -54,6 +54,7 @@ import {
   fetchProfilesFromSupabase,
   upsertProfileToSupabase,
   updateUserProfileInSupabase,
+  persistUserProfileUpdate,
   bulkUpsertProfilesToSupabase,
   updateUserStatusInSupabase,
   fetchUserStatusesFromSupabase,
@@ -203,7 +204,7 @@ interface AppContextType {
   loginUser: (identifier: string) => boolean;
   logoutUser: (opts?: { reason?: 'manual' | 'other_device' }) => void;
   registerUser: (userData: Partial<UserProfile>) => UserProfile;
-  updateUserProfile: (userId: string, updates: Partial<UserProfile>) => void;
+  updateUserProfile: (userId: string, updates: Partial<UserProfile>) => Promise<boolean>;
   changeUserPassword: (userId: string, currentPassword: string, newPassword: string) => { success: boolean; message: string };
 
   // Economy & Store
@@ -818,6 +819,87 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const prevUserIdRef = useRef<string | null>(null);
   const isLoggedInRef = useRef<boolean>(isLoggedIn);
   const currentUserIdRef = useRef<string>(currentUserId);
+  /**
+   * Editable profile fields saved locally but not yet confirmed by a matching
+   * server row. Heartbeat realtime echoes must not paint the previous values
+   * back over this patch.
+   */
+  const pendingSelfProfileRef = useRef<{ userId: string; fields: Partial<UserProfile> } | null>(null);
+  const profileSaveGenRef = useRef(0);
+  const profileSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const SELF_PROFILE_FIELD_KEYS: (keyof UserProfile)[] = [
+    'name',
+    'nationality',
+    'countryCode',
+    'spokenLanguages',
+    'avatarUrl',
+    'bio',
+    'extendedBio',
+    'zodiac',
+    'locationCity',
+    'interests',
+    'interestedIn',
+    'tags',
+    'gallery',
+    'exactLocation',
+    'isUsingMockLocation',
+    'mockLocationCity',
+    'mockLocationCountry',
+    'mockLocationCountryCode',
+    'hourlyCoinRate',
+  ];
+  const pickSelfProfileFields = (fields: Partial<UserProfile>): Partial<UserProfile> => {
+    const content: Partial<UserProfile> = {};
+    for (const key of SELF_PROFILE_FIELD_KEYS) {
+      if (fields[key] !== undefined) {
+        (content as any)[key] = fields[key];
+      }
+    }
+    return content;
+  };
+  const sameProfileValue = (a: unknown, b: unknown) => {
+    if (Array.isArray(a) || Array.isArray(b) || (a !== null && typeof a === 'object') || (b !== null && typeof b === 'object')) {
+      return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    }
+    return a === b;
+  };
+  const isSelfProfileRow = (user: { id?: string; authId?: string | null }) => {
+    const selfId = currentUserIdRef.current;
+    const pendingId = pendingSelfProfileRef.current?.userId;
+    if (!user?.id && !user?.authId) return false;
+    return Boolean(
+      (selfId && (user.id === selfId || user.authId === selfId)) ||
+      (pendingId && (user.id === pendingId || user.authId === pendingId))
+    );
+  };
+  const rememberPendingSelfProfile = (userId: string, fields: Partial<UserProfile>) => {
+    const content = pickSelfProfileFields(fields);
+    if (Object.keys(content).length === 0) return;
+    const prev = pendingSelfProfileRef.current;
+    const sameUser = Boolean(prev && (prev.userId === userId || prev.userId === currentUserIdRef.current));
+    pendingSelfProfileRef.current = {
+      userId: currentUserIdRef.current || userId,
+      fields: sameUser ? { ...prev!.fields, ...content } : content,
+    };
+  };
+  const overlayPendingSelfProfile = <T extends UserProfile>(user: T): T => {
+    const pending = pendingSelfProfileRef.current;
+    if (!pending || !isSelfProfileRow(user)) return user;
+    return { ...user, ...pending.fields, onlineStatus: user.onlineStatus };
+  };
+  const settlePendingFromIncoming = (incoming: Partial<UserProfile>, isSelf: boolean) => {
+    const pending = pendingSelfProfileRef.current;
+    if (!isSelf || !pending) return;
+    const next: Partial<UserProfile> = {};
+    for (const key of Object.keys(pending.fields) as (keyof UserProfile)[]) {
+      const want = pending.fields[key];
+      const got = incoming[key];
+      if (got !== undefined && sameProfileValue(want, got)) continue;
+      (next as any)[key] = want;
+    }
+    pendingSelfProfileRef.current =
+      Object.keys(next).length === 0 ? null : { userId: pending.userId, fields: next };
+  };
   /** Cached access token for sync unload beacons (sendBeacon cannot set Authorization headers). */
   const accessTokenRef = useRef<string | null>(null);
   const adminActiveCallsRef = useRef<AdminActiveCall[]>(adminActiveCalls);
@@ -2037,8 +2119,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             mergedMap.delete(deletedId);
           }
 
-          const finalProfiles =
-            mergedMap.size > 0 ? Array.from(mergedMap.values()) : remoteProfiles;
+          const finalProfiles = (
+            mergedMap.size > 0 ? Array.from(mergedMap.values()) : remoteProfiles
+          ).map((p) => overlayPendingSelfProfile(p));
 
           // Never wipe a non-empty in-memory directory with an empty remote result
           if (finalProfiles.length === 0 && localUsers.length > 0) {
@@ -2672,7 +2755,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   (liveProfile.authId && (u.authId === liveProfile.authId || u.id === liveProfile.authId)) ||
                   (liveEmail && u.email && u.email.toLowerCase().trim() === liveEmail);
                 if (!isMatch) return u;
-                return {
+                const isSelf = isSelfProfileRow(u);
+                const merged = {
                   ...u,
                   ...liveProfile,
                   id: u.id === currentUserIdRef.current ? u.id : liveProfile.id || u.id,
@@ -2683,6 +2767,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   // Presence heartbeat owns onlineStatus — never re-stick Busy from raw DB
                   onlineStatus: u.onlineStatus || 'offline',
                 };
+                if (!isSelf) return merged;
+                settlePendingFromIncoming(liveProfile, true);
+                return overlayPendingSelfProfile(merged);
               });
             }
             return [
@@ -3570,7 +3657,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 if (!resolvedId) {
                   return prev;
                 }
-                const mergedUser: UserProfile = {
+                let mergedUser: UserProfile = {
                   ...(prior || {}),
                   ...incoming,
                   id: resolvedId,
@@ -3585,6 +3672,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   // Presence map owns status — ignore sticky busy on user broadcast payloads
                   onlineStatus: prior?.onlineStatus || 'offline',
                 };
+                if (refersToLoggedInUser) {
+                  settlePendingFromIncoming(incoming, true);
+                  mergedUser = overlayPendingSelfProfile(mergedUser);
+                }
                 return [...remaining, mergedUser];
               });
             }
@@ -4657,9 +4748,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return newUser;
   };
 
-  const updateUserProfile = (userId: string, updates: Partial<UserProfile>) => {
+  const updateUserProfile = async (userId: string, updates: Partial<UserProfile>): Promise<boolean> => {
     let genderLockAttempted = false;
-    let updatedProfile: UserProfile | null = null;
 
     const sanitizedUpdates: Partial<UserProfile> = { ...updates };
     if (
@@ -4674,8 +4764,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
     }
 
+    const targetBefore = usersRef.current.find(
+      (u) => u.id === userId || u.authId === userId
+    );
+    if (targetBefore?.genderLocked && sanitizedUpdates.gender && sanitizedUpdates.gender !== targetBefore.gender) {
+      genderLockAttempted = true;
+      delete sanitizedUpdates.gender;
+    }
+
     if (Object.keys(sanitizedUpdates).length === 0) {
-      return;
+      if (genderLockAttempted) {
+        showToast('Gender Lock Active', 'Gender cannot be modified after registration.', 'warning');
+      }
+      return false;
+    }
+
+    const editingSelf = Boolean(
+      userId === currentUserIdRef.current ||
+      targetBefore?.id === currentUserIdRef.current ||
+      (targetBefore?.authId && targetBefore.authId === currentUserIdRef.current)
+    );
+    if (editingSelf) {
+      rememberPendingSelfProfile(userId, sanitizedUpdates);
     }
 
     setUsers((prev) => {
@@ -4684,63 +4794,42 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       const next = prev.map((u) => {
         const isMatch = u.id === userId || (targetEmail && u.email && u.email.toLowerCase().trim() === targetEmail);
-        if (isMatch) {
-          // Guard permanent gender lock
-          if (u.genderLocked && sanitizedUpdates.gender && sanitizedUpdates.gender !== u.gender) {
-            genderLockAttempted = true;
-            delete sanitizedUpdates.gender;
-          }
-          const merged = { ...u, ...sanitizedUpdates };
-          if (u.id === userId || !updatedProfile) {
-            updatedProfile = merged;
-          }
-          return merged;
-        }
-        return u;
+        if (!isMatch) return u;
+        return { ...u, ...sanitizedUpdates };
       });
       usersRef.current = next;
       return next;
     });
 
-    if (updatedProfile) {
-      // 1. Instant WebSocket broadcast to sync serverUsers in-memory immediately
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'user:update',
-            userId,
-            userProfile: updatedProfile,
-          })
-        );
-      }
-
-      // 2. Direct Supabase column update by user ID and by email
-      if (isSupabaseConfigured()) {
-        const enrichedUpdates: Partial<UserProfile> = {
-          ...sanitizedUpdates,
-          email: sanitizedUpdates.email || (updatedProfile as UserProfile).email,
-          authId: (updatedProfile as UserProfile).authId,
-        };
-        updateUserProfileInSupabase(userId, enrichedUpdates).catch((e) =>
-          console.warn('Direct Supabase update user notice:', e)
-        );
-        upsertProfileToSupabase(updatedProfile).catch((e) =>
-          console.warn('Update user profile Supabase sync notice:', e)
-        );
-      }
-
-      // 3. Sync to node server & broadcast
-      authFetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedProfile),
-      }).catch((e) => console.warn('Update user profile server sync notice:', e));
-    }
-
     if (genderLockAttempted) {
       showToast('Gender Lock Active', 'Gender cannot be modified after registration.', 'warning');
     }
-    showToast('Profile Updated', 'Changes saved successfully', 'success');
+
+    const saveGen = ++profileSaveGenRef.current;
+    const email = sanitizedUpdates.email || targetBefore?.email;
+    const payload: Partial<UserProfile> = {
+      ...sanitizedUpdates,
+      ...(email ? { email } : {}),
+    };
+    const task = profileSaveChainRef.current.then(async () => {
+      const saved = await persistUserProfileUpdate(userId, payload);
+      if (saveGen !== profileSaveGenRef.current) return saved;
+      if (!saved) {
+        showToast(
+          'Profile Save Failed',
+          'Your changes are still on screen. Click Save again.',
+          'error'
+        );
+        return false;
+      }
+      showToast('Profile Updated', 'Changes saved successfully', 'success');
+      return true;
+    });
+    profileSaveChainRef.current = task.then(
+      () => undefined,
+      () => undefined
+    );
+    return task;
   };
 
   // Change User Password

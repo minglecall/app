@@ -1240,9 +1240,22 @@ async function handleUsersExtra(path, req, res) {
 }
 
 function profilePayloadFromBody(body, auth) {
-  const raw = body || {};
+  const envelope = body && typeof body === 'object' ? body : {};
+  const nested =
+    envelope.updates && typeof envelope.updates === 'object' && !Array.isArray(envelope.updates)
+      ? envelope.updates
+      : null;
+  const raw = nested
+    ? { ...nested, id: nested.id || envelope.userId || envelope.id }
+    : envelope;
   const isAdmin = isAdminRole(auth.role, auth.email);
-  const id = String(raw.id || auth.profileId);
+  const id = isAdmin ? String(raw.id || auth.profileId) : String(auth.profileId);
+  const pick = (camel, snake) => {
+    if (raw[camel] !== undefined) return raw[camel];
+    if (snake && raw[snake] !== undefined) return raw[snake];
+    return undefined;
+  };
+  const country = pick('countryCode', 'country_code');
   const payload = {
     id,
     auth_id: raw.authId || raw.auth_id || (id === auth.userId ? auth.userId : undefined),
@@ -1253,16 +1266,37 @@ function profilePayloadFromBody(body, auth) {
     role: isAdmin ? raw.role : undefined,
     age: raw.age != null ? Number(raw.age) : undefined,
     nationality: raw.nationality,
-    country_code: raw.countryCode || raw.country_code,
+    country_code: country !== undefined ? String(country).toUpperCase() : undefined,
     bio: raw.bio,
+    extended_bio: pick('extendedBio', 'extended_bio'),
+    location_city: pick('locationCity', 'location_city'),
+    zodiac: raw.zodiac,
     interests: raw.interests,
+    interested_in: pick('interestedIn', 'interested_in'),
     tags: raw.tags,
-    spoken_languages: raw.spokenLanguages || raw.spoken_languages,
-    avatar_url: raw.avatarUrl || raw.avatar_url,
+    spoken_languages: pick('spokenLanguages', 'spoken_languages'),
+    avatar_url: pick('avatarUrl', 'avatar_url'),
     gallery: raw.gallery,
+    latitude:
+      raw.exactLocation && raw.exactLocation.latitude !== undefined
+        ? raw.exactLocation.latitude
+        : raw.latitude,
+    longitude:
+      raw.exactLocation && raw.exactLocation.longitude !== undefined
+        ? raw.exactLocation.longitude
+        : raw.longitude,
+    is_using_mock_location: pick('isUsingMockLocation', 'is_using_mock_location'),
+    mock_location_city: pick('mockLocationCity', 'mock_location_city'),
+    mock_location_country: pick('mockLocationCountry', 'mock_location_country'),
+    hourly_coin_rate:
+      raw.hourlyCoinRate != null
+        ? Number(raw.hourlyCoinRate)
+        : raw.hourly_coin_rate != null
+          ? Number(raw.hourly_coin_rate)
+          : undefined,
     is_verified: raw.isVerified ?? raw.is_verified,
     is_onboarded: raw.isOnboarded ?? raw.is_onboarded,
-    online_status: raw.onlineStatus || raw.online_status,
+    online_status: pick('onlineStatus', 'online_status'),
     agency_name: raw.agencyName || raw.agency_name,
     team_leader_id: raw.teamLeaderId || raw.team_leader_id,
     created_by_id: raw.createdById || raw.created_by_id,
@@ -1329,10 +1363,13 @@ async function handleSupabase(path, req, res) {
     }
     const { data, error } = await auth.client
       .from('profiles')
-      .upsert(payload, { onConflict: 'id' })
+      .upsert(payload, { onConflict: 'id', defaultToNull: false })
       .select('*')
       .maybeSingle();
     if (error) return send(res, 500, { success: false, error: { message: error.message } });
+    if (!data) {
+      return send(res, 500, { success: false, error: { message: 'Profile was not updated' } });
+    }
     return send(res, 200, { success: true, user: mapProfileRow(data) });
   }
 

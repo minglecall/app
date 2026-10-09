@@ -2266,21 +2266,36 @@ async function startServer(): Promise<express.Express> {
         id: userId,
       };
 
-      if (isSupabaseAdminConfigured()) {
-        const result = await updateUserProfileAdmin(userId, fullUpdates);
-        if (!result.success) {
-          console.warn('[Server] Supabase admin update error:', result.error);
-        }
+      if (!isSupabaseAdminConfigured()) {
+        return res.status(503).json({ success: false, error: 'Profile store is not configured' });
+      }
+      const result = await updateUserProfileAdmin(userId, fullUpdates);
+      if (!result.success) {
+        console.warn('[Server] Supabase admin update error:', result.error);
+        return res.status(500).json({ success: false, error: result.error || 'Failed to update profile' });
       }
 
       // Also update in-memory serverUsers map
       const normalized = normalizeUserProfile({
         ...(existing || {}),
         ...fullUpdates,
-        countryCode: updates.countryCode || fullUpdates.countryCode || existing?.countryCode,
-        country_code: updates.countryCode || fullUpdates.countryCode || existing?.countryCode,
-        nationality: updates.nationality || fullUpdates.nationality || existing?.nationality,
-        locationCity: updates.locationCity || fullUpdates.locationCity || existing?.locationCity,
+        countryCode: updates.countryCode ?? updates.country_code ?? fullUpdates.countryCode ?? existing?.countryCode,
+        country_code: updates.countryCode ?? updates.country_code ?? fullUpdates.countryCode ?? existing?.countryCode,
+        nationality: updates.nationality ?? fullUpdates.nationality ?? existing?.nationality,
+        locationCity: updates.locationCity ?? updates.location_city ?? fullUpdates.locationCity ?? existing?.locationCity,
+        spokenLanguages:
+          updates.spokenLanguages !== undefined
+            ? updates.spokenLanguages
+            : updates.spoken_languages !== undefined
+              ? updates.spoken_languages
+              : existing?.spokenLanguages,
+        avatarUrl:
+          updates.avatarUrl !== undefined
+            ? updates.avatarUrl
+            : updates.avatar_url !== undefined
+              ? updates.avatar_url
+              : existing?.avatarUrl,
+        zodiac: updates.zodiac !== undefined ? updates.zodiac : existing?.zodiac,
       });
       serverUsers.set(userId, normalized);
 

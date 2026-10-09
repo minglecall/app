@@ -1605,26 +1605,31 @@ export async function updateUserProfileAdmin(
     if (updates.dob !== undefined) payload.dob = updates.dob;
     if (updates.nationality !== undefined) payload.nationality = updates.nationality;
     if (updates.countryCode !== undefined || updates.country_code !== undefined) {
-      payload.country_code = String(updates.countryCode || updates.country_code).toUpperCase();
+      const code = updates.countryCode !== undefined ? updates.countryCode : updates.country_code;
+      payload.country_code = String(code).toUpperCase();
     }
     if (updates.bio !== undefined) payload.bio = updates.bio;
     if (updates.extendedBio !== undefined || updates.extended_bio !== undefined) {
-      payload.extended_bio = updates.extendedBio || updates.extended_bio || null;
+      const extended = updates.extendedBio !== undefined ? updates.extendedBio : updates.extended_bio;
+      payload.extended_bio = extended ?? null;
     }
     if (updates.locationCity !== undefined || updates.location_city !== undefined) {
-      payload.location_city = updates.locationCity || updates.location_city || null;
+      const city = updates.locationCity !== undefined ? updates.locationCity : updates.location_city;
+      payload.location_city = city ?? null;
     }
-    if (updates.zodiac !== undefined) payload.zodiac = updates.zodiac || null;
+    if (updates.zodiac !== undefined) payload.zodiac = updates.zodiac ?? null;
     if (updates.spokenLanguages !== undefined || updates.spoken_languages !== undefined) {
-      payload.spoken_languages = updates.spokenLanguages || updates.spoken_languages;
+      const langs = updates.spokenLanguages !== undefined ? updates.spokenLanguages : updates.spoken_languages;
+      payload.spoken_languages = Array.isArray(langs) ? langs : [];
     }
     if (updates.interests !== undefined) payload.interests = updates.interests;
     if (updates.interestedIn !== undefined || updates.interested_in !== undefined) {
-      payload.interested_in = updates.interestedIn || updates.interested_in;
+      const interested = updates.interestedIn !== undefined ? updates.interestedIn : updates.interested_in;
+      payload.interested_in = Array.isArray(interested) ? interested : [];
     }
     if (updates.tags !== undefined) payload.tags = updates.tags;
     if (updates.avatarUrl !== undefined || updates.avatar_url !== undefined) {
-      payload.avatar_url = updates.avatarUrl || updates.avatar_url;
+      payload.avatar_url = updates.avatarUrl !== undefined ? updates.avatarUrl : updates.avatar_url;
     }
     if (updates.gallery !== undefined) payload.gallery = updates.gallery;
     if (updates.introVideoUrl !== undefined || updates.intro_video_url !== undefined) {
@@ -1726,6 +1731,9 @@ export async function updateUserProfileAdmin(
     if (res.error) {
       console.warn('[Supabase Admin] updateUserProfileAdmin error:', res.error.message);
       return { success: false, error: res.error.message };
+    }
+    if (!res.data) {
+      return { success: false, error: 'Profile was not updated' };
     }
 
     return { success: true, data: res.data };

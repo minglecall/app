@@ -461,7 +461,8 @@ export async function updateUserProfileInSupabase(
       }
     }
 
-    // 2. Also dispatch to server Supabase Admin endpoint for 100% guaranteed persistence
+    // Wallet and admin callers still mirror through the backend. Profile saves use
+    // persistUserProfileUpdate instead, so they do not race this fire-and-forget write.
     authFetch('/api/supabase/update-profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -470,15 +471,35 @@ export async function updateUserProfileInSupabase(
 
     return true;
   } catch (err) {
-    console.warn('Supabase updateUserProfile exception, falling back to server endpoint:', err);
-    try {
-      authFetch('/api/supabase/update-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, updates }),
-      }).catch(() => {});
-    } catch {}
+    console.warn('Supabase updateUserProfile exception:', err);
+    return false;
+  }
+}
+
+/**
+ * Authoritative partial profile write. One request, awaited, so a later
+ * presence heartbeat cannot persist a stale full-profile snapshot over it.
+ */
+export async function persistUserProfileUpdate(
+  userId: string,
+  updates: Partial<UserProfile>
+): Promise<boolean> {
+  if (!userId || !updates || Object.keys(updates).length === 0) return false;
+  try {
+    const res = await authFetch('/api/supabase/update-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, updates }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) {
+      console.warn('persistUserProfileUpdate rejected:', data?.error || res.status);
+      return false;
+    }
     return true;
+  } catch (err) {
+    console.warn('persistUserProfileUpdate failed:', err);
+    return false;
   }
 }
 

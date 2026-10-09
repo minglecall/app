@@ -357,6 +357,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
   // Track whether user has active uncommitted edits in the form to prevent heartbeat wipes
   const isDirtyRef = useRef<boolean>(false);
+  const saveInFlightRef = useRef<boolean>(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
   const lastUserIdRef = useRef<string>(currentUser.id);
 
   // Editable Bio form fields
@@ -505,9 +507,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   };
 
   // Save general profile edits
-  const handleSaveProfile = (e: React.FormEvent) => {
+  const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    isDirtyRef.current = false;
+    if (saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    isDirtyRef.current = true;
+    setIsSavingProfile(true);
 
     const newNationality = formData.nationality || currentUser.nationality || 'United States';
     const newCountryCode = (formData.countryCode || currentUser.countryCode || 'US').toUpperCase();
@@ -532,28 +537,36 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
       ? `Profile updated: ${changes.join(' • ')}`
       : 'Profile updated successfully!';
 
-    updateUserProfile(currentUser.id, {
-      name: formData.name,
-      bio: formData.bio,
-      extendedBio: formData.extendedBio,
-      locationCity: formData.locationCity || newNationality,
-      zodiac: formData.zodiac,
-      nationality: newNationality,
-      countryCode: newCountryCode,
-      hourlyCoinRate: currentUser.hourlyCoinRate,
-      avatarUrl: formData.avatarUrl,
-      responseRate: formData.responseRate,
-      interestedIn: [formData.interestedIn],
-      spokenLanguages: formData.spokenLanguages,
-      interests: formData.interests,
-      exactLocation: currentUser.exactLocation ? {
-        ...currentUser.exactLocation,
-        country: newNationality,
+    try {
+      const saved = await updateUserProfile(currentUser.id, {
+        name: formData.name,
+        bio: formData.bio,
+        extendedBio: formData.extendedBio,
+        locationCity: formData.locationCity || newNationality,
+        zodiac: formData.zodiac,
+        nationality: newNationality,
         countryCode: newCountryCode,
-        city: formData.locationCity || currentUser.exactLocation.city || newNationality,
-      } : undefined,
-    });
-    showToast('Profile Saved ✨', toastMsg, 'success');
+        hourlyCoinRate: currentUser.hourlyCoinRate,
+        avatarUrl: formData.avatarUrl,
+        responseRate: formData.responseRate,
+        interestedIn: [formData.interestedIn],
+        spokenLanguages: formData.spokenLanguages,
+        interests: formData.interests,
+        exactLocation: currentUser.exactLocation ? {
+          ...currentUser.exactLocation,
+          country: newNationality,
+          countryCode: newCountryCode,
+          city: formData.locationCity || currentUser.exactLocation.city || newNationality,
+        } : undefined,
+      });
+      if (saved) {
+        isDirtyRef.current = false;
+        showToast('Profile Saved ✨', toastMsg, 'success');
+      }
+    } finally {
+      saveInFlightRef.current = false;
+      setIsSavingProfile(false);
+    }
   };
 
   return (
@@ -1492,10 +1505,11 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
             <button
               type="submit"
-              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-mono font-bold text-xs transition-all shadow-md flex items-center space-x-1.5 cursor-pointer"
+              disabled={isSavingProfile}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-mono font-bold text-xs transition-all shadow-md flex items-center space-x-1.5 cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>Save Changes</span>
+              <span>{isSavingProfile ? 'Saving...' : 'Save Changes'}</span>
             </button>
           </div>
 
