@@ -205,10 +205,17 @@ function mergeGalleryWithVideoSentinel(photos, videos) {
 }
 
 function resolveGalleryVideosFromRow(p) {
-  if (Array.isArray(p.gallery_videos)) return p.gallery_videos;
-  if (Array.isArray(p.galleryVideos)) return p.galleryVideos;
+  // Prefer non-empty column; empty [] must not block sentinel fallback
+  // (common after ADD COLUMN ... DEFAULT '[]' while videos still live in gallery).
+  const fromCol = Array.isArray(p.gallery_videos)
+    ? p.gallery_videos
+    : Array.isArray(p.galleryVideos)
+      ? p.galleryVideos
+      : null;
+  if (Array.isArray(fromCol) && fromCol.length > 0) return fromCol;
   const fromGallery = splitGalleryPhotosAndVideos(p.gallery).videos;
-  return Array.isArray(fromGallery) ? fromGallery : [];
+  if (Array.isArray(fromGallery) && fromGallery.length > 0) return fromGallery;
+  return Array.isArray(fromCol) ? fromCol : [];
 }
 
 function findAuthUserByEmail(users, email) {

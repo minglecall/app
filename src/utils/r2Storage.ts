@@ -48,6 +48,26 @@ async function getAuthJsonHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
+/** Auth headers without Content-Type (browser sets multipart boundary for FormData). */
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  try {
+    const token = await getAccessToken();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+  } catch (err) {
+    console.warn('[R2 Storage] Unable to read Supabase session for Authorization header:', err);
+  }
+  return headers;
+}
+
+/** Vercel serverless body limit — server fallback cannot carry larger files. */
+const SERVER_FALLBACK_MAX_BYTES = 4 * 1024 * 1024;
+
+const R2_CORS_HINT =
+  'Direct upload failed. Ensure your R2 bucket CORS allows PUT from this site (AllowedOrigins: your domain or "*", AllowedMethods: GET, PUT, HEAD, AllowedHeaders: *).';
+
 function extractStorageErrorMessage(payload: any, fallback: string): string {
   if (!payload) return fallback;
   if (typeof payload.error === 'string') return payload.error;
@@ -94,7 +114,7 @@ export function normalizeMediaUrl(url: string | undefined | null, storageKey?: s
   return safeUrl;
 }
 
-// Fallback helper to upload via server API if direct PUT has CORS or signature issues
+// Fallback: multipart FormData through the API (no FileReader / base64 — avoids mobile OOM).
 async function uploadMediaViaServerFallback(
   file: File,
   userId?: string,
@@ -102,28 +122,28 @@ async function uploadMediaViaServerFallback(
   onProgress?: (p: number) => void
 ): Promise<DirectUploadResult> {
   const startTime = performance.now();
+
+  if (file.size > SERVER_FALLBACK_MAX_BYTES) {
+    throw new Error(
+      `${R2_CORS_HINT} This file (${Math.round(file.size / (1024 * 1024))} MB) is too large for the server fallback path.`
+    );
+  }
+
   if (onProgress) onProgress(30);
 
-  const base64Data = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error('Failed to read file from device'));
-    reader.readAsDataURL(file);
-  });
+  const form = new FormData();
+  form.append('file', file, file.name);
+  form.append('filename', file.name);
+  form.append('contentType', file.type || 'application/octet-stream');
+  form.append('category', category);
+  if (userId) form.append('userId', userId);
 
-  if (onProgress) onProgress(70);
+  if (onProgress) onProgress(55);
 
   const res = await fetch(apiUrl('/api/storage/upload'), {
     method: 'POST',
-    headers: await getAuthJsonHeaders(),
-    body: JSON.stringify({
-      filename: file.name,
-      contentType: file.type || 'image/jpeg',
-      base64Data,
-      // Informational only — server derives owner from the auth session
-      userId: userId || undefined,
-      category,
-    }),
+    headers: await getAuthHeaders(),
+    body: form,
   });
 
   const data = await res.json().catch(() => ({}));
@@ -131,7 +151,11 @@ async function uploadMediaViaServerFallback(
     if (isStorageNotConfiguredResponse(res.status, data)) {
       throw new Error('Storage not configured');
     }
-    throw new Error(extractStorageErrorMessage(data, 'Server storage upload failed'));
+    const msg = extractStorageErrorMessage(data, 'Server storage upload failed');
+    if (res.status === 413 || data?.code === 'FILE_TOO_LARGE') {
+      throw new Error(`${R2_CORS_HINT} ${msg}`);
+    }
+    throw new Error(msg);
   }
 
   if (onProgress) onProgress(100);

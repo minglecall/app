@@ -109,7 +109,19 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     fetchUserMoments,
     callLogs,
     logoutUser,
+    users,
   } = useApp();
+
+  const latestSelfGallery = () => {
+    const fromUsers = users.find(
+      (u) => u.id === currentUser.id || (currentUser.email && u.email === currentUser.email)
+    );
+    return Array.isArray(fromUsers?.gallery)
+      ? fromUsers!.gallery!
+      : Array.isArray(currentUser.gallery)
+        ? currentUser.gallery
+        : [];
+  };
 
   const isTeamLeader = currentUser.role === 'team_leader' || currentUser.role === 'agency_manager';
   const isFemale =
@@ -213,7 +225,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const videoBlobPreviewsRef = useRef(videoBlobPreviews);
   videoBlobPreviewsRef.current = videoBlobPreviews;
 
-  const profileVideoQuotaMb = Math.max(1, Number(systemSettings.profileVideoQuotaMb) || 30);
+  const profileVideoQuotaMb = Math.max(1, Number(systemSettings.profileVideoQuotaMb) || 100);
   const maxSingleVideoMb = Math.max(1, Number(systemSettings.r2MaxVideoSizeMb) || 100);
   const galleryVideos = localGalleryVideos ?? currentUser.galleryVideos ?? [];
   const usedVideoBytes = galleryVideos.reduce((sum, v) => sum + (Number(v.sizeBytes) || 0), 0);
@@ -366,19 +378,51 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     }
   };
 
-  const handleAddGalleryPhoto = (newUrl: string) => {
-    const currentGallery = currentUser.gallery || [];
-    const updatedGallery = [...currentGallery, newUrl];
-    updateUserProfile(currentUser.id, { gallery: updatedGallery });
-    showToast('Gallery Updated 🖼️', 'New photo added to your gallery and stored in R2!', 'success');
-    setIsAddGalleryModalOpen(false);
+  const handleAddGalleryPhotos = async (
+    items: { publicUrl: string; storageKey?: string }[] | string
+  ) => {
+    const urls = (typeof items === 'string' ? [items] : items.map((i) => i.publicUrl))
+      .map((u) => String(u || '').trim())
+      .filter((u) => u && isPersistableMediaUrl(u));
+    if (!urls.length) {
+      showToast('Upload Incomplete', 'No durable photo URL was returned. Please try again.', 'error');
+      return;
+    }
+
+    const currentGallery = latestSelfGallery();
+    const seen = new Set(currentGallery);
+    const added = urls.filter((u) => !seen.has(u));
+    const updatedGallery = [...currentGallery, ...added];
+    const saved = await updateUserProfile(currentUser.id, { gallery: updatedGallery }, {
+      silentSuccess: true,
+    });
+    if (saved) {
+      showToast(
+        'Gallery Updated',
+        `${added.length || urls.length} photo(s) saved to your gallery.`,
+        'success'
+      );
+      setIsAddGalleryModalOpen(false);
+    } else {
+      showToast(
+        'Gallery Save Failed',
+        'Photos uploaded to storage but were not saved to your profile. Please try again.',
+        'error'
+      );
+    }
   };
 
-  const handleRemoveGalleryPhoto = (indexToRemove: number) => {
-    const currentGallery = currentUser.gallery || [];
+  const handleRemoveGalleryPhoto = async (indexToRemove: number) => {
+    const currentGallery = latestSelfGallery();
     const updatedGallery = currentGallery.filter((_, i) => i !== indexToRemove);
-    updateUserProfile(currentUser.id, { gallery: updatedGallery });
-    showToast('Photo Removed', 'Gallery updated.', 'info');
+    const saved = await updateUserProfile(currentUser.id, { gallery: updatedGallery }, {
+      silentSuccess: true,
+    });
+    if (saved) {
+      showToast('Photo Removed', 'Gallery updated.', 'info');
+    } else {
+      showToast('Remove Failed', 'Could not save gallery changes. Please try again.', 'error');
+    }
   };
 
   const formatMb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 1 : 2);
@@ -492,12 +536,25 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
       if (uploaded > 0) {
         setLocalGalleryVideos(nextVideos);
-        await updateUserProfile(currentUser.id, { galleryVideos: nextVideos });
-        showToast(
-          'Videos Added',
-          `${uploaded} video(s) uploaded. ${formatMb(used)} / ${profileVideoQuotaMb} MB used.`,
-          'success'
+        const saved = await updateUserProfile(
+          currentUser.id,
+          { galleryVideos: nextVideos },
+          { silentSuccess: true }
         );
+        if (saved) {
+          showToast(
+            'Videos Added',
+            `${uploaded} video(s) uploaded. ${formatMb(used)} / ${profileVideoQuotaMb} MB used.`,
+            'success'
+          );
+        } else {
+          setLocalGalleryVideos(null);
+          showToast(
+            'Video Save Failed',
+            'Videos may be in storage but were not saved to your profile. Please try again.',
+            'error'
+          );
+        }
       }
     } catch (err: any) {
       console.error('Gallery video upload failed:', err);
@@ -509,7 +566,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     }
   };
 
-  const handleRemoveGalleryVideo = (indexToRemove: number) => {
+  const handleRemoveGalleryVideo = async (indexToRemove: number) => {
     const current = localGalleryVideos ?? currentUser.galleryVideos ?? [];
     const removed = current[indexToRemove];
     const next = current.filter((_, i) => i !== indexToRemove);
@@ -526,8 +583,17 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
         return copy;
       });
     }
-    updateUserProfile(currentUser.id, { galleryVideos: next });
-    showToast('Video Removed', 'Profile video gallery updated.', 'info');
+    const saved = await updateUserProfile(
+      currentUser.id,
+      { galleryVideos: next },
+      { silentSuccess: true }
+    );
+    if (saved) {
+      showToast('Video Removed', 'Profile video gallery updated.', 'info');
+    } else {
+      setLocalGalleryVideos(null);
+      showToast('Remove Failed', 'Could not save gallery video changes. Please try again.', 'error');
+    }
   };
 
   const handleAvatarFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2424,7 +2490,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             </div>
 
             <UnifiedImageUploader
-              onImageUploaded={handleAddGalleryPhoto}
+              onImageUploaded={(url) => void handleAddGalleryPhotos(url)}
+              onImagesUploaded={(items) => void handleAddGalleryPhotos(items)}
               userId={currentUser.id}
               category="gallery"
               aspectRatio="4:5"
@@ -2432,9 +2499,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               targetName={currentUser.name}
               accentColor="pink"
               title="Gallery Photo"
-              subtitle="Upload portrait or landscape photos to your profile gallery"
+              subtitle="Upload one or more photos (PNG, JPG, WEBP, GIF — Max 10MB each)"
               showPresets={false}
               showUrlInput={true}
+              multiple
             />
 
             <div className="pt-3 border-t border-hairline flex justify-end">

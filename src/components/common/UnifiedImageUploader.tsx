@@ -20,9 +20,14 @@ import {
 } from '../../utils/avatars';
 import { UserRole } from '../../types';
 
+/** Matches server CATEGORY_MAX_BYTES for gallery/moment/avatar images. */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
 export interface UnifiedImageUploaderProps {
   currentImageUrl?: string;
   onImageUploaded: (publicUrl: string, storageKey?: string) => void;
+  /** When multiple is true, called once with all durable URLs after the batch finishes. */
+  onImagesUploaded?: (items: { publicUrl: string; storageKey?: string }[]) => void;
   userId?: string;
   category?: 'avatar' | 'gallery' | 'chat_media' | 'moment' | 'verification';
   aspectRatio?: '1:1' | '4:5' | '16:9' | 'auto';
@@ -35,19 +40,23 @@ export interface UnifiedImageUploaderProps {
   showUrlInput?: boolean;
   compact?: boolean;
   onCancel?: () => void;
+  /** Allow selecting multiple images (gallery). */
+  multiple?: boolean;
 }
 
 export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
   currentImageUrl,
   onImageUploaded,
+  onImagesUploaded,
   userId = 'current_user',
   category = 'avatar',
   targetRole = 'female_creator',
   targetName = 'User',
   accentColor = 'pink',
-  subtitle = 'Supported formats: PNG, JPG, WEBP, GIF (Max 15MB)',
+  subtitle = 'Supported formats: PNG, JPG, WEBP, GIF (Max 10MB)',
   showPresets = true,
   showUrlInput = true,
+  multiple = false,
 }) => {
   const [activeTab, setActiveTab] = useState<'upload' | 'presets' | 'url'>('upload');
   const [presetCategory, setPresetCategory] = useState<'role_based' | '3d' | 'anime'>('role_based');
@@ -59,6 +68,18 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const blobPreviewRef = useRef<string | null>(null);
+
+  const revokeBlobPreview = () => {
+    if (blobPreviewRef.current) {
+      try {
+        URL.revokeObjectURL(blobPreviewRef.current);
+      } catch {
+        /* ignore */
+      }
+      blobPreviewRef.current = null;
+    }
+  };
 
   useEffect(() => {
     if (currentImageUrl && !previewUrl) {
@@ -66,54 +87,126 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
     }
   }, [currentImageUrl]);
 
+  useEffect(() => {
+    return () => {
+      revokeBlobPreview();
+    };
+  }, []);
+
+  const uploadOneFile = async (
+    file: File,
+    onProgress?: (percent: number) => void
+  ): Promise<{ publicUrl: string; storageKey?: string }> => {
+    if (!file.type.startsWith('image/')) {
+      throw new Error('Please select a valid image file (PNG, JPG, WEBP, GIF).');
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      throw new Error('Image file is too large. Max size is 10MB.');
+    }
+    const result = await uploadMediaDirectlyToR2({
+      file,
+      userId,
+      category,
+      onProgress,
+    });
+    if (!result?.publicUrl || !isPersistableMediaUrl(result.publicUrl)) {
+      throw new Error('Upload completed but no cloud storage URL was returned');
+    }
+    return { publicUrl: result.publicUrl, storageKey: result.storageKey };
+  };
+
   const handleFileSelect = async (file: File) => {
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setErrorMessage('Please select a valid image file (PNG, JPG, WEBP, GIF).');
-      return;
-    }
-
-    if (file.size > 15 * 1024 * 1024) {
-      setErrorMessage('Image file is too large. Max size is 15MB.');
-      return;
-    }
-
     setErrorMessage(null);
     setUploadSuccess(false);
+    revokeBlobPreview();
 
-    // 1. Instant Local Preview: Show the picture immediately without waiting for network
     const objectUrl = URL.createObjectURL(file);
+    blobPreviewRef.current = objectUrl;
     setPreviewUrl(objectUrl);
     setIsUploading(true);
     setUploadProgress(15);
 
     try {
-      const result = await uploadMediaDirectlyToR2({
-        file,
-        userId,
-        category,
-        onProgress: (percent) => {
-          setUploadProgress(Math.max(15, percent));
-        },
+      const uploaded = await uploadOneFile(file, (percent) => {
+        setUploadProgress(Math.max(15, percent));
       });
-
-      if (result && result.publicUrl && isPersistableMediaUrl(result.publicUrl)) {
-        // Keep local objectUrl as active preview so local rendering never fails or blinks, while calling onImageUploaded with the safe public URL
-        setPreviewUrl(objectUrl);
-        setUploadSuccess(true);
-        onImageUploaded(result.publicUrl, result.storageKey);
-      } else {
-        throw new Error('Upload completed but no cloud storage URL was returned');
-      }
+      // Prefer durable URL for preview so refresh/reload matches what was saved
+      revokeBlobPreview();
+      setPreviewUrl(normalizeMediaUrl(uploaded.publicUrl, uploaded.storageKey) || uploaded.publicUrl);
+      setUploadSuccess(true);
+      onImageUploaded(uploaded.publicUrl, uploaded.storageKey);
     } catch (err: any) {
       console.error('[Unified Uploader] Cloud upload failed:', err?.message || err);
-      setPreviewUrl(objectUrl);
+      revokeBlobPreview();
+      setPreviewUrl(normalizeMediaUrl(currentImageUrl) || '');
       setErrorMessage(err?.message || 'Failed to upload image to Cloudflare R2. Please try again.');
       setUploadSuccess(false);
     } finally {
       setIsUploading(false);
       setUploadProgress(0);
+    }
+  };
+
+  const handleFilesSelect = async (files: FileList | File[]) => {
+    const list = Array.from(files || []).filter(Boolean);
+    if (!list.length) return;
+    if (!multiple || list.length === 1) {
+      await handleFileSelect(list[0]);
+      return;
+    }
+
+    setErrorMessage(null);
+    setUploadSuccess(false);
+    revokeBlobPreview();
+    setIsUploading(true);
+    setUploadProgress(5);
+
+    const uploaded: { publicUrl: string; storageKey?: string }[] = [];
+    const errors: string[] = [];
+
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i];
+      try {
+        const objectUrl = URL.createObjectURL(file);
+        blobPreviewRef.current = objectUrl;
+        setPreviewUrl(objectUrl);
+        const item = await uploadOneFile(file, (percent) => {
+          const overall = Math.round(((i + percent / 100) / list.length) * 100);
+          setUploadProgress(Math.max(5, overall));
+        });
+        uploaded.push(item);
+        revokeBlobPreview();
+        setPreviewUrl(normalizeMediaUrl(item.publicUrl, item.storageKey) || item.publicUrl);
+      } catch (err: any) {
+        errors.push(`${file.name}: ${err?.message || 'upload failed'}`);
+        revokeBlobPreview();
+      }
+    }
+
+    setIsUploading(false);
+    setUploadProgress(0);
+
+    if (uploaded.length > 0) {
+      setUploadSuccess(true);
+      if (onImagesUploaded) {
+        onImagesUploaded(uploaded);
+      } else {
+        for (const item of uploaded) {
+          onImageUploaded(item.publicUrl, item.storageKey);
+        }
+      }
+    } else {
+      setPreviewUrl(normalizeMediaUrl(currentImageUrl) || '');
+      setUploadSuccess(false);
+    }
+    if (errors.length) {
+      setErrorMessage(
+        uploaded.length
+          ? `${uploaded.length} uploaded; ${errors.length} failed. ${errors[0]}`
+          : errors[0] || 'Failed to upload images.'
+      );
     }
   };
 
@@ -129,9 +222,9 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) {
-      handleFileSelect(file);
+    const files = e.dataTransfer.files;
+    if (files?.length) {
+      void handleFilesSelect(files);
     }
   };
 
@@ -193,10 +286,11 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
         type="file"
         ref={fileInputRef}
         onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) handleFileSelect(f);
+          if (e.target.files?.length) void handleFilesSelect(e.target.files);
+          e.target.value = '';
         }}
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif"
+        multiple={multiple}
         className="hidden"
       />
 
@@ -271,7 +365,8 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
               <UploadCloud className="w-6 h-6" />
             </div>
             <h4 className="text-white font-bold text-sm">
-              Drag and drop your photo here, or <span className={colorStyles.accentText}>browse files</span>
+              Drag and drop your photo{multiple ? 's' : ''} here, or{' '}
+              <span className={colorStyles.accentText}>browse files</span>
             </h4>
             <p className="text-slate-400 text-[11px] mt-1">{subtitle}</p>
           </div>

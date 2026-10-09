@@ -209,7 +209,11 @@ interface AppContextType {
   loginUser: (identifier: string) => boolean;
   logoutUser: (opts?: { reason?: 'manual' | 'other_device' }) => void;
   registerUser: (userData: Partial<UserProfile>) => UserProfile;
-  updateUserProfile: (userId: string, updates: Partial<UserProfile>) => Promise<boolean>;
+  updateUserProfile: (
+    userId: string,
+    updates: Partial<UserProfile>,
+    options?: { silentSuccess?: boolean }
+  ) => Promise<boolean>;
   changeUserPassword: (userId: string, currentPassword: string, newPassword: string) => { success: boolean; message: string };
 
   // Economy & Store
@@ -2023,6 +2027,42 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
             if (isCurrentLoggedIn && localUser) {
               // Preserve active logged-in user's profile and location state so background sync never reverts local edits
+              const mergePhotoGalleries = (localG?: string[], remoteG?: string[]) => {
+                const local = Array.isArray(localG) ? localG : [];
+                const remote = Array.isArray(remoteG) ? remoteG : [];
+                if (!local.length) return remote;
+                if (!remote.length) return local;
+                const seen = new Set<string>();
+                const out: string[] = [];
+                for (const url of [...remote, ...local]) {
+                  const u = String(url || '').trim();
+                  if (!u || seen.has(u)) continue;
+                  seen.add(u);
+                  out.push(u);
+                }
+                return out;
+              };
+              const mergeVideoGalleries = (
+                localV?: UserProfile['galleryVideos'],
+                remoteV?: UserProfile['galleryVideos']
+              ) => {
+                const local = Array.isArray(localV) ? localV : [];
+                const remote = Array.isArray(remoteV) ? remoteV : [];
+                if (!local.length) return remote;
+                if (!remote.length) return local;
+                const map = new Map<string, NonNullable<UserProfile['galleryVideos']>[number]>();
+                const keyOf = (v: NonNullable<UserProfile['galleryVideos']>[number]) =>
+                  String(v.storageKey || v.url || '').trim();
+                for (const v of remote) {
+                  const k = keyOf(v);
+                  if (k) map.set(k, v);
+                }
+                for (const v of local) {
+                  const k = keyOf(v);
+                  if (k) map.set(k, v);
+                }
+                return Array.from(map.values());
+              };
               mergedMap.set(p.id, {
                 ...p,
                 name: localUser.name || p.name,
@@ -2035,6 +2075,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 zodiac: localUser.zodiac || p.zodiac,
                 spokenLanguages: localUser.spokenLanguages || p.spokenLanguages,
                 interests: localUser.interests || p.interests,
+                gallery: mergePhotoGalleries(localUser.gallery, p.gallery),
+                galleryVideos: mergeVideoGalleries(localUser.galleryVideos, p.galleryVideos),
                 exactLocation: localUser.exactLocation || p.exactLocation,
                 allowMockLocation: localUser.allowMockLocation ?? p.allowMockLocation,
                 isUsingMockLocation: localUser.isUsingMockLocation ?? p.isUsingMockLocation,
@@ -2767,7 +2809,39 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 const isSelf = isSelfProfileRow(u);
                 const incomingVideos = Array.isArray(liveProfile.galleryVideos)
                   ? liveProfile.galleryVideos
-                  : undefined;
+                  : [];
+                const localVideos = Array.isArray(u.galleryVideos) ? u.galleryVideos : [];
+                const videoKey = (v: { storageKey?: string; url?: string }) =>
+                  String(v.storageKey || v.url || '').trim();
+                const mergedVideos = (() => {
+                  if (!localVideos.length) return incomingVideos;
+                  if (!incomingVideos.length) return localVideos;
+                  const map = new Map<string, (typeof localVideos)[number]>();
+                  for (const v of incomingVideos) {
+                    const k = videoKey(v);
+                    if (k) map.set(k, v);
+                  }
+                  for (const v of localVideos) {
+                    const k = videoKey(v);
+                    if (k) map.set(k, v);
+                  }
+                  return Array.from(map.values());
+                })();
+                const incomingPhotos = Array.isArray(liveProfile.gallery) ? liveProfile.gallery : [];
+                const localPhotos = Array.isArray(u.gallery) ? u.gallery : [];
+                const mergedPhotos = (() => {
+                  if (!localPhotos.length) return incomingPhotos;
+                  if (!incomingPhotos.length) return localPhotos;
+                  const seen = new Set<string>();
+                  const out: string[] = [];
+                  for (const url of [...incomingPhotos, ...localPhotos]) {
+                    const s = String(url || '').trim();
+                    if (!s || seen.has(s)) continue;
+                    seen.add(s);
+                    out.push(s);
+                  }
+                  return out;
+                })();
                 const merged = {
                   ...u,
                   ...liveProfile,
@@ -2776,13 +2850,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     liveProfile.coinBalance !== undefined ? liveProfile.coinBalance : u.coinBalance,
                   earningsCoins:
                     liveProfile.earningsCoins !== undefined ? liveProfile.earningsCoins : u.earningsCoins,
-                  // Keep local gallery videos if remote payload is empty (column missing / stale sync).
-                  galleryVideos:
-                    incomingVideos && incomingVideos.length > 0
-                      ? incomingVideos
-                      : Array.isArray(u.galleryVideos) && u.galleryVideos.length > 0
-                        ? u.galleryVideos
-                        : incomingVideos || u.galleryVideos || [],
+                  // Union by key so a stale shorter remote list cannot drop just-uploaded media.
+                  gallery: mergedPhotos,
+                  galleryVideos: mergedVideos,
                   // Presence heartbeat owns onlineStatus — never re-stick Busy from raw DB
                   onlineStatus: u.onlineStatus || 'offline',
                 };
@@ -2951,7 +3021,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               periodCloseUtcTime: (data as any).period_close_utc_time ?? prev.periodCloseUtcTime,
               settlementEnabled: (data as any).settlement_enabled !== undefined ? (data as any).settlement_enabled : prev.settlementEnabled,
               profileVideoQuotaMb:
-                (data as any).r2_profile_video_quota_mb ?? prev.profileVideoQuotaMb ?? 30,
+                (data as any).r2_profile_video_quota_mb ?? prev.profileVideoQuotaMb ?? 100,
               r2MaxVideoSizeMb:
                 (data as any).r2_max_video_size_mb ?? prev.r2MaxVideoSizeMb ?? 100,
               creatorTargetBronzeHours: (data as any).creator_target_bronze_hours ?? prev.creatorTargetBronzeHours,
@@ -4863,7 +4933,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return newUser;
   };
 
-  const updateUserProfile = async (userId: string, updates: Partial<UserProfile>): Promise<boolean> => {
+  const updateUserProfile = async (
+    userId: string,
+    updates: Partial<UserProfile>,
+    options?: { silentSuccess?: boolean }
+  ): Promise<boolean> => {
     let genderLockAttempted = false;
 
     const sanitizedUpdates: Partial<UserProfile> = { ...updates };
@@ -4918,6 +4992,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return false;
     }
 
+    const mediaSnapshot = {
+      gallery: targetBefore?.gallery,
+      galleryVideos: targetBefore?.galleryVideos,
+      avatarUrl: targetBefore?.avatarUrl,
+    };
+    const touchingMedia =
+      sanitizedUpdates.gallery !== undefined ||
+      sanitizedUpdates.galleryVideos !== undefined ||
+      sanitizedUpdates.avatarUrl !== undefined;
+
     const editingSelf = Boolean(
       userId === currentUserIdRef.current ||
       targetBefore?.id === currentUserIdRef.current ||
@@ -4950,18 +5034,59 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       ...sanitizedUpdates,
       ...(email ? { email } : {}),
     };
+    const silentSuccess = Boolean(options?.silentSuccess);
     const task = profileSaveChainRef.current.then(async () => {
       const saved = await persistUserProfileUpdate(userId, payload);
       if (saveGen !== profileSaveGenRef.current) return saved;
       if (!saved) {
+        if (touchingMedia && targetBefore) {
+          const revertPatch: Partial<UserProfile> = {};
+          if (sanitizedUpdates.gallery !== undefined) {
+            revertPatch.gallery = mediaSnapshot.gallery || [];
+          }
+          if (sanitizedUpdates.galleryVideos !== undefined) {
+            revertPatch.galleryVideos = mediaSnapshot.galleryVideos || [];
+          }
+          if (sanitizedUpdates.avatarUrl !== undefined) {
+            revertPatch.avatarUrl = mediaSnapshot.avatarUrl;
+          }
+          setUsers((prev) => {
+            const next = prev.map((u) => {
+              const isMatch =
+                u.id === userId ||
+                u.id === targetBefore.id ||
+                (targetBefore.email &&
+                  u.email &&
+                  u.email.toLowerCase().trim() === targetBefore.email.toLowerCase().trim());
+              if (!isMatch) return u;
+              return { ...u, ...revertPatch };
+            });
+            usersRef.current = next;
+            return next;
+          });
+          if (editingSelf && pendingSelfProfileRef.current) {
+            const cleared = { ...pendingSelfProfileRef.current.fields };
+            if (revertPatch.gallery !== undefined) delete cleared.gallery;
+            if (revertPatch.galleryVideos !== undefined) delete cleared.galleryVideos;
+            if (revertPatch.avatarUrl !== undefined) delete cleared.avatarUrl;
+            pendingSelfProfileRef.current =
+              Object.keys(cleared).length === 0
+                ? null
+                : { userId: pendingSelfProfileRef.current.userId, fields: cleared };
+          }
+        }
         showToast(
           'Profile Save Failed',
-          'Your changes are still on screen. Click Save again.',
+          touchingMedia
+            ? 'Upload may have reached storage, but your profile was not updated. Please try again.'
+            : 'Your changes are still on screen. Click Save again.',
           'error'
         );
         return false;
       }
-      showToast('Profile Updated', 'Changes saved successfully', 'success');
+      if (!silentSuccess) {
+        showToast('Profile Updated', 'Changes saved successfully', 'success');
+      }
       return true;
     });
     profileSaveChainRef.current = task.then(

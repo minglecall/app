@@ -206,7 +206,7 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
   useEffect(() => {
     setConfig((prev) => ({
       ...prev,
-      r2ProfileVideoQuotaMb: systemSettings.profileVideoQuotaMb ?? prev.r2ProfileVideoQuotaMb ?? 30,
+      r2ProfileVideoQuotaMb: systemSettings.profileVideoQuotaMb ?? prev.r2ProfileVideoQuotaMb ?? 100,
       r2MaxVideoSizeMb: systemSettings.r2MaxVideoSizeMb ?? prev.r2MaxVideoSizeMb ?? 100,
     }));
   }, [systemSettings.profileVideoQuotaMb, systemSettings.r2MaxVideoSizeMb]);

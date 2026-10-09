@@ -39,6 +39,79 @@ function resolveUploadOwnerUserId(req: express.Request): string | null {
   return authId || null;
 }
 
+async function readRequestRawBody(req: express.Request, maxBytes: number): Promise<Buffer> {
+  if (Buffer.isBuffer((req as any).body)) return (req as any).body as Buffer;
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      throw new StorageValidationError(`File exceeds max upload size (${maxBytes} bytes)`, 413, 'FILE_TOO_LARGE', {
+        maxBytes,
+      });
+    }
+    chunks.push(buf);
+  }
+  return chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
+}
+
+function parseMultipartFormData(
+  buffer: Buffer,
+  contentType: string
+): {
+  fields: Record<string, string>;
+  file: { fieldName: string; filename: string; contentType: string; buffer: Buffer } | null;
+} {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(String(contentType || ''));
+  const boundary = (m && (m[1] || m[2]) || '').trim();
+  if (!boundary || !buffer.length) return { fields: {}, file: null };
+
+  const delim = Buffer.from(`--${boundary}`);
+  const fields: Record<string, string> = {};
+  let file: { fieldName: string; filename: string; contentType: string; buffer: Buffer } | null = null;
+
+  let start = buffer.indexOf(delim);
+  if (start < 0) return { fields, file };
+  start += delim.length;
+  if (buffer[start] === 13 && buffer[start + 1] === 10) start += 2;
+
+  while (start < buffer.length) {
+    const next = buffer.indexOf(delim, start);
+    const end = next >= 0 ? next : buffer.length;
+    let partEnd = end;
+    if (partEnd >= 2 && buffer[partEnd - 2] === 13 && buffer[partEnd - 1] === 10) {
+      partEnd -= 2;
+    }
+    const part = buffer.subarray(start, partEnd);
+    const headerSep = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerSep >= 0) {
+      const headerText = part.subarray(0, headerSep).toString('utf8');
+      const body = part.subarray(headerSep + 4);
+      const nameMatch = /name="([^"]+)"/i.exec(headerText);
+      const filenameMatch = /filename="([^"]*)"/i.exec(headerText);
+      const name = nameMatch ? nameMatch[1] : '';
+      if (filenameMatch && name) {
+        const ctMatch = /Content-Type:\s*([^\r\n]+)/i.exec(headerText);
+        file = {
+          fieldName: name,
+          filename: filenameMatch[1] || 'upload.bin',
+          contentType: (ctMatch && ctMatch[1].trim()) || 'application/octet-stream',
+          buffer: Buffer.from(body),
+        };
+      } else if (name) {
+        fields[name] = body.toString('utf8');
+      }
+    }
+    if (next < 0) break;
+    start = next + delim.length;
+    if (buffer[start] === 45 && buffer[start + 1] === 45) break;
+    if (buffer[start] === 13 && buffer[start + 1] === 10) start += 2;
+  }
+
+  return { fields, file };
+}
+
 function isAdminRequest(req: express.Request): boolean {
   const profile = (req as any).profile;
   const appRole = (req as any).user?.app_metadata?.role;
@@ -111,46 +184,68 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
     }
   });
 
-  // Fallback Base64 / Binary server upload directly to R2 and memory cache
+  // Fallback multipart (preferred) or base64 JSON when browser PUT/CORS fails
   router.post('/upload', requireAuth, async (req, res) => {
     try {
-      const { filename, contentType, base64Data, category } = req.body || {};
-      if (!base64Data) return res.status(400).json({ success: false, error: 'base64Data is required' });
-
       const ownerUserId = resolveUploadOwnerUserId(req);
       if (!ownerUserId) {
         return res.status(401).json({ success: false, error: 'Authenticated user is required for storage uploads' });
       }
 
-      const categoryHint = isAllowedUploadCategory(category) ? category : 'chat_media';
-      const maxBytes = getCategoryMaxBytes(categoryHint);
-      // Reject oversized base64 before allocating a large buffer (~4/3 inflation + data-URL prefix)
-      if (String(base64Data).length > maxBytes * 2 + 512) {
-        throw new StorageValidationError('Base64 payload exceeds allowed size', 400, 'BASE64_TOO_LARGE', {
-          maxBytes,
-        });
-      }
-
-      const matches = String(base64Data).match(/^data:([A-Za-z0-9.+\/-]+);base64,(.+)$/);
+      const contentTypeHeader = String(req.headers['content-type'] || '');
       let buffer: Buffer;
-      let mimeFromDataUrl = '';
-      if (matches) {
-        mimeFromDataUrl = matches[1];
-        buffer = Buffer.from(matches[2], 'base64');
+      let filename = 'upload.bin';
+      let mimeHint = 'application/octet-stream';
+      let category: string = 'chat_media';
+
+      if (/multipart\/form-data/i.test(contentTypeHeader)) {
+        const raw = await readRequestRawBody(req, 26 * 1024 * 1024);
+        const parsed = parseMultipartFormData(raw, contentTypeHeader);
+        if (!parsed.file?.buffer?.length) {
+          return res.status(400).json({ success: false, error: 'file field is required' });
+        }
+        buffer = parsed.file.buffer;
+        filename = String(parsed.fields.filename || parsed.file.filename || 'upload.bin').trim() || 'upload.bin';
+        mimeHint =
+          String(parsed.fields.contentType || parsed.file.contentType || 'application/octet-stream') ||
+          'application/octet-stream';
+        category = String(parsed.fields.category || 'chat_media');
       } else {
-        buffer = Buffer.from(String(base64Data), 'base64');
+        const { filename: bodyFilename, contentType, base64Data, category: bodyCategory } = req.body || {};
+        if (!base64Data) {
+          return res.status(400).json({ success: false, error: 'multipart file or base64Data is required' });
+        }
+
+        const categoryHint = isAllowedUploadCategory(bodyCategory) ? bodyCategory : 'chat_media';
+        const maxBytes = getCategoryMaxBytes(categoryHint);
+        if (String(base64Data).length > maxBytes * 2 + 512) {
+          throw new StorageValidationError('Base64 payload exceeds allowed size', 400, 'BASE64_TOO_LARGE', {
+            maxBytes,
+          });
+        }
+
+        const matches = String(base64Data).match(/^data:([A-Za-z0-9.+\/-]+);base64,(.+)$/);
+        let mimeFromDataUrl = '';
+        if (matches) {
+          mimeFromDataUrl = matches[1];
+          buffer = Buffer.from(matches[2], 'base64');
+        } else {
+          buffer = Buffer.from(String(base64Data), 'base64');
+        }
+        filename = String(bodyFilename || 'upload.jpg').trim() || 'upload.jpg';
+        mimeHint = contentType || mimeFromDataUrl || 'image/jpeg';
+        category = bodyCategory || 'chat_media';
       }
 
       if (!buffer.length) {
         return res.status(400).json({ success: false, error: 'Uploaded file payload is empty' });
       }
 
-      const mimeHint = contentType || mimeFromDataUrl || 'image/jpeg';
       const validated = validateUploadRequest({
-        filename: filename || 'upload.jpg',
+        filename,
         contentType: mimeHint,
         fileSize: buffer.length,
-        category: category || 'chat_media',
+        category,
         ownerUserId,
       });
 

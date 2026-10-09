@@ -433,7 +433,7 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
     r2_max_image_size_mb INT DEFAULT 15,
     r2_max_video_size_mb INT DEFAULT 100,
     -- Per-user total storage quota for profile gallery videos (all videos combined)
-    r2_profile_video_quota_mb INT DEFAULT 30,
+    r2_profile_video_quota_mb INT DEFAULT 100,
     r2_allowed_mime_types TEXT[] DEFAULT '{"image/jpeg","image/png","image/webp","video/mp4","video/webm","video/quicktime"}',
     r2_cdn_cache_ttl_seconds INT DEFAULT 86400,
     smtp_host TEXT DEFAULT '',
@@ -515,9 +515,13 @@ ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS streak_boost_duration
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS min_daily_active_hours_for_streak NUMERIC DEFAULT 2.0;
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS period_close_utc_time TEXT DEFAULT '00:00';
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS settlement_enabled BOOLEAN DEFAULT true;
-ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS r2_profile_video_quota_mb INT DEFAULT 30;
+ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS r2_profile_video_quota_mb INT DEFAULT 100;
 COMMENT ON COLUMN public.system_configs.r2_profile_video_quota_mb IS
-  'Per-user total MB quota for all profile gallery videos combined. Admin-configurable; default 30.';
+  'Per-user total MB quota for all profile gallery videos combined. Admin-configurable; default 100.';
+-- Ensure existing installs pick up the higher multi-video quota when still on the old default.
+UPDATE public.system_configs
+SET r2_profile_video_quota_mb = 100
+WHERE r2_profile_video_quota_mb IS NULL OR r2_profile_video_quota_mb = 30;
 -- Phase 1 host true-up: base share on live burns; target share at period close
 ALTER TABLE public.system_configs ADD COLUMN IF NOT EXISTS female_host_target_share_percent NUMERIC DEFAULT 40;
 COMMENT ON COLUMN public.system_configs.female_host_share_percent IS

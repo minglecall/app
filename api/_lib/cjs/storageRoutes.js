@@ -190,6 +190,82 @@ function decodeBase64Payload(base64Data) {
   };
 }
 
+async function readRawBody(req, maxBytes) {
+  if (Buffer.isBuffer(req.body)) return req.body;
+  if (typeof req.body === 'string') return Buffer.from(req.body);
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      const err = new Error(`File exceeds max upload size (${maxBytes} bytes)`);
+      err.code = 'FILE_TOO_LARGE';
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(buf);
+  }
+  return chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
+}
+
+/**
+ * Minimal multipart/form-data parser for a single file + text fields.
+ * Avoids FileReader/base64 on the client for the CORS fallback path.
+ */
+function parseMultipartFormData(buffer, contentType) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(String(contentType || ''));
+  const boundary = (m && (m[1] || m[2]) || '').trim();
+  if (!boundary || !buffer.length) return { fields: {}, file: null };
+
+  const delim = Buffer.from(`--${boundary}`);
+  const fields = {};
+  let file = null;
+
+  let start = buffer.indexOf(delim);
+  if (start < 0) return { fields, file };
+  start += delim.length;
+  // Skip leading CRLF after first boundary
+  if (buffer[start] === 13 && buffer[start + 1] === 10) start += 2;
+
+  while (start < buffer.length) {
+    const next = buffer.indexOf(delim, start);
+    const end = next >= 0 ? next : buffer.length;
+    // Part ends with CRLF before boundary
+    let partEnd = end;
+    if (partEnd >= 2 && buffer[partEnd - 2] === 13 && buffer[partEnd - 1] === 10) {
+      partEnd -= 2;
+    }
+    const part = buffer.subarray(start, partEnd);
+    const headerSep = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerSep >= 0) {
+      const headerText = part.subarray(0, headerSep).toString('utf8');
+      const body = part.subarray(headerSep + 4);
+      const nameMatch = /name="([^"]+)"/i.exec(headerText);
+      const filenameMatch = /filename="([^"]*)"/i.exec(headerText);
+      const name = nameMatch ? nameMatch[1] : '';
+      if (filenameMatch && name) {
+        const ctMatch = /Content-Type:\s*([^\r\n]+)/i.exec(headerText);
+        file = {
+          fieldName: name,
+          filename: filenameMatch[1] || 'upload.bin',
+          contentType: (ctMatch && ctMatch[1].trim()) || 'application/octet-stream',
+          buffer: Buffer.from(body),
+        };
+      } else if (name) {
+        fields[name] = body.toString('utf8');
+      }
+    }
+    if (next < 0) break;
+    start = next + delim.length;
+    // Closing boundary ends with --
+    if (buffer[start] === 45 && buffer[start + 1] === 45) break;
+    if (buffer[start] === 13 && buffer[start + 1] === 10) start += 2;
+  }
+
+  return { fields, file };
+}
+
 const PUBLIC_MEDIA_CATEGORIES = new Set([
   'avatar',
   'gallery',
@@ -484,7 +560,7 @@ async function handleStorage(path, req, res) {
     });
   }
 
-  // Server-side base64 upload fallback (used when browser PUT/CORS fails)
+  // Server-side upload fallback (multipart preferred; base64 JSON still accepted)
   if (path === 'storage/upload' && req.method === 'POST') {
     const auth = await requireAuth(req);
     if (auth.ok === false) {
@@ -505,37 +581,75 @@ async function handleStorage(path, req, res) {
       });
     }
 
-    const body = await readJsonBody(req);
-    const base64Data = body && body.base64Data;
-    if (!base64Data) {
-      return send(res, 400, { success: false, error: 'base64Data is required' });
-    }
+    const contentTypeHeader = String(
+      req.headers['content-type'] || req.headers['Content-Type'] || ''
+    );
+    let buffer;
+    let filename = 'upload.bin';
+    let contentType = 'application/octet-stream';
+    let category = 'chat_media';
 
-    // Reject oversized base64 before allocating a large buffer (~4/3 inflation)
-    if (String(base64Data).length > MAX_UPLOAD_BYTES * 2 + 512) {
-      return send(res, 400, {
+    try {
+      if (/multipart\/form-data/i.test(contentTypeHeader)) {
+        // Multipart overhead + file; keep under Vercel body limits
+        const raw = await readRawBody(req, MAX_UPLOAD_BYTES + 256 * 1024);
+        const parsed = parseMultipartFormData(raw, contentTypeHeader);
+        if (!parsed.file || !parsed.file.buffer || !parsed.file.buffer.length) {
+          return send(res, 400, { success: false, error: 'file field is required' });
+        }
+        buffer = parsed.file.buffer;
+        filename =
+          String(parsed.fields.filename || parsed.file.filename || 'upload.bin').trim() ||
+          'upload.bin';
+        contentType =
+          String(
+            parsed.fields.contentType || parsed.file.contentType || 'application/octet-stream'
+          ) || 'application/octet-stream';
+        category = parsed.fields.category || 'chat_media';
+      } else {
+        const body = await readJsonBody(req);
+        const base64Data = body && body.base64Data;
+        if (!base64Data) {
+          return send(res, 400, {
+            success: false,
+            error: 'multipart file or base64Data is required',
+          });
+        }
+        if (String(base64Data).length > MAX_UPLOAD_BYTES * 2 + 512) {
+          return send(res, 413, {
+            success: false,
+            error: `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`,
+            code: 'FILE_TOO_LARGE',
+          });
+        }
+        const decoded = decodeBase64Payload(base64Data);
+        buffer = decoded.buffer;
+        filename = String((body && body.filename) || 'upload.jpg').trim() || 'upload.jpg';
+        contentType =
+          String((body && body.contentType) || decoded.mimeFromDataUrl || 'image/jpeg') ||
+          'image/jpeg';
+        category = (body && body.category) || 'chat_media';
+      }
+    } catch (parseErr) {
+      const status = parseErr && parseErr.status ? parseErr.status : 400;
+      return send(res, status, {
         success: false,
-        error: `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`,
-        code: 'FILE_TOO_LARGE',
+        error: (parseErr && parseErr.message) || 'Failed to parse upload body',
+        code: (parseErr && parseErr.code) || undefined,
       });
     }
 
-    const { mimeFromDataUrl, buffer } = decodeBase64Payload(base64Data);
-    if (!buffer.length) {
+    if (!buffer || !buffer.length) {
       return send(res, 400, { success: false, error: 'Uploaded file payload is empty' });
     }
     if (buffer.length > MAX_UPLOAD_BYTES) {
-      return send(res, 400, {
+      return send(res, 413, {
         success: false,
         error: `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`,
         code: 'FILE_TOO_LARGE',
       });
     }
 
-    const filename = String((body && body.filename) || 'upload.jpg').trim() || 'upload.jpg';
-    const contentType =
-      String((body && body.contentType) || mimeFromDataUrl || 'image/jpeg') || 'image/jpeg';
-    const category = (body && body.category) || 'chat_media';
     const storageKey = buildStorageKey(auth.profileId, category, filename);
 
     try {
