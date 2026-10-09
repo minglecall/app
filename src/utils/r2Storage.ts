@@ -64,18 +64,31 @@ function isStorageNotConfiguredResponse(status: number, payload: any): boolean {
   );
 }
 
+/** Prefer authenticated media proxy when we have a storage key (reliable for <video>). */
+export function mediaProxyUrl(storageKey: string): string {
+  return `/api/storage/media?key=${encodeURIComponent(storageKey)}`;
+}
+
 // Normalize any media URL to ensure raw authenticated S3 endpoints are routed via proxy
 export function normalizeMediaUrl(url: string | undefined | null, storageKey?: string): string {
+  const key = storageKey ? String(storageKey).trim() : '';
+  if ((!url || !String(url).trim()) && key) {
+    return mediaProxyUrl(key);
+  }
   if (!url) return '';
   const safeUrl = String(url);
   if (safeUrl.startsWith('blob:') || safeUrl.startsWith('data:')) return safeUrl;
+  // Prefer same-origin proxy whenever we have a key — reliable for <video> on mobile.
+  if (key && key.startsWith('uploads/')) {
+    return mediaProxyUrl(key);
+  }
   if (safeUrl.includes('.r2.cloudflarestorage.com')) {
     const parts = safeUrl.split('.r2.cloudflarestorage.com/');
     if (parts[1]) {
       const rawPath = parts[1];
       const match = rawPath.match(/uploads\/.+$/);
-      const key = storageKey || (match ? match[0] : rawPath);
-      return `/api/storage/media?key=${encodeURIComponent(key)}`;
+      const resolvedKey = key || (match ? match[0] : rawPath);
+      return mediaProxyUrl(resolvedKey);
     }
   }
   return safeUrl;
@@ -264,10 +277,10 @@ export async function uploadMediaDirectlyToR2(
       const durationMs = Math.round(performance.now() - startTime);
 
       return {
-        publicUrl: normalizeMediaUrl(publicUrl, storageKey),
+        publicUrl: normalizeMediaUrl(publicUrl, storageKey) || (storageKey ? mediaProxyUrl(storageKey) : ''),
         storageKey,
         fileSize: file.size,
-        contentType: file.type,
+        contentType: contentType || file.type || 'application/octet-stream',
         durationMs,
       };
     } catch (putErr) {

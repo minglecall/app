@@ -150,6 +150,12 @@ function mapProfileRow(p) {
       p.avatar_url ||
       'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
     gallery: Array.isArray(p.gallery) ? p.gallery : [],
+    galleryVideos: Array.isArray(p.gallery_videos)
+      ? p.gallery_videos
+      : Array.isArray(p.galleryVideos)
+        ? p.galleryVideos
+        : [],
+    introVideoUrl: p.intro_video_url || p.introVideoUrl || undefined,
     isVerified: Boolean(p.is_verified),
     isOnboarded: p.is_onboarded !== false,
     onlineStatus: p.online_status || 'offline',

@@ -212,10 +212,9 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
         return res.status(404).send('Media object not found in storage');
       }
 
-      res.setHeader('Content-Type', streamData.contentType || 'image/jpeg');
-      if (streamData.contentLength) {
-        res.setHeader('Content-Length', streamData.contentLength.toString());
-      }
+      const contentType = streamData.contentType || 'application/octet-stream';
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Accept-Ranges', 'bytes');
       // Private media: shorter cache; public: long immutable CDN-style cache
       if (PRIVATE_MEDIA_CATEGORIES.has(category)) {
         res.setHeader('Cache-Control', 'private, max-age=3600');
@@ -223,12 +222,42 @@ export function createStorageRouter(_ctx: ServerRuntime): Router {
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }
 
-      if (Buffer.isBuffer(streamData.body)) {
-        return res.send(streamData.body);
-      } else if (streamData.body && typeof (streamData.body as any).pipe === 'function') {
-        return (streamData.body as any).pipe(res);
+      const body = streamData.body;
+      if (Buffer.isBuffer(body)) {
+        const total = Number(streamData.contentLength) || body.length;
+        const rangeHeader = String(req.headers.range || '').trim();
+        // HTML5 <video> on mobile often requires HTTP Range (206) to show a preview.
+        if (rangeHeader && /^bytes=/.test(rangeHeader)) {
+          const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+          if (m) {
+            let start = m[1] === '' ? 0 : parseInt(m[1], 10);
+            let end = m[2] === '' ? total - 1 : parseInt(m[2], 10);
+            if (!Number.isFinite(start) || start < 0) start = 0;
+            if (!Number.isFinite(end) || end >= total) end = total - 1;
+            if (start > end || start >= total) {
+              res.status(416);
+              res.setHeader('Content-Range', `bytes */${total}`);
+              return res.end();
+            }
+            const slice = body.subarray(start, end + 1);
+            res.status(206);
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+            res.setHeader('Content-Length', String(slice.length));
+            return res.send(slice);
+          }
+        }
+        res.setHeader('Content-Length', String(total));
+        return res.send(body);
+      } else if (body && typeof (body as any).pipe === 'function') {
+        if (streamData.contentLength) {
+          res.setHeader('Content-Length', streamData.contentLength.toString());
+        }
+        return (body as any).pipe(res);
       } else {
-        return res.send(streamData.body);
+        if (streamData.contentLength) {
+          res.setHeader('Content-Length', streamData.contentLength.toString());
+        }
+        return res.send(body);
       }
     } catch (err: any) {
       console.error('[Storage Media Proxy] Error streaming key:', err);

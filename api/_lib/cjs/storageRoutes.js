@@ -40,8 +40,11 @@ function buildStorageKey(userId, category, filename) {
 }
 
 function publicObjectUrl(r2, storageKey) {
-  if (r2.publicUrl) return `${r2.publicUrl}/${storageKey}`;
-  return `https://${r2.accountId}.r2.cloudflarestorage.com/${r2.bucketName}/${storageKey}`;
+  // Prefer CDN when configured; otherwise same-origin media proxy (required for <video>).
+  if (r2.publicUrl && !String(r2.publicUrl).includes('.r2.cloudflarestorage.com')) {
+    return `${r2.publicUrl}/${storageKey}`;
+  }
+  return `/api/storage/media?key=${encodeURIComponent(storageKey)}`;
 }
 
 /**
@@ -358,12 +361,43 @@ async function handleStorage(path, req, res) {
         res.end('Media object not found in storage');
         return true;
       }
-      sendBinary(res, 200, streamData.body, {
-        'Content-Type': streamData.contentType || 'image/jpeg',
-        'Content-Length': String(streamData.contentLength || streamData.body.length),
-        'Cache-Control': PRIVATE_MEDIA_CATEGORIES.has(category)
-          ? 'private, max-age=3600'
-          : 'public, max-age=31536000, immutable',
+      const body = streamData.body;
+      const total = Number(streamData.contentLength || body.length) || body.length;
+      const contentType = streamData.contentType || 'application/octet-stream';
+      const cacheControl = PRIVATE_MEDIA_CATEGORIES.has(category)
+        ? 'private, max-age=3600'
+        : 'public, max-age=31536000, immutable';
+      const rangeHeader = String((req.headers && req.headers.range) || '').trim();
+      // HTML5 <video> on mobile often requires HTTP Range (206) to show a preview.
+      if (rangeHeader && /^bytes=/.test(rangeHeader) && Buffer.isBuffer(body)) {
+        const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+        if (m) {
+          let start = m[1] === '' ? 0 : parseInt(m[1], 10);
+          let end = m[2] === '' ? total - 1 : parseInt(m[2], 10);
+          if (!Number.isFinite(start) || start < 0) start = 0;
+          if (!Number.isFinite(end) || end >= total) end = total - 1;
+          if (start > end || start >= total) {
+            res.statusCode = 416;
+            res.setHeader('Content-Range', `bytes */${total}`);
+            res.end();
+            return true;
+          }
+          const slice = body.subarray(start, end + 1);
+          sendBinary(res, 206, slice, {
+            'Content-Type': contentType,
+            'Content-Length': String(slice.length),
+            'Content-Range': `bytes ${start}-${end}/${total}`,
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': cacheControl,
+          });
+          return true;
+        }
+      }
+      sendBinary(res, 200, body, {
+        'Content-Type': contentType,
+        'Content-Length': String(total),
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': cacheControl,
       });
       return true;
     } catch (err) {

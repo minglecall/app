@@ -846,6 +846,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     'interestedIn',
     'tags',
     'gallery',
+    'galleryVideos',
+    'introVideoUrl',
     'exactLocation',
     'isUsingMockLocation',
     'mockLocationCity',
@@ -2762,6 +2764,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   (liveEmail && u.email && u.email.toLowerCase().trim() === liveEmail);
                 if (!isMatch) return u;
                 const isSelf = isSelfProfileRow(u);
+                const incomingVideos = Array.isArray(liveProfile.galleryVideos)
+                  ? liveProfile.galleryVideos
+                  : undefined;
                 const merged = {
                   ...u,
                   ...liveProfile,
@@ -2770,6 +2775,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     liveProfile.coinBalance !== undefined ? liveProfile.coinBalance : u.coinBalance,
                   earningsCoins:
                     liveProfile.earningsCoins !== undefined ? liveProfile.earningsCoins : u.earningsCoins,
+                  // Keep local gallery videos if remote payload is empty (column missing / stale sync).
+                  galleryVideos:
+                    incomingVideos && incomingVideos.length > 0
+                      ? incomingVideos
+                      : Array.isArray(u.galleryVideos) && u.galleryVideos.length > 0
+                        ? u.galleryVideos
+                        : incomingVideos || u.galleryVideos || [],
                   // Presence heartbeat owns onlineStatus — never re-stick Busy from raw DB
                   onlineStatus: u.onlineStatus || 'offline',
                 };
@@ -3749,6 +3761,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 if (!resolvedId) {
                   return prev;
                 }
+                const incomingWsVideos = Array.isArray(incoming.galleryVideos)
+                  ? incoming.galleryVideos
+                  : undefined;
                 let mergedUser: UserProfile = {
                   ...(prior || {}),
                   ...incoming,
@@ -3761,6 +3776,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     incoming.earningsCoins !== undefined
                       ? incoming.earningsCoins
                       : prior?.earningsCoins ?? 0,
+                  galleryVideos:
+                    incomingWsVideos && incomingWsVideos.length > 0
+                      ? incomingWsVideos
+                      : Array.isArray(prior?.galleryVideos) && prior!.galleryVideos!.length > 0
+                        ? prior!.galleryVideos!
+                        : incomingWsVideos || prior?.galleryVideos || [],
                   // Presence map owns status — ignore sticky busy on user broadcast payloads
                   onlineStatus: prior?.onlineStatus || 'offline',
                 };
@@ -4857,9 +4878,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
     }
     if (sanitizedUpdates.galleryVideos) {
-      sanitizedUpdates.galleryVideos = sanitizedUpdates.galleryVideos.filter(
-        (v) => v?.url && !v.url.startsWith('blob:') && !v.url.startsWith('data:')
-      );
+      sanitizedUpdates.galleryVideos = sanitizedUpdates.galleryVideos
+        .map((v) => {
+          if (!v) return null;
+          const storageKey = String(v.storageKey || '').trim() || undefined;
+          let url = String(v.url || '').trim();
+          if (url.startsWith('blob:') || url.startsWith('data:')) url = '';
+          if (!url && storageKey) {
+            url = `/api/storage/media?key=${encodeURIComponent(storageKey)}`;
+          }
+          if (!url && !storageKey) return null;
+          return {
+            ...v,
+            url: url || `/api/storage/media?key=${encodeURIComponent(storageKey!)}`,
+            storageKey,
+            sizeBytes: Number(v.sizeBytes) > 0 ? Number(v.sizeBytes) : 0,
+          };
+        })
+        .filter(Boolean) as typeof sanitizedUpdates.galleryVideos;
     }
 
     const targetBefore = usersRef.current.find(

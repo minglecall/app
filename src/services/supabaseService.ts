@@ -26,12 +26,16 @@ function normalizeGalleryVideos(raw: unknown): GalleryVideoItem[] {
   return arr
     .map((item: any) => {
       if (!item || typeof item !== 'object') return null;
-      const url = String(item.url || '').trim();
-      if (!url) return null;
+      const storageKey = String(item.storageKey || item.storage_key || '').trim() || undefined;
+      let url = String(item.url || '').trim();
+      if (!url && storageKey) {
+        url = `/api/storage/media?key=${encodeURIComponent(storageKey)}`;
+      }
+      if (!url && !storageKey) return null;
       const sizeBytes = Number(item.sizeBytes ?? item.size_bytes ?? 0);
       return {
         url,
-        storageKey: item.storageKey || item.storage_key || undefined,
+        storageKey,
         sizeBytes: Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : 0,
         contentType: item.contentType || item.content_type || undefined,
         createdAt: item.createdAt || item.created_at || undefined,

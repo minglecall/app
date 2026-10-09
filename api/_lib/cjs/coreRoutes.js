@@ -1277,6 +1277,8 @@ function profilePayloadFromBody(body, auth) {
     spoken_languages: pick('spokenLanguages', 'spoken_languages'),
     avatar_url: pick('avatarUrl', 'avatar_url'),
     gallery: raw.gallery,
+    gallery_videos: pick('galleryVideos', 'gallery_videos'),
+    intro_video_url: pick('introVideoUrl', 'intro_video_url'),
     latitude:
       raw.exactLocation && raw.exactLocation.latitude !== undefined
         ? raw.exactLocation.latitude

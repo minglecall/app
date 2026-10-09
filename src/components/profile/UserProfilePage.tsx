@@ -196,13 +196,49 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
   const [videoUploadProgress, setVideoUploadProgress] = useState(0);
   const videoFileInputRef = useRef<HTMLInputElement>(null);
+  /** Optimistic gallery so quota + preview update immediately (survives sync races). */
+  const [localGalleryVideos, setLocalGalleryVideos] = useState<GalleryVideoItem[] | null>(null);
+  /** Blob object URLs keyed by storageKey for instant preview before proxy is ready. */
+  const [videoBlobPreviews, setVideoBlobPreviews] = useState<Record<string, string>>({});
+  const videoBlobPreviewsRef = useRef(videoBlobPreviews);
+  videoBlobPreviewsRef.current = videoBlobPreviews;
 
   const profileVideoQuotaMb = Math.max(1, Number(systemSettings.profileVideoQuotaMb) || 30);
   const maxSingleVideoMb = Math.max(1, Number(systemSettings.r2MaxVideoSizeMb) || 100);
-  const galleryVideos = currentUser.galleryVideos || [];
+  const galleryVideos = localGalleryVideos ?? currentUser.galleryVideos ?? [];
   const usedVideoBytes = galleryVideos.reduce((sum, v) => sum + (Number(v.sizeBytes) || 0), 0);
   const quotaBytes = profileVideoQuotaMb * 1024 * 1024;
   const remainingVideoBytes = Math.max(0, quotaBytes - usedVideoBytes);
+
+  useEffect(() => {
+    if (!localGalleryVideos) return;
+    const fromUser = currentUser.galleryVideos || [];
+    const keyOf = (v: GalleryVideoItem) => String(v.storageKey || v.url || '');
+    const localKeys = localGalleryVideos.map(keyOf).join('|');
+    const userKeys = fromUser.map(keyOf).join('|');
+    // Drop optimistic overlay only once context matches exactly (add + remove safe).
+    if (localKeys === userKeys) {
+      setLocalGalleryVideos(null);
+    }
+  }, [currentUser.galleryVideos, localGalleryVideos]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(videoBlobPreviewsRef.current).forEach((u) => {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {
+          /* ignore */
+        }
+      });
+    };
+  }, []);
+
+  const resolveGalleryVideoSrc = (vid: GalleryVideoItem): string => {
+    const key = String(vid.storageKey || '').trim();
+    if (key && videoBlobPreviews[key]) return videoBlobPreviews[key];
+    return normalizeMediaUrl(vid.url, vid.storageKey) || (key ? `/api/storage/media?key=${encodeURIComponent(key)}` : '');
+  };
 
   // Direct file upload to Cloudflare R2
   const handleUploadAvatarFile = async (file: File) => {
@@ -293,7 +329,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     setVideoUploadProgress(0);
 
     try {
-      const nextVideos: GalleryVideoItem[] = [...(currentUser.galleryVideos || [])];
+      const nextVideos: GalleryVideoItem[] = [...(localGalleryVideos ?? currentUser.galleryVideos ?? [])];
       let used = nextVideos.reduce((s, v) => s + (Number(v.sizeBytes) || 0), 0);
       let uploaded = 0;
 
@@ -337,6 +373,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           uploadFile = new File([file], file.name, { type: inferred, lastModified: file.lastModified });
         }
 
+        const localBlob = URL.createObjectURL(file);
+
         const res = await uploadMediaDirectlyToR2({
           file: uploadFile,
           userId: currentUser.id,
@@ -344,18 +382,47 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           onProgress: (pct) => setVideoUploadProgress(pct),
         });
 
+        const durableUrl =
+          normalizeMediaUrl(res.publicUrl, res.storageKey) ||
+          (res.storageKey
+            ? `/api/storage/media?key=${encodeURIComponent(res.storageKey)}`
+            : res.publicUrl);
+
+        if (!durableUrl && !res.storageKey) {
+          try {
+            URL.revokeObjectURL(localBlob);
+          } catch {
+            /* ignore */
+          }
+          showToast('Upload Incomplete', `${file.name} uploaded but no playable URL was returned.`, 'warning');
+          continue;
+        }
+
+        if (res.storageKey) {
+          setVideoBlobPreviews((prev) => ({ ...prev, [res.storageKey]: localBlob }));
+        } else {
+          try {
+            URL.revokeObjectURL(localBlob);
+          } catch {
+            /* ignore */
+          }
+        }
+
         nextVideos.push({
-          url: res.publicUrl,
+          url: durableUrl,
           storageKey: res.storageKey,
           sizeBytes: res.fileSize || file.size,
-          contentType: res.contentType || file.type || 'video/mp4',
+          contentType: res.contentType || uploadFile.type || 'video/mp4',
           createdAt: new Date().toISOString(),
         });
         used += res.fileSize || file.size;
         uploaded += 1;
+        // Update UI immediately so quota meter + grid show this video.
+        setLocalGalleryVideos([...nextVideos]);
       }
 
       if (uploaded > 0) {
+        setLocalGalleryVideos(nextVideos);
         await updateUserProfile(currentUser.id, { galleryVideos: nextVideos });
         showToast(
           'Videos Added',
@@ -374,7 +441,22 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   };
 
   const handleRemoveGalleryVideo = (indexToRemove: number) => {
-    const next = (currentUser.galleryVideos || []).filter((_, i) => i !== indexToRemove);
+    const current = localGalleryVideos ?? currentUser.galleryVideos ?? [];
+    const removed = current[indexToRemove];
+    const next = current.filter((_, i) => i !== indexToRemove);
+    setLocalGalleryVideos(next);
+    if (removed?.storageKey && videoBlobPreviews[removed.storageKey]) {
+      try {
+        URL.revokeObjectURL(videoBlobPreviews[removed.storageKey]);
+      } catch {
+        /* ignore */
+      }
+      setVideoBlobPreviews((prev) => {
+        const copy = { ...prev };
+        delete copy[removed.storageKey!];
+        return copy;
+      });
+    }
     updateUserProfile(currentUser.id, { galleryVideos: next });
     showToast('Video Removed', 'Profile video gallery updated.', 'info');
   };
@@ -1839,7 +1921,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   className="relative rounded-2xl overflow-hidden border border-hairline bg-app-input shadow-md"
                 >
                   <video
-                    src={normalizeMediaUrl(vid.url, vid.storageKey)}
+                    src={resolveGalleryVideoSrc(vid)}
                     controls
                     playsInline
                     preload="metadata"
