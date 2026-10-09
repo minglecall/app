@@ -53,7 +53,13 @@ import {
   getUserEffectiveLocation,
 } from '../../utils/location';
 import { getCountryFlag } from '../../utils/flags';
-import { uploadMediaDirectlyToR2, normalizeMediaUrl, isPersistableMediaUrl } from '../../utils/r2Storage';
+import {
+  uploadMediaDirectlyToR2,
+  normalizeMediaUrl,
+  isPersistableMediaUrl,
+  snapshotFilesForUpload,
+  extractStorageKeyFromMediaUrl,
+} from '../../utils/r2Storage';
 import { getUserRoleLabel, getFemaleRoleMark } from '../../types';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { getFallbackAvatar } from '../../utils/avatars';
@@ -224,6 +230,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const [videoBlobPreviews, setVideoBlobPreviews] = useState<Record<string, string>>({});
   const videoBlobPreviewsRef = useRef(videoBlobPreviews);
   videoBlobPreviewsRef.current = videoBlobPreviews;
+  /** Blob previews for gallery photos keyed by durable URL (and storageKey when known). */
+  const [photoBlobPreviews, setPhotoBlobPreviews] = useState<Record<string, string>>({});
+  const photoBlobPreviewsRef = useRef(photoBlobPreviews);
+  photoBlobPreviewsRef.current = photoBlobPreviews;
 
   const profileVideoQuotaMb = Math.max(1, Number(systemSettings.profileVideoQuotaMb) || 100);
   const maxSingleVideoMb = Math.max(1, Number(systemSettings.r2MaxVideoSizeMb) || 100);
@@ -253,13 +263,31 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           /* ignore */
         }
       });
+      Object.values(photoBlobPreviewsRef.current).forEach((u) => {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {
+          /* ignore */
+        }
+      });
     };
   }, []);
 
   const resolveGalleryVideoSrc = (vid: GalleryVideoItem): string => {
     const key = String(vid.storageKey || '').trim();
     if (key && videoBlobPreviews[key]) return videoBlobPreviews[key];
+    const urlKey = String(vid.url || '').trim();
+    if (urlKey && videoBlobPreviews[urlKey]) return videoBlobPreviews[urlKey];
     return normalizeMediaUrl(vid.url, vid.storageKey) || (key ? `/api/storage/media?key=${encodeURIComponent(key)}` : '');
+  };
+
+  const resolveGalleryPhotoSrc = (url: string): string => {
+    const raw = String(url || '').trim();
+    if (!raw) return '';
+    if (photoBlobPreviews[raw]) return photoBlobPreviews[raw];
+    const key = extractStorageKeyFromMediaUrl(raw);
+    if (key && photoBlobPreviews[key]) return photoBlobPreviews[key];
+    return normalizeMediaUrl(raw, key) || raw;
   };
 
   const loadMyMoments = useCallback(async () => {
@@ -379,19 +407,40 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   };
 
   const handleAddGalleryPhotos = async (
-    items: { publicUrl: string; storageKey?: string }[] | string
+    items: { publicUrl: string; storageKey?: string; localPreviewUrl?: string }[] | string
   ) => {
-    const urls = (typeof items === 'string' ? [items] : items.map((i) => i.publicUrl))
-      .map((u) => String(u || '').trim())
-      .filter((u) => u && isPersistableMediaUrl(u));
-    if (!urls.length) {
+    const list =
+      typeof items === 'string'
+        ? [{ publicUrl: items }]
+        : Array.isArray(items)
+          ? items
+          : [];
+    const prepared = list
+      .map((i) => ({
+        publicUrl: String(i.publicUrl || '').trim(),
+        storageKey: String(i.storageKey || '').trim() || undefined,
+        localPreviewUrl: String(i.localPreviewUrl || '').trim() || undefined,
+      }))
+      .filter((i) => i.publicUrl && isPersistableMediaUrl(i.publicUrl));
+    if (!prepared.length) {
       showToast('Upload Incomplete', 'No durable photo URL was returned. Please try again.', 'error');
       return;
     }
 
+    // Keep local blob previews so 2nd+ tiles stay visible while CDN/proxy catches up.
+    setPhotoBlobPreviews((prev) => {
+      const next = { ...prev };
+      for (const item of prepared) {
+        if (!item.localPreviewUrl) continue;
+        next[item.publicUrl] = item.localPreviewUrl;
+        if (item.storageKey) next[item.storageKey] = item.localPreviewUrl;
+      }
+      return next;
+    });
+
     const currentGallery = latestSelfGallery();
     const seen = new Set(currentGallery);
-    const added = urls.filter((u) => !seen.has(u));
+    const added = prepared.map((i) => i.publicUrl).filter((u) => !seen.has(u));
     const updatedGallery = [...currentGallery, ...added];
     const saved = await updateUserProfile(currentUser.id, { gallery: updatedGallery }, {
       silentSuccess: true,
@@ -399,7 +448,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     if (saved) {
       showToast(
         'Gallery Updated',
-        `${added.length || urls.length} photo(s) saved to your gallery.`,
+        `${added.length || prepared.length} photo(s) saved to your gallery.`,
         'success'
       );
       setIsAddGalleryModalOpen(false);
@@ -428,7 +477,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const formatMb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 1 : 2);
 
   const handleUploadGalleryVideos = async (files: FileList | File[]) => {
-    const list = Array.from(files || []);
+    // Snapshot before any await — later FileList entries go stale on many devices.
+    const list = await snapshotFilesForUpload(files);
     if (!list.length) return;
 
     const allowed = new Set([
@@ -511,15 +561,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           continue;
         }
 
-        if (res.storageKey) {
-          setVideoBlobPreviews((prev) => ({ ...prev, [res.storageKey]: localBlob }));
-        } else {
-          try {
-            URL.revokeObjectURL(localBlob);
-          } catch {
-            /* ignore */
-          }
-        }
+        // Keep blob under storageKey and durable URL so every tile in a batch previews.
+        setVideoBlobPreviews((prev) => {
+          const next = { ...prev, [durableUrl]: localBlob };
+          if (res.storageKey) next[res.storageKey] = localBlob;
+          return next;
+        });
 
         nextVideos.push({
           url: durableUrl,
@@ -2001,13 +2048,23 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   : [currentUser.avatarUrl]
                 ).map((img, idx) => (
                   <div
-                    key={`photo-${idx}`}
+                    key={`photo-${extractStorageKeyFromMediaUrl(img) || img || idx}`}
                     className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
                   >
                     <img
-                      src={normalizeMediaUrl(img)}
+                      src={resolveGalleryPhotoSrc(img)}
                       alt="gallery"
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                      onError={(e) => {
+                        const el = e.currentTarget;
+                        const key = extractStorageKeyFromMediaUrl(img);
+                        const blob = (key && photoBlobPreviews[key]) || photoBlobPreviews[img];
+                        if (blob && el.src !== blob) {
+                          el.src = blob;
+                          return;
+                        }
+                        el.style.opacity = '0.35';
+                      }}
                     />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5">
                       <span className="text-[10px] text-app-heading font-mono font-bold">
@@ -2087,6 +2144,17 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                       playsInline
                       preload="metadata"
                       className="absolute inset-0 w-full h-full object-cover bg-black"
+                      onError={(e) => {
+                        const el = e.currentTarget;
+                        const key = String(vid.storageKey || '').trim();
+                        const blob =
+                          (key && videoBlobPreviews[key]) ||
+                          (vid.url && videoBlobPreviews[vid.url]) ||
+                          '';
+                        if (blob && el.src !== blob) {
+                          el.src = blob;
+                        }
+                      }}
                     />
                     <div className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/85 via-black/40 to-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5 pointer-events-none">
                       <span className="text-[10px] text-white font-mono font-bold truncate pr-2">

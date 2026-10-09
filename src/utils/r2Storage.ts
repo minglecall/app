@@ -89,6 +89,62 @@ export function mediaProxyUrl(storageKey: string): string {
   return `/api/storage/media?key=${encodeURIComponent(storageKey)}`;
 }
 
+/**
+ * Copy FileList entries into stable File objects before any await.
+ * Browsers (esp. mobile) often invalidate later FileList items after the first
+ * async upload, which produces blank/broken previews for the 2nd+ files.
+ */
+export async function snapshotFilesForUpload(files: FileList | File[] | null | undefined): Promise<File[]> {
+  const list = Array.from(files || []).filter(Boolean) as File[];
+  if (!list.length) return [];
+  return Promise.all(
+    list.map(async (file) => {
+      try {
+        const buffer = await file.arrayBuffer();
+        return new File([buffer], file.name || 'upload.bin', {
+          type: file.type || 'application/octet-stream',
+          lastModified: file.lastModified || Date.now(),
+        });
+      } catch {
+        // Last resort: shallow copy (still better than a live FileList handle)
+        return new File([file], file.name || 'upload.bin', {
+          type: file.type || 'application/octet-stream',
+          lastModified: file.lastModified || Date.now(),
+        });
+      }
+    })
+  );
+}
+
+/** Pull storage key from a same-origin media proxy URL when gallery only stored the URL. */
+export function extractStorageKeyFromMediaUrl(url?: string | null): string | undefined {
+  if (!url) return undefined;
+  const raw = String(url).trim();
+  if (!raw) return undefined;
+  try {
+    const base =
+      typeof window !== 'undefined' && window.location?.origin
+        ? window.location.origin
+        : 'http://localhost';
+    const u = new URL(raw, base);
+    if (u.pathname.includes('/api/storage/media')) {
+      const key = u.searchParams.get('key');
+      return key ? String(key).trim() : undefined;
+    }
+  } catch {
+    /* ignore */
+  }
+  const m = raw.match(/[?&]key=([^&]+)/);
+  if (m?.[1]) {
+    try {
+      return decodeURIComponent(m[1]).trim();
+    } catch {
+      return m[1].trim();
+    }
+  }
+  return undefined;
+}
+
 // Normalize any media URL to ensure raw authenticated S3 endpoints are routed via proxy
 export function normalizeMediaUrl(url: string | undefined | null, storageKey?: string): string {
   const key = storageKey ? String(storageKey).trim() : '';

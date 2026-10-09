@@ -9,7 +9,12 @@ import {
   Cloud,
   CheckCircle2,
 } from 'lucide-react';
-import { uploadMediaDirectlyToR2, normalizeMediaUrl, isPersistableMediaUrl } from '../../utils/r2Storage';
+import {
+  uploadMediaDirectlyToR2,
+  normalizeMediaUrl,
+  isPersistableMediaUrl,
+  snapshotFilesForUpload,
+} from '../../utils/r2Storage';
 import {
   FEMALE_PORTRAIT_AVATARS,
   MALE_PORTRAIT_AVATARS,
@@ -27,7 +32,9 @@ export interface UnifiedImageUploaderProps {
   currentImageUrl?: string;
   onImageUploaded: (publicUrl: string, storageKey?: string) => void;
   /** When multiple is true, called once with all durable URLs after the batch finishes. */
-  onImagesUploaded?: (items: { publicUrl: string; storageKey?: string }[]) => void;
+  onImagesUploaded?: (
+    items: { publicUrl: string; storageKey?: string; localPreviewUrl?: string }[]
+  ) => void;
   userId?: string;
   category?: 'avatar' | 'gallery' | 'chat_media' | 'moment' | 'verification';
   aspectRatio?: '1:1' | '4:5' | '16:9' | 'auto';
@@ -150,7 +157,8 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
   };
 
   const handleFilesSelect = async (files: FileList | File[]) => {
-    const list = Array.from(files || []).filter(Boolean);
+    // Snapshot immediately — FileList handles go stale after the first await on many devices.
+    const list = await snapshotFilesForUpload(files);
     if (!list.length) return;
     if (!multiple || list.length === 1) {
       await handleFileSelect(list[0]);
@@ -163,25 +171,34 @@ export const UnifiedImageUploader: React.FC<UnifiedImageUploaderProps> = ({
     setIsUploading(true);
     setUploadProgress(5);
 
-    const uploaded: { publicUrl: string; storageKey?: string }[] = [];
+    const uploaded: { publicUrl: string; storageKey?: string; localPreviewUrl?: string }[] = [];
     const errors: string[] = [];
 
     for (let i = 0; i < list.length; i++) {
       const file = list[i];
+      let objectUrl = '';
       try {
-        const objectUrl = URL.createObjectURL(file);
+        objectUrl = URL.createObjectURL(file);
         blobPreviewRef.current = objectUrl;
         setPreviewUrl(objectUrl);
         const item = await uploadOneFile(file, (percent) => {
           const overall = Math.round(((i + percent / 100) / list.length) * 100);
           setUploadProgress(Math.max(5, overall));
         });
-        uploaded.push(item);
-        revokeBlobPreview();
-        setPreviewUrl(normalizeMediaUrl(item.publicUrl, item.storageKey) || item.publicUrl);
+        // Keep per-item blob for the parent gallery grid; do not revoke here.
+        blobPreviewRef.current = null;
+        uploaded.push({ ...item, localPreviewUrl: objectUrl });
+        setPreviewUrl(normalizeMediaUrl(item.publicUrl, item.storageKey) || item.publicUrl || objectUrl);
       } catch (err: any) {
         errors.push(`${file.name}: ${err?.message || 'upload failed'}`);
-        revokeBlobPreview();
+        if (objectUrl) {
+          try {
+            URL.revokeObjectURL(objectUrl);
+          } catch {
+            /* ignore */
+          }
+        }
+        blobPreviewRef.current = null;
       }
     }
 
