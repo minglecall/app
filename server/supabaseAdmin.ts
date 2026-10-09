@@ -20,6 +20,48 @@ const DEFAULT_R2_PURGE_PREFIXES = [
   'uploads/media/',
 ];
 
+/** Fallback when profiles.gallery_videos column is not migrated yet (Vercel + local Express). */
+export const GALLERY_VIDEOS_SENTINEL_PREFIX = '__mc_gv1__:';
+
+export function encodeGalleryVideosSentinel(videos: unknown): string {
+  return `${GALLERY_VIDEOS_SENTINEL_PREFIX}${JSON.stringify(Array.isArray(videos) ? videos : [])}`;
+}
+
+export function splitGalleryPhotosAndVideos(gallery: unknown): {
+  photos: string[];
+  videos: any[] | null;
+} {
+  const photos: string[] = [];
+  let videos: any[] | null = null;
+  if (!Array.isArray(gallery)) return { photos, videos };
+  for (const item of gallery) {
+    const s = String(item || '');
+    if (s.startsWith(GALLERY_VIDEOS_SENTINEL_PREFIX)) {
+      try {
+        const parsed = JSON.parse(s.slice(GALLERY_VIDEOS_SENTINEL_PREFIX.length));
+        videos = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        videos = [];
+      }
+    } else if (s) {
+      photos.push(s);
+    }
+  }
+  return { photos, videos };
+}
+
+export function mergeGalleryWithVideoSentinel(photos: unknown, videos: unknown): string[] {
+  const cleanPhotos = (Array.isArray(photos) ? photos : [])
+    .map((u) => String(u || ''))
+    .filter((u) => u && !u.startsWith(GALLERY_VIDEOS_SENTINEL_PREFIX));
+  return [...cleanPhotos, encodeGalleryVideosSentinel(videos || [])];
+}
+
+function isMissingGalleryVideosColumnError(err: unknown): boolean {
+  const msg = String((err as any)?.message || err || '');
+  return /gallery_videos/i.test(msg) && (/column/i.test(msg) || /schema cache/i.test(msg));
+}
+
 let supabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
 // Never fall back to anon/public key — that would silently lose service-role privileges
 // and break RLS-bypass admin mutations (or worse, look "configured" while failing writes).
@@ -370,8 +412,23 @@ export async function upsertProfileAdmin(profile: any): Promise<{ success: boole
       tags: Array.isArray(profile.tags) ? profile.tags : [],
       spoken_languages: Array.isArray(profile.spokenLanguages) ? profile.spokenLanguages : ['English'],
       avatar_url: profile.avatarUrl || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
-      gallery: Array.isArray(profile.gallery) ? profile.gallery : [],
-      gallery_videos: Array.isArray(profile.galleryVideos) ? profile.galleryVideos : [],
+      gallery: (() => {
+        const split = splitGalleryPhotosAndVideos(
+          Array.isArray(profile.gallery) ? profile.gallery : []
+        );
+        const videos = Array.isArray(profile.galleryVideos)
+          ? profile.galleryVideos
+          : split.videos;
+        // Always keep sentinel when we know about videos (incl. from existing gallery).
+        if (Array.isArray(videos)) {
+          return mergeGalleryWithVideoSentinel(split.photos, videos);
+        }
+        return split.photos;
+      })(),
+      // Omit from upsert when undefined so missing-column DBs don't fail before prune.
+      ...(Array.isArray(profile.galleryVideos)
+        ? { gallery_videos: profile.galleryVideos }
+        : {}),
       intro_video_url: profile.introVideoUrl || null,
       verification_video_url: profile.verificationVideoUrl || null,
       is_verified: Boolean(profile.isVerified),
@@ -1637,6 +1694,30 @@ export async function updateUserProfileAdmin(
     if (updates.galleryVideos !== undefined || updates.gallery_videos !== undefined) {
       payload.gallery_videos = updates.galleryVideos ?? updates.gallery_videos ?? [];
     }
+
+    // Dual-write videos into gallery sentinel so production works without gallery_videos column.
+    const writingVideos = payload.gallery_videos !== undefined;
+    const writingGallery = payload.gallery !== undefined;
+    if (writingGallery || writingVideos) {
+      const { data: curGalleryRow } = await client
+        .from('profiles')
+        .select('gallery')
+        .eq('id', userId)
+        .maybeSingle();
+      const existingSplit = splitGalleryPhotosAndVideos(curGalleryRow?.gallery);
+      if (writingVideos) {
+        const photos = writingGallery
+          ? splitGalleryPhotosAndVideos(payload.gallery).photos
+          : existingSplit.photos;
+        payload.gallery = mergeGalleryWithVideoSentinel(photos, payload.gallery_videos);
+      } else if (writingGallery && Array.isArray(existingSplit.videos)) {
+        payload.gallery = mergeGalleryWithVideoSentinel(
+          splitGalleryPhotosAndVideos(payload.gallery).photos,
+          existingSplit.videos
+        );
+      }
+    }
+
     if (updates.introVideoUrl !== undefined || updates.intro_video_url !== undefined) {
       payload.intro_video_url = updates.introVideoUrl ?? updates.intro_video_url ?? null;
     }
@@ -1719,18 +1800,30 @@ export async function updateUserProfileAdmin(
 
     console.log(`[Supabase Admin] Updating profile columns for ${userId}:`, Object.keys(payload));
 
-    // Try update by id first
-    let res = await client.from('profiles').update(payload).eq('id', userId).select().maybeSingle();
+    const runUpdate = async (body: Record<string, any>) => {
+      let res = await client.from('profiles').update(body).eq('id', userId).select().maybeSingle();
+      if (!res.data && !res.error) {
+        res = await client.from('profiles').update(body).eq('auth_id', userId).select().maybeSingle();
+      }
+      const cleanEmail = (updates.email || body.email)
+        ? String(updates.email || body.email).toLowerCase().trim()
+        : null;
+      if (!res.data && !res.error && cleanEmail) {
+        res = await client.from('profiles').update(body).ilike('email', cleanEmail).select().maybeSingle();
+      }
+      return res;
+    };
 
-    // If 0 rows updated, try matching by auth_id
-    if (!res.data) {
-      res = await client.from('profiles').update(payload).eq('auth_id', userId).select().maybeSingle();
-    }
+    let res = await runUpdate(payload);
 
-    // If 0 rows updated and email provided, update by email match
-    const cleanEmail = (updates.email || payload.email) ? String(updates.email || payload.email).toLowerCase().trim() : null;
-    if (!res.data && cleanEmail) {
-      res = await client.from('profiles').update(payload).ilike('email', cleanEmail).select().maybeSingle();
+    // Column missing: drop gallery_videos and retry — gallery sentinel already set.
+    if (res.error && isMissingGalleryVideosColumnError(res.error) && writingVideos) {
+      const fallback = { ...payload };
+      delete fallback.gallery_videos;
+      console.warn(
+        '[Supabase Admin] gallery_videos column missing — saving via gallery sentinel'
+      );
+      res = await runUpdate(fallback);
     }
 
     if (res.error) {

@@ -199,12 +199,23 @@ async function startServer(): Promise<express.Express> {
       interestedIn: Array.isArray(p.interestedIn) ? p.interestedIn : (Array.isArray(p.interested_in) ? p.interested_in : []),
       tags: Array.isArray(p.tags) ? p.tags : [],
       avatarUrl: p.avatarUrl || p.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
-      gallery: Array.isArray(p.gallery) ? p.gallery : [],
-      galleryVideos: Array.isArray(p.galleryVideos)
-        ? p.galleryVideos
-        : Array.isArray(p.gallery_videos)
-          ? p.gallery_videos
-          : [],
+      gallery: (() => {
+        const raw = Array.isArray(p.gallery) ? p.gallery : [];
+        return raw.filter((u: any) => u && !String(u).startsWith('__mc_gv1__:'));
+      })(),
+      galleryVideos: (() => {
+        if (Array.isArray(p.galleryVideos) && p.galleryVideos.length) return p.galleryVideos;
+        if (Array.isArray(p.gallery_videos) && p.gallery_videos.length) return p.gallery_videos;
+        const raw = Array.isArray(p.gallery) ? p.gallery : [];
+        const sentinel = raw.find((u: any) => String(u || '').startsWith('__mc_gv1__:'));
+        if (!sentinel) return [];
+        try {
+          const parsed = JSON.parse(String(sentinel).slice('__mc_gv1__:'.length));
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      })(),
       introVideoUrl: p.introVideoUrl || p.intro_video_url || undefined,
       verificationVideoUrl: p.verificationVideoUrl || p.verification_video_url || undefined,
       isVerified: Boolean(p.isVerified ?? p.is_verified),

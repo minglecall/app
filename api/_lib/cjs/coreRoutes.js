@@ -1371,12 +1371,10 @@ async function handleSupabase(path, req, res) {
       return send(res, 403, { success: false, error: { message: 'Forbidden' } });
     }
 
-    // When gallery_videos column is absent, videos live in a gallery TEXT[] sentinel.
-    // Preserve that sentinel on photo-only writes; embed it when saving videos.
+    // Dual-write: always embed videos in gallery TEXT[] sentinel (works when
+    // gallery_videos column is missing on production). Prefer column when present.
     const writingVideos = payload.gallery_videos !== undefined;
     const writingGallery = payload.gallery !== undefined;
-    let videosForSentinelFallback;
-    let photosForSentinelFallback;
     if (writingGallery || writingVideos) {
       const { data: curGalleryRow } = await auth.client
         .from('profiles')
@@ -1385,10 +1383,10 @@ async function handleSupabase(path, req, res) {
         .maybeSingle();
       const existingSplit = splitGalleryPhotosAndVideos(curGalleryRow && curGalleryRow.gallery);
       if (writingVideos) {
-        photosForSentinelFallback = writingGallery
+        const photos = writingGallery
           ? splitGalleryPhotosAndVideos(payload.gallery).photos
           : existingSplit.photos;
-        videosForSentinelFallback = payload.gallery_videos;
+        payload.gallery = mergeGalleryWithVideoSentinel(photos, payload.gallery_videos);
       } else if (writingGallery && Array.isArray(existingSplit.videos)) {
         // Keep existing sentinel videos alongside the new photo list.
         payload.gallery = mergeGalleryWithVideoSentinel(
@@ -1404,14 +1402,9 @@ async function handleSupabase(path, req, res) {
       .select('*')
       .maybeSingle();
 
+    // Column missing: drop gallery_videos and retry — gallery sentinel already set.
     if (result.error && isMissingGalleryVideosColumnError(result.error)) {
       delete payload.gallery_videos;
-      if (videosForSentinelFallback !== undefined) {
-        payload.gallery = mergeGalleryWithVideoSentinel(
-          photosForSentinelFallback || [],
-          videosForSentinelFallback
-        );
-      }
       result = await auth.client
         .from('profiles')
         .upsert(payload, { onConflict: 'id', defaultToNull: false })
