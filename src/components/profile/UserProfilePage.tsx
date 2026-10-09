@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useApp } from '../../context/AppContext';
 import { getCoinUsdPeg, coinsToUsd } from '../../../shared/finance/fx';
 import {
@@ -38,11 +38,8 @@ import {
   EyeOff,
   Check,
   Shield,
-  Mail,
-  Upload,
   Cloud,
   Image as ImageIcon,
-  Copy,
   Plus,
   Trash2,
   X,
@@ -62,12 +59,16 @@ import { CountrySelector } from '../common/CountrySelector';
 import { LanguageSelector } from '../common/LanguageSelector';
 import { ZodiacSelector } from '../common/ZodiacSelector';
 import { InterestSelector } from '../common/InterestSelector';
-import { SvgFlag } from '../common/SvgFlag';
-import { ZodiacIcon } from '../common/ZodiacIcon';
 import { PasswordStrengthField } from '../auth/PasswordStrengthField';
 import { getPasswordPolicyError, isPasswordPolicyValid } from '../../../shared/passwordPolicy';
 import { authFetch } from '../../utils/apiClient';
 import { signOutSupabase } from '../../services/supabaseAuthService';
+import { ProfileShell } from './ProfileShell';
+import {
+  PROFILE_NAV_ITEMS,
+  ProfileNavItem,
+  ProfileSectionKey,
+} from './profileNavConfig';
 
 const PRESET_AVATARS = [
   'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
@@ -117,10 +118,56 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     ? Boolean(currentUser.teamLeaderId) || Boolean(systemSettings.enableRegularFemaleCoinEarning)
     : false;
 
-  // Navigation tab inside profile
-  const [profileSection, setProfileSection] = useState<
-    'overview' | 'location' | 'edit_bio' | 'rates_earnings' | 'media' | 'security'
-  >('overview');
+  // Navigation section inside profile shell
+  const [profileSection, setProfileSection] = useState<ProfileSectionKey>('overview');
+
+  const navItems = useMemo((): ProfileNavItem[] => {
+    return PROFILE_NAV_ITEMS.flatMap((item) => {
+      if (item.id === 'location') {
+        return [
+          {
+            ...item,
+            badge:
+              isFemale && currentUser.allowMockLocation ? 'MOCK READY' : undefined,
+          },
+        ];
+      }
+      if (item.id === 'rates_earnings') {
+        if (isFemale) {
+          if (!canEarnCoins) return [];
+          return [
+            {
+              ...item,
+              label: 'Earnings',
+              icon: 'DollarSign',
+              badge:
+                currentUser.totalLifetimeEarnedUSD != null
+                  ? `$${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)}`
+                  : undefined,
+            },
+          ];
+        }
+        return [{ ...item, label: 'Wallet', icon: 'Coins' }];
+      }
+      return [item];
+    });
+  }, [
+    isFemale,
+    canEarnCoins,
+    currentUser.allowMockLocation,
+    currentUser.totalLifetimeEarnedUSD,
+  ]);
+
+  const handleNavigateSection = useCallback(
+    (section: ProfileSectionKey) => {
+      if (section === 'rates_earnings' && isFemale && canEarnCoins && onNavigateToTab) {
+        onNavigateToTab('earnings');
+        return;
+      }
+      setProfileSection(section);
+    },
+    [isFemale, canEarnCoins, onNavigateToTab]
+  );
 
   // Password change state
   const [currentPasswordInput, setCurrentPasswordInput] = useState('');
@@ -569,8 +616,42 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     }
   };
 
+  const sidebarUserChip = (
+    <button
+      type="button"
+      onClick={() => handleNavigateSection('overview')}
+      className="w-full flex items-center gap-2.5 text-left rounded-xl p-1.5 hover:bg-slate-800/60 transition-colors cursor-pointer"
+    >
+      <img
+        src={normalizeMediaUrl(currentUser.avatarUrl)}
+        alt={currentUser.name}
+        onError={(e) => {
+          (e.target as HTMLImageElement).src = getFallbackAvatar(
+            currentUser.name,
+            currentUser.gender,
+            currentUser.role
+          );
+        }}
+        className="w-9 h-9 rounded-lg object-cover ring-2 ring-indigo-500/40 shrink-0"
+      />
+      <div className="min-w-0">
+        <div className="text-xs font-bold text-white truncate">{currentUser.name}</div>
+        <div className="text-[10px] text-slate-400 truncate font-mono">
+          {getUserRoleLabel(currentUser)}
+        </div>
+      </div>
+    </button>
+  );
+
   return (
-    <div id="dedicated-user-profile-page" className="max-w-6xl mx-auto px-3 sm:px-6 py-6 space-y-6">
+    <ProfileShell
+      activeSection={profileSection}
+      onNavigateSection={handleNavigateSection}
+      navItems={navItems}
+      brandName="My Profile"
+      brandSubtitle="Account"
+      sidebarUserChip={sidebarUserChip}
+    >
       {/* Hidden file input for fast avatar upload */}
       <input
         type="file"
@@ -580,80 +661,67 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
         className="hidden"
       />
 
-      {/* 1. Header Banner & Profile Hero Card */}
-      <div className="relative rounded-3xl bg-app-card border border-hairline p-5 sm:p-7 shadow-app-lg overflow-hidden">
-        {/* Glow ambient decoration */}
+      {/* Overview: compact identity + summary links */}
+      {profileSection === 'overview' && (
+      <div className="space-y-4">
+      {/* Slim identity hero */}
+      <div className="relative rounded-2xl bg-app-card border border-hairline p-4 sm:p-6 shadow-app-lg overflow-hidden">
         <div
-          className={`absolute -top-24 -right-24 w-80 h-80 rounded-full blur-3xl pointer-events-none opacity-20 ${
+          className={`absolute -top-20 -right-20 w-56 h-56 rounded-full blur-3xl pointer-events-none opacity-15 ${
             isFemale ? 'bg-pink-500' : 'bg-indigo-500'
           }`}
         />
 
-        <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-          {/* Avatar and Essential Info */}
-          <div className="flex items-start sm:items-center space-x-4 sm:space-x-5 min-w-0">
-            {/* Interactive Avatar with R2 Upload Trigger */}
-            <div className="relative shrink-0 group">
+        <div className="relative z-10 flex flex-col gap-4">
+          <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+            <button
+              type="button"
+              onClick={() => setIsAvatarModalOpen(true)}
+              disabled={isUploadingAvatar}
+              className="relative shrink-0 group cursor-pointer"
+              title="Change profile picture"
+            >
               <img
                 src={normalizeMediaUrl(currentUser.avatarUrl)}
                 alt={currentUser.name}
                 onError={(e) => {
-                  (e.target as HTMLImageElement).src = getFallbackAvatar(currentUser.name, currentUser.gender, currentUser.role);
+                  (e.target as HTMLImageElement).src = getFallbackAvatar(
+                    currentUser.name,
+                    currentUser.gender,
+                    currentUser.role
+                  );
                 }}
-                className={`w-20 h-20 sm:w-24 sm:h-24 rounded-2xl object-cover ring-4 shadow-xl transition-all group-hover:brightness-75 bg-app-input ${
+                className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl object-cover ring-2 shadow-lg bg-app-input ${
                   isFemale ? 'ring-pink-500/50' : 'ring-indigo-500/50'
                 }`}
               />
-
-              {/* Hover / Tap Overlay Button for Avatar Change */}
-              <button
-                type="button"
-                onClick={() => setIsAvatarModalOpen(true)}
-                disabled={isUploadingAvatar}
-                className="absolute inset-0 rounded-2xl flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white cursor-pointer backdrop-blur-[2px]"
-                title="Change profile picture (Uploads to Cloudflare R2)"
-              >
+              <span className="absolute inset-0 rounded-2xl flex items-center justify-center bg-black/50 text-white opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                 {isUploadingAvatar ? (
-                  <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
+                  <RefreshCw className="w-4 h-4 text-indigo-300 animate-spin" />
                 ) : (
-                  <>
-                    <Camera className="w-5 h-5 text-indigo-300 drop-shadow" />
-                    <span className="text-[10px] font-mono font-bold mt-1 text-app-heading">Change</span>
-                  </>
+                  <Camera className="w-4 h-4 text-indigo-200" />
                 )}
-              </button>
-
-              {/* Online status indicator */}
+              </span>
               <span
-                className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-[var(--app-card)] shadow-sm z-10 ${
+                className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 border-[var(--app-card)] z-10 ${
                   currentUser.onlineStatus === 'online'
                     ? 'bg-emerald-400'
                     : currentUser.onlineStatus === 'busy' || currentUser.onlineStatus === 'in_call'
-                    ? 'bg-amber-400'
-                    : 'bg-rose-500'
+                      ? 'bg-amber-400'
+                      : 'bg-rose-500'
                 }`}
                 title={`Status: ${currentUser.onlineStatus}`}
               />
+            </button>
 
-              {/* Cloudflare R2 Badge */}
-              <div
-                onClick={() => setIsAvatarModalOpen(true)}
-                className="absolute -top-1.5 -left-1.5 p-1 rounded-full bg-app-input border border-indigo-500/40 text-indigo-300 shadow-md cursor-pointer hover:scale-110 transition-transform"
-                title="Cloudflare R2 Synced Avatar"
-              >
-                <Cloud className="w-3 h-3" />
-              </div>
-            </div>
-
-            <div className="min-w-0 space-y-1.5">
-              <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                <h1 className="text-xl sm:text-2xl font-black text-app-heading tracking-tight truncate">
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-lg sm:text-xl font-black text-app-heading tracking-tight truncate">
                   {currentUser.name}
-                </h1>
+                </h2>
                 {currentUser.isVerified && (
-                  <span className="px-1.5 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/40 text-blue-300 font-mono text-[10px] font-bold flex items-center space-x-1">
-                    <span>✓</span>
-                    <span>Verified</span>
+                  <span className="px-1.5 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/40 text-blue-300 font-mono text-[10px] font-bold">
+                    Verified
                   </span>
                 )}
                 <span
@@ -661,561 +729,220 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     getFemaleRoleMark(currentUser) === 'creator'
                       ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
                       : getFemaleRoleMark(currentUser) === 'user'
-                      ? 'bg-pink-500/20 border-pink-500/40 text-pink-300'
-                      : getUserRoleLabel(currentUser) === 'Male User'
-                      ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
-                      : getUserRoleLabel(currentUser) === 'Team Leader'
-                      ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
-                      : getUserRoleLabel(currentUser) === 'Admin'
-                      ? 'bg-purple-500/20 border-purple-500/40 text-purple-300'
-                      : 'bg-teal-500/20 border-teal-500/40 text-teal-300'
+                        ? 'bg-pink-500/20 border-pink-500/40 text-pink-300'
+                        : getUserRoleLabel(currentUser) === 'Male User'
+                          ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                          : getUserRoleLabel(currentUser) === 'Team Leader'
+                            ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                            : getUserRoleLabel(currentUser) === 'Admin'
+                              ? 'bg-purple-500/20 border-purple-500/40 text-purple-300'
+                              : 'bg-teal-500/20 border-teal-500/40 text-teal-300'
                   }`}
                 >
                   {getUserRoleLabel(currentUser)}
-                  {getFemaleRoleMark(currentUser) === 'creator' && (
-                    <span className="opacity-80 normal-case">· Creator</span>
-                  )}
                 </span>
-
-                {/* Quick Avatar Change Button */}
-                <button
-                  type="button"
-                  onClick={() => setIsAvatarModalOpen(true)}
-                  className="px-2 py-0.5 rounded-lg bg-app-input hover:bg-brand-soft text-app-muted border border-hairline text-[10px] font-mono font-bold flex items-center space-x-1 cursor-pointer transition-all hover:text-app-heading"
-                >
-                  <Camera className="w-3 h-3 text-indigo-400" />
-                  <span>Change Photo</span>
-                </button>
               </div>
 
-              {/* User Email Display in Header with Copy button */}
-              <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                <div className="flex items-center space-x-1.5 px-2.5 py-0.5 rounded-lg bg-indigo-500/10 border border-indigo-500/25 text-indigo-200 text-xs font-mono">
-                  <Mail className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                  <span className="font-semibold truncate max-w-[200px] sm:max-w-xs">
-                    {currentUser.email || `${currentUser.id.slice(0, 8)}@livecall.app`}
-                  </span>
+              <div className="flex items-center gap-1 bg-app-input p-1 rounded-xl border border-hairline w-fit">
+                {(['online', 'busy', 'offline'] as const).map((status) => (
                   <button
+                    key={status}
                     type="button"
-                    onClick={handleCopyEmail}
-                    className="p-0.5 hover:text-app-heading transition-colors"
-                    title="Copy Email Address"
+                    onClick={() => toggleUserStatus(currentUser.id, status)}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold font-mono capitalize transition-all cursor-pointer ${
+                      currentUser.onlineStatus === status ||
+                      (status === 'busy' && currentUser.onlineStatus === 'in_call')
+                        ? status === 'online'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50'
+                          : status === 'busy'
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50'
+                            : 'bg-rose-500/20 text-rose-300 border border-rose-500/50'
+                        : 'text-app-muted hover:text-app-heading border border-transparent'
+                    }`}
                   >
-                    <Copy className="w-3 h-3" />
+                    {status}
                   </button>
-                </div>
+                ))}
               </div>
-
-              {/* Effective Location Banner & Zodiac with Vector Graphics */}
-              <div className="flex items-center space-x-2 text-xs text-app-muted flex-wrap gap-y-1">
-                <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-app-input border border-hairline">
-                  <MapPin className={`w-3.5 h-3.5 ${effectiveLocation.isMock ? 'text-pink-400' : 'text-emerald-400'}`} />
-                  <span className="font-semibold text-app-heading">
-                    {effectiveLocation.displayCity}
-                  </span>
-                  <SvgFlag
-                    countryCode={currentUser.countryCode}
-                    nationality={effectiveLocation.country || currentUser.nationality}
-                    size="md"
-                    rounded={true}
-                  />
-                  {effectiveLocation.isMock && (
-                    <span className="ml-1 px-1.5 py-0.2 rounded bg-pink-500/20 border border-pink-500/30 text-pink-300 text-[9px] font-mono font-bold">
-                      MOCK
-                    </span>
-                  )}
-                </div>
-
-                <div className="flex items-center space-x-2 text-app-muted font-mono text-xs">
-                  <span>Age: <strong className="text-app-heading">{currentUser.age || 24}</strong></span>
-                  {currentUser.zodiac && (
-                    <ZodiacIcon sign={currentUser.zodiac} withBadge={true} size="xs" />
-                  )}
-                </div>
-              </div>
-
-              <p className="text-xs text-app-muted line-clamp-2 max-w-xl pt-0.5">
-                {currentUser.bio || 'No bio yet. Click edit profile to add your introduction!'}
-              </p>
             </div>
           </div>
 
-          {/* Quick Action Badges (Gender Differentiated) */}
-          <div className="flex flex-row md:flex-col items-center md:items-end gap-2 shrink-0 w-full md:w-auto justify-between md:justify-start pt-3 md:pt-0 border-t md:border-t-0 border-hairline">
-            {/* Team Leader Agency Badge */}
-            {isTeamLeader && (
-              <div className="flex items-center space-x-2">
-                <div className="text-right">
-                  <div className="text-[10px] text-amber-400/90 font-mono uppercase font-bold">Agency Management</div>
-                  <div className="text-xs font-bold text-amber-200 font-mono">
-                    {currentUser.agencyName || 'Talent Agency'} • {currentUser.commissionPercent || 15}% Commission
-                  </div>
-                </div>
-                {onNavigateToTab && (
-                  <button
-                    onClick={() => onNavigateToTab('team_leader')}
-                    className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 font-mono font-bold text-xs transition-all shadow-sm flex items-center space-x-1 cursor-pointer"
-                  >
-                    <Crown className="w-3.5 h-3.5" />
-                    <span>Agency Hub</span>
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Female Host Stats / Earnings (opens host earnings dashboard) */}
-            {isFemale && (
-              <div className="flex items-center space-x-2">
-                {canEarnCoins ? (
-                  <>
-                    <div className="text-right">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Call Host Rate</div>
-                      <div className="text-sm font-black text-pink-300 font-mono flex items-center space-x-1">
-                        <span>🪙</span>
-                        <span>{systemSettings.coinBurnRatePerMin || 120} coins/min</span>
-                      </div>
-                    </div>
-                    {onNavigateToTab && (
-                      <button
-                        id="profile-host-earnings-amount-btn"
-                        type="button"
-                        onClick={() => onNavigateToTab('earnings')}
-                        className="px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 font-mono font-bold text-xs transition-all shadow-sm flex items-center space-x-1.5 cursor-pointer"
-                        title="Open host earnings dashboard"
-                      >
-                        <DollarSign className="w-3.5 h-3.5" />
-                        <span>${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)}</span>
-                      </button>
-                    )}
-                  </>
-                ) : (
-                  <div className="text-right">
-                    <div className="text-[10px] text-app-muted font-mono uppercase">Host Account</div>
-                    <div className="text-xs font-bold text-pink-300 font-mono">
-                      Community Creator
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Male User Wallet */}
-            {isMale && (
-              <div className="flex items-center space-x-2">
-                <div className="text-right">
-                  <div className="text-[10px] text-app-muted font-mono uppercase">My Wallet</div>
-                  <div className="text-sm font-black text-amber-300 font-mono flex items-center space-x-1">
-                    <span>🪙</span>
-                    <span>{currentUser.coinBalance} coins</span>
-                  </div>
-                </div>
-                {onNavigateToTab && (
-                  <button
-                    onClick={() => onNavigateToTab('earnings')}
-                    className="px-3 py-1.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 text-indigo-300 font-mono font-bold text-xs transition-all shadow-sm flex items-center space-x-1"
-                    title="View Coin Spending & Habits Analytics"
-                  >
-                    <Coins className="w-3.5 h-3.5" />
-                    <span>Analytics</span>
-                  </button>
-                )}
-                {onOpenStore && (
-                  <button
-                    onClick={onOpenStore}
-                    className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-black text-xs transition-all shadow-md shadow-amber-500/20 hover:brightness-110 flex items-center space-x-1"
-                  >
-                    <span>+ Top Up</span>
-                  </button>
-                )}
-              </div>
-            )}
-
-              {/* Availability Status Switcher */}
-            <div className="flex items-center space-x-1 bg-app-input p-1 rounded-xl border border-hairline">
-              <button
-                onClick={() => toggleUserStatus(currentUser.id, 'online')}
-                className={`px-2 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
-                  currentUser.onlineStatus === 'online'
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50'
-                    : 'text-app-muted hover:text-app-heading'
-                }`}
-              >
-                Online
-              </button>
-              <button
-                onClick={() => toggleUserStatus(currentUser.id, 'busy')}
-                className={`px-2 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
-                  currentUser.onlineStatus === 'busy' || currentUser.onlineStatus === 'in_call'
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50'
-                    : 'text-app-muted hover:text-app-heading'
-                }`}
-              >
-                Busy
-              </button>
-              <button
-                onClick={() => toggleUserStatus(currentUser.id, 'offline')}
-                className={`px-2 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
-                  currentUser.onlineStatus === 'offline'
-                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50'
-                    : 'text-app-muted hover:text-app-heading'
-                }`}
-              >
-                Offline
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Section Navigation Tabs Bar */}
-        <div className="flex items-center space-x-1 mt-6 pt-4 border-t border-hairline overflow-x-auto pb-1 scrollbar-none">
-          <button
-            onClick={() => setProfileSection('overview')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
-              profileSection === 'overview'
-                ? 'bg-app-card text-app-heading shadow-app-sm border border-hairline'
-                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
-            }`}
-          >
-            <User className="w-3.5 h-3.5" />
-            <span>Profile Overview</span>
-          </button>
-
-          <button
-            onClick={() => setProfileSection('location')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
-              profileSection === 'location'
-                ? 'bg-pink-600 text-white shadow-md shadow-pink-600/30'
-                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
-            }`}
-          >
-            <MapPin className="w-3.5 h-3.5 text-pink-400" />
-            <span>Location & Geolocation</span>
-            {isFemale && currentUser.allowMockLocation && (
-              <span className="px-1.5 py-0.2 rounded bg-pink-500/30 text-white text-[9px] font-mono font-bold">
-                MOCK READY
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setProfileSection('edit_bio')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
-              profileSection === 'edit_bio'
-                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
-                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
-            }`}
-          >
-            <Edit3 className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Edit Bio & Info</span>
-          </button>
-
-          {isFemale ? (
-            canEarnCoins ? (
-              <button
-                id="profile-menu-host-earnings-btn"
-                type="button"
-                onClick={() => {
-                  if (onNavigateToTab) {
-                    onNavigateToTab('earnings');
-                    return;
-                  }
-                  setProfileSection('rates_earnings');
-                }}
-                className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
-                  profileSection === 'rates_earnings'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                    : 'text-app-muted hover:text-app-heading hover:bg-app-input'
-                }`}
-                title="Open host earnings dashboard"
-              >
-                <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Earnings</span>
-                <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-mono text-[10px]">
-                  ${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)}
-                </span>
-              </button>
-            ) : null
-          ) : (
+          {isTeamLeader && onNavigateToTab && (
             <button
-              onClick={() => setProfileSection('rates_earnings')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
-                profileSection === 'rates_earnings'
-                  ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30'
-                  : 'text-app-muted hover:text-app-heading hover:bg-app-input'
-              }`}
+              type="button"
+              onClick={() => onNavigateToTab('team_leader')}
+              className="w-full sm:w-auto self-start px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 font-mono font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <Coins className="w-3.5 h-3.5 text-amber-400" />
-              <span>Wallet</span>
+              <Crown className="w-3.5 h-3.5" />
+              <span>Agency Hub</span>
             </button>
           )}
-
-          <button
-            onClick={() => setProfileSection('media')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
-              profileSection === 'media'
-                ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
-            }`}
-          >
-            <Camera className="w-3.5 h-3.5 text-purple-400" />
-            <span>Gallery & Moments</span>
-          </button>
-
-          <button
-            id="profile-security-tab-btn"
-            onClick={() => setProfileSection('security')}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
-              profileSection === 'security'
-                ? 'bg-rose-600 text-white shadow-md shadow-rose-600/30'
-                : 'text-app-muted hover:text-app-heading hover:bg-app-input'
-            }`}
-          >
-            <KeyRound className="w-3.5 h-3.5 text-rose-400" />
-            <span>Security & Password</span>
-          </button>
         </div>
       </div>
 
-      {/* 2. TAB CONTENT 1: OVERVIEW */}
-      {profileSection === 'overview' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left 2 Columns: Bio, Demographics & Highlights */}
-          <div className="lg:col-span-2 space-y-6">
-            
-            {/* About Me / Creator Story Card */}
-            <div className="p-5 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center space-x-2">
-                  <Sparkles className="w-4 h-4 text-indigo-400" />
-                  <span>{isFemale ? 'Creator Bio & Story' : 'Member Introduction'}</span>
-                </h3>
-                <button
-                  onClick={() => setProfileSection('edit_bio')}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 font-mono font-semibold flex items-center space-x-1"
-                >
-                  <Edit3 className="w-3 h-3" />
-                  <span>Edit</span>
-                </button>
-              </div>
+      {/* About teaser */}
+      <div className="p-4 sm:p-5 bg-app-card border border-hairline rounded-2xl space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-xs font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+            <span>{isFemale ? 'Creator Bio' : 'About'}</span>
+          </h3>
+          <button
+            type="button"
+            onClick={() => setProfileSection('edit_bio')}
+            className="text-xs text-indigo-400 hover:text-indigo-300 font-mono font-semibold flex items-center gap-1 cursor-pointer"
+          >
+            <Edit3 className="w-3 h-3" />
+            <span>Edit</span>
+          </button>
+        </div>
+        <p className="text-sm text-app-heading italic font-serif line-clamp-3">
+          &ldquo;{currentUser.bio || 'No short bio yet.'}&rdquo;
+        </p>
+        {currentUser.extendedBio && (
+          <p className="text-xs text-app-muted line-clamp-2 whitespace-pre-line">
+            {currentUser.extendedBio}
+          </p>
+        )}
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          {(currentUser.spokenLanguages || []).slice(0, 4).map((lang, idx) => (
+            <span
+              key={`lang-${idx}`}
+              className="px-2 py-0.5 rounded-lg bg-app-input border border-hairline text-app-heading text-[11px] font-mono"
+            >
+              {lang}
+            </span>
+          ))}
+          {(currentUser.interests || []).slice(0, 4).map((tag, idx) => (
+            <span
+              key={`int-${idx}`}
+              className="px-2 py-0.5 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-[11px]"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>
 
-              <div className="space-y-3 text-xs leading-relaxed text-app-muted">
-                <div className="p-3.5 rounded-xl bg-app-input border border-hairline text-app-heading italic font-serif text-sm">
-                  "{currentUser.bio || 'No short bio provided.'}"
-                </div>
-
-                {currentUser.extendedBio && (
-                  <div className="space-y-1">
-                    <h4 className="text-[11px] font-bold text-app-muted font-mono uppercase">Full Story & Background</h4>
-                    <p className="whitespace-pre-line text-app-muted text-xs bg-app-input p-3 rounded-xl border border-hairline">
-                      {currentUser.extendedBio}
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Tags & Spoken Languages */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-hairline">
-                <div>
-                  <h4 className="text-[11px] font-bold text-app-muted font-mono uppercase mb-2 flex items-center space-x-1.5">
-                    <span>Spoken Languages</span>
-                  </h4>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(currentUser.spokenLanguages || ['English']).map((lang, idx) => (
-                      <span
-                        key={idx}
-                        className="px-2.5 py-1 rounded-lg bg-app-input border border-hairline text-app-heading text-xs font-mono"
-                      >
-                        🗣️ {lang}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <h4 className="text-[11px] font-bold text-app-muted font-mono uppercase mb-2">Interests & Topics</h4>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(currentUser.interests || ['Music', 'Travel']).map((tag, idx) => (
-                      <span
-                        key={idx}
-                        className="px-2.5 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-xs"
-                      >
-                        ✨ {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Highlights / Performance Grid */}
-            <div className="space-y-1.5">
-              <div className="flex items-center space-x-1.5 px-1">
-                <span className="text-[11px] font-bold text-app-muted font-mono uppercase">Activity & Highlights</span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {isFemale ? (
-                  <>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Calls Hosted</div>
-                      <div className="text-lg font-black text-pink-400 font-mono mt-0.5">
-                        {currentUser.totalCallsHosted || 142}
-                      </div>
-                    </div>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Call Minutes</div>
-                      <div className="text-lg font-black text-indigo-400 font-mono mt-0.5">
-                        {currentUser.totalCallMinutes || 840}m
-                      </div>
-                    </div>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Gifts Received</div>
-                      <div className="text-lg font-black text-amber-400 font-mono mt-0.5">
-                        {currentUser.totalGiftsReceivedCount || 95}
-                      </div>
-                    </div>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Response Rate</div>
-                      <div className="text-xs font-bold text-emerald-400 font-mono mt-1">
-                        {currentUser.responseRate || '99% (< 1m)'}
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Coins Balance</div>
-                      <div className="text-lg font-black text-amber-400 font-mono mt-0.5">
-                        {currentUser.coinBalance} 🪙
-                      </div>
-                    </div>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Member Since</div>
-                      <div className="text-xs font-bold text-app-muted font-mono mt-1">
-                        {currentUser.createdAt || '2026-01-10'}
-                      </div>
-                    </div>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Account Security</div>
-                      <div className="text-xs font-bold text-emerald-400 font-mono mt-1 flex items-center space-x-1">
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>Protected</span>
-                      </div>
-                    </div>
-                    <div className="p-4 bg-app-card border border-hairline rounded-2xl">
-                      <div className="text-[10px] text-app-muted font-mono uppercase">Friend Call Rate</div>
-                      <div className="text-xs font-bold text-indigo-300 font-mono mt-1">
-                        Discounted when friends
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
+      {/* Activity highlights */}
+      {isFemale && (
+        <div className="grid grid-cols-2 gap-3">
+          <div className="p-3.5 bg-app-card border border-hairline rounded-2xl">
+            <div className="text-[10px] text-app-muted font-mono uppercase">Calls Hosted</div>
+            <div className="text-lg font-black text-pink-400 font-mono mt-0.5">
+              {currentUser.totalCallsHosted || 0}
             </div>
           </div>
-
-          {/* Right Column: Location Quick Card & Account Governance */}
-          <div className="space-y-6">
-            {/* Location Status Card */}
-            <div className="p-5 bg-app-card border border-hairline rounded-2xl space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-app-heading font-mono uppercase tracking-wider flex items-center space-x-1.5">
-                  <MapPin className="w-4 h-4 text-pink-400" />
-                  <span>Broadcast Location</span>
-                </h3>
-                <button
-                  onClick={() => setProfileSection('location')}
-                  className="text-[11px] text-pink-400 hover:text-pink-300 font-mono font-semibold"
-                >
-                  Configure ➔
-                </button>
-              </div>
-
-              <div className="p-4 rounded-xl bg-app-input border border-hairline space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-app-muted font-mono uppercase">Display City</span>
-                  {effectiveLocation.isMock && (
-                    <span className="px-1.5 py-0.2 rounded bg-pink-500/20 text-pink-300 font-mono font-bold text-[9px] border border-pink-500/40">
-                      MOCK ACTIVE
-                    </span>
-                  )}
-                </div>
-                <div className="text-base font-bold text-app-heading flex items-center space-x-2">
-                  <span>{effectiveLocation.displayCity}</span>
-                  <SvgFlag
-                    countryCode={currentUser.countryCode}
-                    nationality={effectiveLocation.country || currentUser.nationality}
-                    size="sm"
-                    rounded={true}
-                  />
-                </div>
-                <div className="text-[11px] text-app-muted">
-                  {effectiveLocation.isMock
-                    ? 'Virtual location is broadcast on Discovery, Quick Match & Calls.'
-                    : 'Real device / profile location is displayed.'}
-                </div>
-              </div>
-
-              {/* Quick GPS Detector Trigger */}
-              <button
-                onClick={handleDetectExactLocation}
-                disabled={isDetectingGps}
-                className="w-full py-2.5 px-3 rounded-xl bg-app-input hover:bg-brand-soft text-app-heading text-xs font-mono font-bold transition-all flex items-center justify-center space-x-2 border border-hairline cursor-pointer"
-              >
-                <Navigation className={`w-3.5 h-3.5 text-indigo-400 ${isDetectingGps ? 'animate-spin' : ''}`} />
-                <span>{isDetectingGps ? 'Querying GPS Satellite...' : 'Detect Exact GPS Location'}</span>
-              </button>
+          <div className="p-3.5 bg-app-card border border-hairline rounded-2xl">
+            <div className="text-[10px] text-app-muted font-mono uppercase">Call Minutes</div>
+            <div className="text-lg font-black text-indigo-400 font-mono mt-0.5">
+              {currentUser.totalCallMinutes || 0}m
             </div>
-
-            {/* Registered Account Email & Cloud Sync Card */}
-            <div className="p-5 bg-app-card border border-hairline rounded-2xl space-y-3 text-xs">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2 text-app-heading font-mono font-bold">
-                  <Mail className="w-4 h-4 text-indigo-400" />
-                  <span>Account Email</span>
-                </div>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-mono font-bold">
-                  Verified
-                </span>
-              </div>
-              <div className="p-3 bg-app-input rounded-xl border border-hairline flex items-center justify-between">
-                <div className="min-w-0 pr-2">
-                  <div className="text-[10px] text-app-muted font-mono uppercase">Primary Address</div>
-                  <div className="text-xs font-mono font-bold text-app-heading truncate">
-                    {currentUser.email || `${currentUser.id.slice(0, 8)}@livecall.app`}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleCopyEmail}
-                  className="px-2.5 py-1.5 rounded-lg bg-app-input hover:bg-brand-soft text-app-heading font-mono text-[10px] font-bold flex items-center space-x-1 shrink-0 border border-hairline transition-colors"
-                  title="Copy email to clipboard"
-                >
-                  <Copy className="w-3 h-3" />
-                  <span>Copy</span>
-                </button>
-              </div>
-              <div className="flex items-center space-x-1.5 text-[10px] font-mono text-app-muted">
-                <Cloud className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                <span>Synced with Cloudflare R2 & Supabase Auth</span>
-              </div>
+          </div>
+          <div className="p-3.5 bg-app-card border border-hairline rounded-2xl">
+            <div className="text-[10px] text-app-muted font-mono uppercase">Gifts</div>
+            <div className="text-lg font-black text-amber-400 font-mono mt-0.5">
+              {currentUser.totalGiftsReceivedCount || 0}
             </div>
-
-            {/* Permanent Gender Lock & Policy Card */}
-            <div className="p-5 bg-app-card border border-hairline rounded-2xl space-y-3 text-xs">
-              <div className="flex items-center space-x-2 text-app-heading font-mono font-bold">
-                <Lock className="w-4 h-4 text-emerald-400" />
-                <span>Gender Lock Status</span>
-              </div>
-              <p className="text-app-muted leading-relaxed text-[11px]">
-                Your registered gender is locked to <strong className="text-app-heading uppercase">{currentUser.gender}</strong> to protect the 1-on-1 coin economy and prevent fraudulent role switching.
-              </p>
-              <div className="p-2.5 rounded-lg bg-app-input border border-hairline text-[10px] text-app-muted font-mono flex items-center justify-between">
-                <span>Lock Protocol:</span>
-                <span className="text-emerald-400 font-bold">ACTIVE & VERIFIED</span>
-              </div>
+          </div>
+          <div className="p-3.5 bg-app-card border border-hairline rounded-2xl">
+            <div className="text-[10px] text-app-muted font-mono uppercase">Response</div>
+            <div className="text-xs font-bold text-emerald-400 font-mono mt-1 truncate">
+              {currentUser.responseRate || '—'}
             </div>
           </div>
         </div>
+      )}
+
+      {/* Deep links — avoid duplicating section content */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <button
+          type="button"
+          onClick={() => setProfileSection('location')}
+          className="flex items-center justify-between gap-2 p-3.5 rounded-2xl bg-app-card border border-hairline hover:border-pink-500/40 text-left transition-colors cursor-pointer"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <MapPin className="w-4 h-4 text-pink-400 shrink-0" />
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-app-heading">Location</div>
+              <div className="text-[11px] text-app-muted truncate">{effectiveLocation.displayCity}</div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-app-muted shrink-0" />
+        </button>
+
+        {!isFemale && (
+          <button
+            type="button"
+            onClick={() => setProfileSection('rates_earnings')}
+            className="flex items-center justify-between gap-2 p-3.5 rounded-2xl bg-app-card border border-hairline hover:border-amber-500/40 text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Coins className="w-4 h-4 text-amber-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-app-heading">Wallet</div>
+                <div className="text-[11px] text-app-muted truncate">
+                  {currentUser.coinBalance} coins
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-app-muted shrink-0" />
+          </button>
+        )}
+
+        {isFemale && canEarnCoins && onNavigateToTab && (
+          <button
+            type="button"
+            id="profile-host-earnings-amount-btn"
+            onClick={() => onNavigateToTab('earnings')}
+            className="flex items-center justify-between gap-2 p-3.5 rounded-2xl bg-app-card border border-hairline hover:border-emerald-500/40 text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <DollarSign className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-app-heading">Earnings</div>
+                <div className="text-[11px] text-app-muted truncate">
+                  ${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)} lifetime
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-app-muted shrink-0" />
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setProfileSection('media')}
+          className="flex items-center justify-between gap-2 p-3.5 rounded-2xl bg-app-card border border-hairline hover:border-purple-500/40 text-left transition-colors cursor-pointer"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Camera className="w-4 h-4 text-purple-400 shrink-0" />
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-app-heading">Gallery</div>
+              <div className="text-[11px] text-app-muted truncate">
+                {(currentUser.gallery || []).length} photos
+              </div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-app-muted shrink-0" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setProfileSection('security')}
+          className="flex items-center justify-between gap-2 p-3.5 rounded-2xl bg-app-card border border-hairline hover:border-rose-500/40 text-left transition-colors cursor-pointer"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <KeyRound className="w-4 h-4 text-rose-400 shrink-0" />
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-app-heading">Security</div>
+              <div className="text-[11px] text-app-muted truncate">Password & account</div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-app-muted shrink-0" />
+        </button>
+      </div>
+      </div>
       )}
 
       {/* 3. TAB CONTENT 2: LOCATION & GEOLOCATION (CORE USER REQUIREMENT) */}
@@ -1490,97 +1217,36 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
       {/* 4. TAB CONTENT 3: EDIT BIO & PROFILE INFORMATION */}
       {profileSection === 'edit_bio' && (
-        <form onSubmit={handleSaveProfile} className="p-5 sm:p-7 bg-app-card border border-hairline rounded-2xl space-y-5">
-          <div className="flex items-center justify-between border-b border-hairline pb-4">
-            <div className="flex items-center space-x-2">
-              <div>
-                <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider">
-                  Edit Bio & Profile Information
-                </h2>
-                <p className="text-xs text-app-muted">
-                  Update your public introduction, languages, and personal details.
-                </p>
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={isSavingProfile}
-              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-mono font-bold text-xs transition-all shadow-md flex items-center space-x-1.5 cursor-pointer disabled:opacity-60 disabled:cursor-wait"
-            >
-              <Save className="w-3.5 h-3.5" />
-              <span>{isSavingProfile ? 'Saving...' : 'Save Changes'}</span>
-            </button>
+        <form onSubmit={handleSaveProfile} className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-5 pb-24 md:pb-6 relative">
+          <div className="border-b border-hairline pb-4">
+            <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider">
+              Edit Bio & Profile Information
+            </h2>
+            <p className="text-xs text-app-muted mt-0.5">
+              Update your public introduction, languages, and personal details.
+            </p>
           </div>
 
-          {/* Avatar & Email Profile Controls */}
-          <div className="p-4 bg-app-input border border-hairline rounded-2xl space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <Camera className="w-4 h-4 text-indigo-400" />
-                <span className="text-xs font-bold text-app-heading font-mono uppercase">
-                  Profile Picture & Cloudflare R2 Storage
-                </span>
-              </div>
-              <span className="text-[10px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 rounded-full flex items-center space-x-1">
-                <Cloud className="w-3 h-3" />
-                <span>R2 Cloud Synced</span>
+          {/* Compact avatar preview — change opens modal */}
+          <div className="flex items-center gap-3 p-3 bg-app-input border border-hairline rounded-2xl">
+            <button
+              type="button"
+              onClick={() => setIsAvatarModalOpen(true)}
+              className="relative shrink-0 group cursor-pointer"
+              title="Change profile picture"
+            >
+              <img
+                src={formData.avatarUrl || currentUser.avatarUrl}
+                alt="Avatar preview"
+                className="w-14 h-14 rounded-xl object-cover ring-2 ring-indigo-500/50 shadow-md"
+              />
+              <span className="absolute inset-0 rounded-xl flex items-center justify-center bg-black/50 text-white opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                <Camera className="w-3.5 h-3.5" />
               </span>
-            </div>
-
-            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-              <div className="relative shrink-0 group">
-                <img
-                  src={formData.avatarUrl || currentUser.avatarUrl}
-                  alt="Avatar preview"
-                  className="w-16 h-16 rounded-2xl object-cover ring-2 ring-indigo-500/50 shadow-md"
-                />
-                <button
-                  type="button"
-                  onClick={() => setIsAvatarModalOpen(true)}
-                  className="absolute inset-0 bg-black/60 rounded-2xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white text-[10px] font-mono font-bold cursor-pointer"
-                >
-                  Change
-                </button>
-              </div>
-
-              <div className="flex-1 min-w-0 space-y-2 w-full">
-                <div className="flex items-center space-x-2">
-                  <button
-                    type="button"
-                    onClick={() => avatarFileInputRef.current?.click()}
-                    disabled={isUploadingAvatar}
-                    className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-mono font-bold text-xs transition-all shadow-sm flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
-                  >
-                    {isUploadingAvatar ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        <span>Uploading to R2 ({avatarUploadProgress}%)...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>Upload New Photo (R2)</span>
-                      </>
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setIsAvatarModalOpen(true)}
-                    className="px-3 py-1.5 rounded-xl bg-app-input hover:bg-brand-soft text-app-heading font-mono font-bold text-xs transition-all border border-hairline cursor-pointer"
-                  >
-                    <span>Choose Preset or URL</span>
-                  </button>
-                </div>
-
-                <div className="text-[11px] text-app-muted font-mono flex items-center space-x-1">
-                  <span>Image URL:</span>
-                  <span className="text-app-muted truncate max-w-md">
-                    {formData.avatarUrl || currentUser.avatarUrl}
-                  </span>
-                </div>
-              </div>
+            </button>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-bold text-app-heading">Profile picture</div>
+              <p className="text-[11px] text-app-muted">Tap photo to upload or choose a preset</p>
             </div>
           </div>
 
@@ -1767,35 +1433,10 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           </div>
 
           {isFemale && canEarnCoins && (
-            <div className="p-4 bg-app-input border border-pink-500/20 rounded-xl grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Platform Governed Call Rate (Read-Only) */}
-              <div className="space-y-1">
-                <label className="block text-[11px] font-bold text-pink-300 font-mono mb-1 flex items-center space-x-1.5">
-                  <span>1-on-1 Call & Earning Rate</span>
-                  <span className="px-1.5 py-0.2 rounded bg-app-input border border-hairline text-app-muted text-[9px] font-normal">
-                    🔒 Admin Governed
-                  </span>
-                </label>
-                <div className="p-2.5 bg-app-input border border-hairline rounded-xl flex items-center justify-between">
-                  <div>
-                    <div className="text-[10px] text-app-muted font-mono uppercase">Caller Burn Rate</div>
-                    <div className="text-sm font-bold text-amber-300 font-mono">
-                      🪙 {systemSettings.coinBurnRatePerMin ?? 120} / min
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-[10px] text-app-muted font-mono uppercase">Your Host Earning</div>
-                    <div className="text-sm font-bold text-emerald-400 font-mono">
-                      🪙 {currentUser.coinEarnOverrideRate ?? systemSettings.femaleEarningRatePerMin ?? 48} / min
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Response Rate Guarantee Label */}
+            <div className="space-y-3">
               <div>
                 <label className="block text-[11px] font-bold text-pink-300 font-mono mb-1">
-                  Response Rate Guarantee Label
+                  Response Rate Label
                 </label>
                 <input
                   type="text"
@@ -1807,21 +1448,37 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   className="w-full px-3 py-2 bg-app-input border border-hairline rounded-xl text-app-heading font-mono text-xs focus:outline-none focus:border-pink-500"
                   placeholder="e.g. 99% Instant Reply"
                 />
-                <p className="text-[10px] text-app-muted mt-1">
-                  Custom badge displayed on your profile card (e.g. "99% Instant Reply", "⚡ Fast Pickup").
-                </p>
               </div>
+              {onNavigateToTab && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateToTab('earnings')}
+                  className="w-full flex items-center justify-between gap-2 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-left cursor-pointer hover:bg-emerald-500/15 transition-colors"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <DollarSign className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span className="text-xs font-bold text-emerald-200 truncate">
+                      View rates & earnings
+                    </span>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-emerald-400/80 shrink-0" />
+                </button>
+              )}
             </div>
           )}
 
-          <div className="flex justify-end pt-2">
-            <button
-              type="submit"
-              className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-pink-600 hover:brightness-110 text-white font-mono font-bold text-xs transition-all shadow-lg flex items-center space-x-2 cursor-pointer"
-            >
-              <Save className="w-4 h-4" />
-              <span>Save & Publish Profile</span>
-            </button>
+          {/* Sticky save on mobile; inline on desktop */}
+          <div className="fixed bottom-[4.5rem] left-0 right-0 z-20 px-3 md:static md:px-0 md:pt-2 md:flex md:justify-end">
+            <div className="max-w-7xl mx-auto md:max-w-none md:mx-0">
+              <button
+                type="submit"
+                disabled={isSavingProfile}
+                className="w-full md:w-auto px-6 py-3 md:py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-pink-600 hover:brightness-110 text-white font-mono font-bold text-xs transition-all shadow-lg flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+              >
+                <Save className="w-4 h-4" />
+                <span>{isSavingProfile ? 'Saving...' : 'Save & Publish Profile'}</span>
+              </button>
+            </div>
           </div>
         </form>
       )}
@@ -1939,42 +1596,27 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
       {/* 6. TAB CONTENT 5: MEDIA & GALLERY */}
       {profileSection === 'media' && (
-        <div className="p-5 sm:p-7 bg-app-card border border-hairline rounded-2xl space-y-5">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-hairline pb-4">
-            <div className="flex items-center space-x-2">
-              <div>
-                <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
-                  <ImageIcon className="w-4 h-4 text-pink-400" />
-                  <span>Photo Gallery & Moments Feed</span>
-                </h2>
-                <p className="text-xs text-app-muted">
-                  High-resolution pictures uploaded directly to Cloudflare R2 and synced with your public profile.
-                </p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setIsAddGalleryModalOpen(true)}
-              className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white font-mono font-bold text-xs flex items-center space-x-1.5 shadow-md shadow-pink-600/30 transition-all cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add Photo (R2)</span>
-            </button>
+        <div className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
+          <div className="border-b border-hairline pb-3">
+            <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
+              <ImageIcon className="w-4 h-4 text-pink-400" />
+              <span>Photo Gallery</span>
+            </h2>
+            <p className="text-xs text-app-muted mt-0.5">
+              Photos sync to your public profile via Cloudflare R2.
+            </p>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-            {/* 1. Add Photo Quick Card */}
             <button
               type="button"
               onClick={() => setIsAddGalleryModalOpen(true)}
-              className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input hover:bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
+              className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
             >
               <div className="w-10 h-10 rounded-xl bg-pink-500/10 group-hover:bg-pink-500/20 text-pink-400 flex items-center justify-center mb-1.5 transition-colors">
                 <Plus className="w-5 h-5" />
               </div>
-              <span className="font-bold text-app-heading text-xs">Upload Photo</span>
-              <span className="text-[10px] text-app-muted font-mono">Cloudflare R2</span>
+              <span className="font-bold text-app-heading text-xs">Add photo</span>
             </button>
 
             {/* 2. Gallery Images */}
@@ -2354,6 +1996,6 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           </div>
         </div>
       )}
-    </div>
+    </ProfileShell>
   );
 };

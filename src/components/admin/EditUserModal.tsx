@@ -36,7 +36,6 @@ import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { getFallbackAvatar } from '../../utils/avatars';
 import { ALL_WORLDWIDE_COUNTRIES } from '../../utils/countries';
-import { ALL_WORLDWIDE_LANGUAGES } from '../../utils/languages';
 import { CountrySelector } from '../common/CountrySelector';
 import { LanguageSelector } from '../common/LanguageSelector';
 import { ZodiacSelector } from '../common/ZodiacSelector';

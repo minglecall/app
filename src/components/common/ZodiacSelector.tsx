@@ -50,8 +50,7 @@ export const ZodiacSelector: React.FC<ZodiacSelectorProps> = ({
       (z) =>
         z.name.toLowerCase().includes(q) ||
         z.key.toLowerCase().includes(q) ||
-        z.element.toLowerCase().includes(q) ||
-        z.dateRange.toLowerCase().includes(q)
+        z.element.toLowerCase().includes(q)
     );
   }, [availableSigns, searchQuery]);
 
@@ -101,7 +100,7 @@ export const ZodiacSelector: React.FC<ZodiacSelectorProps> = ({
           </span>
           {selectedZodiac && (
             <span className="text-[10px] font-mono text-slate-400 capitalize">
-              {selectedZodiac.element} Element • {selectedZodiac.dateRange}
+              {selectedZodiac.element} Element
             </span>
           )}
         </label>
@@ -128,12 +127,11 @@ export const ZodiacSelector: React.FC<ZodiacSelectorProps> = ({
               <div className="p-1 rounded-lg bg-slate-900 border border-slate-800">
                 <ZodiacIcon sign={selectedZodiac.key} size="sm" showElementColor={true} />
               </div>
-              <div className="min-w-0">
-                <div className="text-xs sm:text-sm font-bold text-white truncate flex items-center space-x-1.5">
-                  <span>{selectedZodiac.name}</span>
-                  <span className="text-[10px] font-mono text-slate-400 capitalize">({selectedZodiac.element})</span>
-                </div>
-                <div className="text-[10px] text-slate-400 font-mono">{selectedZodiac.dateRange}</div>
+              <div className="text-xs sm:text-sm font-bold text-white truncate flex items-center space-x-1.5 min-w-0">
+                <span className="truncate">{selectedZodiac.name}</span>
+                <span className="text-[10px] font-mono text-slate-400 capitalize shrink-0">
+                  ({selectedZodiac.element})
+                </span>
               </div>
             </>
           ) : (
@@ -195,10 +193,10 @@ export const ZodiacSelector: React.FC<ZodiacSelectorProps> = ({
             </div>
           </div>
 
-          {/* List items grid */}
-          <div className="overflow-y-auto p-1.5 grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-64">
+          {/* List items — single column (same layout as CountrySelector) */}
+          <div className="overflow-y-auto p-1.5 space-y-0.5 max-h-56">
             {filteredSigns.length === 0 ? (
-              <div className="col-span-full py-6 text-center text-xs text-slate-500 font-mono">
+              <div className="py-6 text-center text-xs text-slate-500 font-mono">
                 No active zodiac signs match "{searchQuery}"
               </div>
             ) : (
@@ -209,26 +207,25 @@ export const ZodiacSelector: React.FC<ZodiacSelectorProps> = ({
                     key={z.key}
                     type="button"
                     onClick={(e) => handleSelect(z, e)}
-                    className={`p-2 rounded-xl flex items-center justify-between text-left transition-all cursor-pointer select-none ${
+                    className={`w-full px-3 py-2 rounded-xl flex items-center justify-between text-left transition-colors cursor-pointer select-none ${
                       isSelected
-                        ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40 shadow-sm'
-                        : 'bg-slate-950/40 hover:bg-slate-800 border border-slate-800/60 text-slate-300'
+                        ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
+                        : 'hover:bg-slate-800/90 text-slate-200'
                     }`}
                   >
                     <div className="flex items-center space-x-2.5 min-w-0 pointer-events-none">
-                      <div className="p-1.5 rounded-lg bg-slate-900/90 border border-slate-800 shrink-0">
-                        <ZodiacIcon sign={z.key} size="sm" showElementColor={true} />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold truncate flex items-center space-x-1.5">
-                          <span className={isSelected ? 'text-indigo-300' : 'text-white'}>{z.name}</span>
-                          <span className="text-[9px] font-mono text-slate-400 capitalize">({z.element})</span>
-                        </div>
-                        <div className="text-[10px] text-slate-400 font-mono">{z.dateRange}</div>
+                      <ZodiacIcon sign={z.key} size="sm" showElementColor={true} />
+                      <div className="text-xs font-bold truncate flex items-center space-x-1.5 min-w-0">
+                        <span className={`truncate ${isSelected ? 'text-indigo-300' : 'text-white'}`}>
+                          {z.name}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400 capitalize shrink-0">
+                          ({z.element})
+                        </span>
                       </div>
                     </div>
 
-                    {isSelected && <Check className="w-4 h-4 text-indigo-400 shrink-0 ml-1 pointer-events-none" />}
+                    {isSelected && <Check className="w-4 h-4 text-indigo-400 shrink-0 ml-2 pointer-events-none" />}
                   </button>
                 );
               })

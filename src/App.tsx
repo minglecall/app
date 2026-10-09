@@ -142,12 +142,13 @@ const MainApp: React.FC = () => {
     );
   }
 
-  const isOpsDashboard = activeTab === 'admin' || activeTab === 'team_leader';
+  const isShellLayout =
+    activeTab === 'admin' || activeTab === 'team_leader' || activeTab === 'profile';
 
   return (
     <div
       className={`bg-app text-app flex flex-col font-sans selection-brand ${
-        isOpsDashboard ? 'h-dvh max-h-dvh overflow-hidden' : 'min-h-screen'
+        isShellLayout ? 'h-dvh max-h-dvh overflow-hidden' : 'min-h-screen'
       }`}
     >
       {/* App Header */}
@@ -161,10 +162,10 @@ const MainApp: React.FC = () => {
         onOpenMatch={() => setIsMatchOpen(true)}
       />
 
-      {/* Main View Content — ops dashboards own their own scroll panes */}
+      {/* Main View Content — shell layouts (admin / TL / profile) own their own scroll panes */}
       <main
         className={`flex-1 min-h-0 app-fade-up ${
-          isOpsDashboard
+          isShellLayout
             ? 'relative overflow-hidden pb-0 h-full'
             : isLoggedIn
               ? 'pb-24 md:pb-10'
@@ -246,7 +247,7 @@ const MainApp: React.FC = () => {
         {activeTab === 'admin' && isLoggedIn && currentUser.role === 'admin' && <AdminDashboard />}
       </main>
 
-      {!isOpsDashboard && (
+      {!isShellLayout && (
       <footer className="h-8 bg-app-surface border-t border-app px-4 sm:px-8 flex items-center justify-between text-[10px] text-app-muted">
         <div className="flex gap-4 items-center">
           <span>LiveCall</span>

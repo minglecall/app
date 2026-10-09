@@ -90,6 +90,10 @@ import {
   upsertCoinPackageToSupabase,
   deleteCoinPackageFromSupabase,
   fetchCurrencyConfigsFromSupabase,
+  fetchCountryConfigsFromSupabase,
+  fetchLanguageConfigsFromSupabase,
+  fetchZodiacConfigsFromSupabase,
+  fetchInterestConfigsFromSupabase,
   upsertCurrencyConfigsToSupabase,
   upsertMatchToSupabase,
   fetchMatchesForUser,
@@ -2894,10 +2898,32 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               aiNudityShieldEnabled: data.ai_nudity_shield_enabled !== undefined ? data.ai_nudity_shield_enabled : prev.aiNudityShieldEnabled,
               screenRecordingProtection: data.screen_recording_protection !== undefined ? data.screen_recording_protection : prev.screenRecordingProtection,
               showDevPersonaBar: data.show_dev_persona_bar !== undefined ? data.show_dev_persona_bar : prev.showDevPersonaBar,
-              allowedCountryCodes: data.allowed_country_codes && data.allowed_country_codes.length > 0 ? data.allowed_country_codes : prev.allowedCountryCodes,
-              allowedLanguages: (data as any).allowed_languages && (data as any).allowed_languages.length > 0 ? (data as any).allowed_languages : prev.allowedLanguages,
-              allowedZodiacSigns: (data as any).allowed_zodiac_signs && (data as any).allowed_zodiac_signs.length > 0 ? (data as any).allowed_zodiac_signs : prev.allowedZodiacSigns,
-              allowedInterests: (data as any).allowed_interests && (data as any).allowed_interests.length > 0 ? (data as any).allowed_interests : prev.allowedInterests,
+              // Prefer non-empty system_configs allow-lists over stale localStorage.
+              // Empty DB arrays → undefined so getAllowed* shows the full catalog.
+              allowedCountryCodes:
+                Array.isArray(data.allowed_country_codes) && data.allowed_country_codes.length > 0
+                  ? data.allowed_country_codes
+                  : Array.isArray(data.allowed_country_codes)
+                    ? undefined
+                    : prev.allowedCountryCodes,
+              allowedLanguages:
+                Array.isArray((data as any).allowed_languages) && (data as any).allowed_languages.length > 0
+                  ? (data as any).allowed_languages
+                  : Array.isArray((data as any).allowed_languages)
+                    ? undefined
+                    : prev.allowedLanguages,
+              allowedZodiacSigns:
+                Array.isArray((data as any).allowed_zodiac_signs) && (data as any).allowed_zodiac_signs.length > 0
+                  ? (data as any).allowed_zodiac_signs
+                  : Array.isArray((data as any).allowed_zodiac_signs)
+                    ? undefined
+                    : prev.allowedZodiacSigns,
+              allowedInterests:
+                Array.isArray((data as any).allowed_interests) && (data as any).allowed_interests.length > 0
+                  ? (data as any).allowed_interests
+                  : Array.isArray((data as any).allowed_interests)
+                    ? undefined
+                    : prev.allowedInterests,
               flagSizes: (data as any).flag_sizes_json
                 ? (typeof (data as any).flag_sizes_json === 'string'
                     ? JSON.parse((data as any).flag_sizes_json)
@@ -2993,6 +3019,66 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           if (rows && rows.length > 0) {
             setCurrencyConfigs(rows);
           }
+        })
+        .catch(() => { });
+
+      // Fallback allow-lists from *_configs.enabled when system_configs arrays are empty.
+      void Promise.all([
+        fetchCountryConfigsFromSupabase(),
+        fetchLanguageConfigsFromSupabase(),
+        fetchZodiacConfigsFromSupabase(),
+        fetchInterestConfigsFromSupabase(),
+      ])
+        .then(([countries, languages, zodiacs, interests]) => {
+          setSystemSettings((prev) => {
+            const next = { ...prev };
+            let changed = false;
+
+            if ((!prev.allowedCountryCodes || prev.allowedCountryCodes.length === 0) && Array.isArray(countries)) {
+              const enabled = countries
+                .filter((r: any) => r && r.enabled !== false && r.code)
+                .map((r: any) => String(r.code).toUpperCase());
+              if (enabled.length > 0) {
+                next.allowedCountryCodes = enabled;
+                changed = true;
+              }
+            }
+
+            if ((!prev.allowedLanguages || prev.allowedLanguages.length === 0) && Array.isArray(languages)) {
+              const enabled = languages
+                .filter((r: any) => r && r.enabled !== false)
+                .map((r: any) => String(r.name || r.code || '').trim())
+                .filter(Boolean);
+              if (enabled.length > 0) {
+                next.allowedLanguages = enabled;
+                changed = true;
+              }
+            }
+
+            if ((!prev.allowedZodiacSigns || prev.allowedZodiacSigns.length === 0) && Array.isArray(zodiacs)) {
+              const enabled = zodiacs
+                .filter((r: any) => r && r.enabled !== false)
+                .map((r: any) => String(r.key || r.name || '').trim())
+                .filter(Boolean);
+              if (enabled.length > 0) {
+                next.allowedZodiacSigns = enabled;
+                changed = true;
+              }
+            }
+
+            if ((!prev.allowedInterests || prev.allowedInterests.length === 0) && Array.isArray(interests)) {
+              const enabled = interests
+                .filter((r: any) => r && r.enabled !== false)
+                .map((r: any) => String(r.name || r.id || '').trim())
+                .filter(Boolean);
+              if (enabled.length > 0) {
+                next.allowedInterests = enabled;
+                changed = true;
+              }
+            }
+
+            return changed ? next : prev;
+          });
         })
         .catch(() => { });
     }

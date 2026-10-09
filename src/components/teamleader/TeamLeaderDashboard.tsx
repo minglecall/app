@@ -2,8 +2,6 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useApp } from '../../context/AppContext';
 import { UserProfile, PayoutRequest, CallLogItem } from '../../types';
 import { getCountryFlag } from '../../utils/flags';
-import { ALL_WORLDWIDE_COUNTRIES, getAllowedCountries } from '../../utils/countries';
-import { ALL_WORLDWIDE_LANGUAGES } from '../../utils/languages';
 import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { CountrySelector } from '../common/CountrySelector';

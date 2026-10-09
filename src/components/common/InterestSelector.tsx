@@ -17,7 +17,7 @@ import {
   ChevronDown,
   Layers,
 } from 'lucide-react';
-import { InterestCategory } from '../../types';
+import { InterestCategory, InterestItem } from '../../types';
 import {
   INTEREST_CATEGORIES,
   getAllowedInterests,
@@ -66,7 +66,7 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
   allowedInterests,
   maxSelectable = 15,
   label = 'Interests & Passions',
-  placeholder = 'Add interests (e.g., Travel, Gaming, Music)...',
+  placeholder = 'Tap to add interests…',
   className = '',
   disabled = false,
 }) => {
@@ -79,13 +79,11 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
   const triggerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Available interests derived from system settings
   const activeAllowed = allowedInterests || systemSettings.allowedInterests;
   const availableInterests = useMemo(() => {
     return getAllowedInterests(activeAllowed);
   }, [activeAllowed]);
 
-  // Selected names normalized
   const selectedNormalized = useMemo(() => {
     return new Set(
       selectedInterests.map((itemStr) => {
@@ -95,7 +93,6 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
     );
   }, [selectedInterests]);
 
-  // Filtered interests
   const filteredInterests = useMemo(() => {
     return availableInterests.filter((item) => {
       if (selectedCategory !== 'all' && item.category !== selectedCategory) {
@@ -103,32 +100,43 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
       }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchesName = item.name.toLowerCase().includes(q);
-        const matchesCat = item.category.toLowerCase().includes(q);
-        return matchesName || matchesCat;
+        return item.name.toLowerCase().includes(q) || item.category.toLowerCase().includes(q);
       }
       return true;
     });
   }, [availableInterests, selectedCategory, searchQuery]);
+
+  const groupedInterests = useMemo(() => {
+    if (selectedCategory !== 'all') {
+      return [{ key: selectedCategory, items: filteredInterests }];
+    }
+    const groups: { key: string; label: string; items: InterestItem[] }[] = [];
+    for (const cat of INTEREST_CATEGORIES) {
+      const items = filteredInterests.filter((i) => i.category === cat.key);
+      if (items.length > 0) {
+        groups.push({ key: cat.key, label: cat.name, items });
+      }
+    }
+    return groups;
+  }, [filteredInterests, selectedCategory]);
 
   const updateMenuPosition = useCallback(() => {
     const trigger = triggerRef.current;
     if (!trigger) return;
 
     const rect = trigger.getBoundingClientRect();
-    const gap = 4;
-    const maxMenuHeight = 320;
+    const gap = 6;
+    const maxMenuHeight = 360;
     const spaceBelow = window.innerHeight - rect.bottom - gap;
     const spaceAbove = rect.top - gap;
     const openUpward = spaceBelow < Math.min(maxMenuHeight, 240) && spaceAbove > spaceBelow;
-    const available = Math.max(160, openUpward ? spaceAbove : spaceBelow);
+    const available = Math.max(180, openUpward ? spaceAbove : spaceBelow);
     const height = Math.min(maxMenuHeight, available);
 
     setMenuStyle({
       position: 'fixed',
-      left: rect.left,
-      width: Math.max(rect.width, 280),
-      maxWidth: 'min(100vw - 16px, 560px)',
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - Math.min(rect.width, 520) - 8)),
+      width: Math.min(Math.max(rect.width, 300), window.innerWidth - 16),
       zIndex: 9999,
       maxHeight: height,
       ...(openUpward
@@ -152,7 +160,6 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
     };
   }, [isOpen, updateMenuPosition]);
 
-  // Close on outside click with safe delay so option clicks register cleanly
   useEffect(() => {
     if (!isOpen) return;
 
@@ -201,29 +208,36 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
     onChange(next);
   };
 
+  const clearAll = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onChange([]);
+  };
+
+  const atLimit = selectedInterests.length >= maxSelectable;
+
   const dropdownPanel =
     isOpen && typeof document !== 'undefined'
       ? createPortal(
           <div
             ref={dropdownRef}
             style={menuStyle}
-            className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col"
+            className="bg-[#12151F] border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col"
             onPointerDown={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Search & Action Bar */}
-            <div className="p-2.5 border-b border-slate-800 bg-slate-950/90 sticky top-0 z-10 space-y-2 shrink-0">
-              <div className="flex items-center justify-between gap-2">
+            <div className="p-3 border-b border-slate-800 bg-slate-950/95 shrink-0 space-y-2.5">
+              <div className="flex items-center gap-2">
                 <div className="relative flex-1">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     type="text"
                     autoFocus
-                    placeholder="Search interests & passions..."
+                    placeholder="Search interests…"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-8 pr-8 py-1.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-medium"
+                    className="w-full pl-9 pr-8 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500/60 font-medium"
                   />
                   {searchQuery && (
                     <button
@@ -246,14 +260,13 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
                     e.stopPropagation();
                     setIsOpen(false);
                   }}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shrink-0 transition-colors cursor-pointer"
+                  className="px-3.5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white text-xs font-bold shrink-0 transition-colors cursor-pointer"
                 >
-                  Done ({selectedInterests.length})
+                  Done
                 </button>
               </div>
 
-              {/* Category Pills Slider */}
-              <div className="flex items-center space-x-1.5 overflow-x-auto pb-0.5 scrollbar-none text-[11px] font-medium select-none">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">
                 <button
                   type="button"
                   onClick={(e) => {
@@ -261,16 +274,15 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
                     e.stopPropagation();
                     setSelectedCategory('all');
                   }}
-                  className={`px-2.5 py-1 rounded-lg shrink-0 transition-colors flex items-center space-x-1 cursor-pointer ${
+                  className={`px-2.5 py-1.5 rounded-lg shrink-0 text-[11px] font-semibold transition-colors flex items-center gap-1 cursor-pointer ${
                     selectedCategory === 'all'
-                      ? 'bg-indigo-600 text-white font-bold'
-                      : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                      ? 'bg-pink-600 text-white'
+                      : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
                   }`}
                 >
                   <Layers className="w-3 h-3" />
-                  <span>All Categories</span>
+                  <span>All</span>
                 </button>
-
                 {INTEREST_CATEGORIES.map((cat) => (
                   <button
                     key={cat.key}
@@ -280,70 +292,105 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
                       e.stopPropagation();
                       setSelectedCategory(cat.key);
                     }}
-                    className={`px-2.5 py-1 rounded-lg shrink-0 transition-colors flex items-center space-x-1 cursor-pointer ${
+                    className={`px-2.5 py-1.5 rounded-lg shrink-0 text-[11px] font-semibold transition-colors flex items-center gap-1 cursor-pointer ${
                       selectedCategory === cat.key
-                        ? 'bg-indigo-600 text-white font-bold shadow'
-                        : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                        ? 'bg-pink-600 text-white'
+                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
                     }`}
                   >
-                    <span>{getCategoryIcon(cat.key, 'w-3 h-3')}</span>
-                    <span>{cat.name}</span>
+                    {getCategoryIcon(cat.key, 'w-3 h-3')}
+                    <span className="whitespace-nowrap">{cat.name.split(' & ')[0]}</span>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Categorized Interests Grid */}
-            <div className="overflow-y-auto p-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-1.5 flex-1 min-h-0">
-              {filteredInterests.length === 0 ? (
-                <div className="col-span-full py-8 text-center text-xs text-slate-500 font-mono">
-                  No active interests found in this category.
+            <div className="overflow-y-auto flex-1 min-h-0 p-2 space-y-3">
+              {groupedInterests.length === 0 ||
+              groupedInterests.every((g) => ('items' in g ? g.items.length === 0 : false)) ? (
+                <div className="py-10 text-center text-xs text-slate-500 font-mono">
+                  No interests match your search.
                 </div>
               ) : (
-                filteredInterests.map((interest) => {
-                  const isSelected = selectedNormalized.has(interest.name);
-                  return (
-                    <button
-                      key={interest.id}
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        toggleInterest(interest.name);
-                      }}
-                      className={`p-2 rounded-xl flex items-center justify-between text-left transition-all cursor-pointer select-none ${
-                        isSelected
-                          ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40 shadow-sm'
-                          : 'bg-slate-950/50 hover:bg-slate-800 border border-slate-800/60 text-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-2 min-w-0 pr-1 pointer-events-none">
-                        <span
-                          className={`p-1 rounded-md shrink-0 ${
-                            isSelected ? 'bg-indigo-500/20 text-indigo-300' : 'bg-slate-900 text-slate-400'
-                          }`}
-                        >
-                          {getCategoryIcon(interest.category, 'w-3 h-3')}
-                        </span>
-                        <span
-                          className={`text-xs font-bold truncate ${isSelected ? 'text-indigo-300' : 'text-white'}`}
-                        >
-                          {interest.name}
-                        </span>
-                      </div>
+                groupedInterests.map((group) => {
+                  const items = group.items;
+                  if (!items.length) return null;
+                  const catMeta = INTEREST_CATEGORIES.find((c) => c.key === group.key);
+                  const showHeader = selectedCategory === 'all' && catMeta;
 
-                      <div
-                        className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 border transition-all pointer-events-none ${
-                          isSelected
-                            ? 'bg-indigo-600 border-indigo-500 text-white'
-                            : 'border-slate-700 bg-slate-900'
-                        }`}
-                      >
-                        {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                  return (
+                    <div key={group.key} className="space-y-1.5">
+                      {showHeader && (
+                        <div className="flex items-center gap-1.5 px-1.5 pt-0.5">
+                          <span className="text-pink-400/90">
+                            {getCategoryIcon(catMeta.key, 'w-3 h-3')}
+                          </span>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                            {catMeta.name}
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-600">{items.length}</span>
+                        </div>
+                      )}
+                      <div className="flex flex-wrap gap-1.5">
+                        {items.map((interest) => {
+                          const isSelected = selectedNormalized.has(interest.name);
+                          const blocked = !isSelected && atLimit;
+                          return (
+                            <button
+                              key={interest.id}
+                              type="button"
+                              disabled={blocked}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (blocked) return;
+                                toggleInterest(interest.name);
+                              }}
+                              className={`inline-flex items-center gap-1.5 pl-2 pr-2.5 py-1.5 rounded-full text-[11px] font-semibold transition-all cursor-pointer select-none border ${
+                                isSelected
+                                  ? 'bg-pink-600/25 border-pink-500/50 text-pink-200 shadow-sm'
+                                  : blocked
+                                    ? 'bg-slate-950/40 border-slate-800/60 text-slate-600 cursor-not-allowed'
+                                    : 'bg-slate-950/70 border-slate-700/70 text-slate-300 hover:border-slate-500 hover:text-white'
+                              }`}
+                            >
+                              <span
+                                className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 border ${
+                                  isSelected
+                                    ? 'bg-pink-600 border-pink-400 text-white'
+                                    : 'border-slate-600 bg-slate-900'
+                                }`}
+                              >
+                                {isSelected ? (
+                                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                ) : (
+                                  <Plus className="w-2.5 h-2.5 text-slate-500" />
+                                )}
+                              </span>
+                              <span className="truncate max-w-[160px]">{interest.name}</span>
+                            </button>
+                          );
+                        })}
                       </div>
-                    </button>
+                    </div>
                   );
                 })
+              )}
+            </div>
+
+            <div className="px-3 py-2 border-t border-slate-800 bg-slate-950/90 flex items-center justify-between shrink-0">
+              <span className="text-[11px] font-mono text-slate-400">
+                {selectedInterests.length}/{maxSelectable} selected
+                {atLimit ? ' · limit reached' : ''}
+              </span>
+              {selectedInterests.length > 0 && (
+                <button
+                  type="button"
+                  onClick={clearAll}
+                  className="text-[11px] font-semibold text-slate-400 hover:text-rose-300 transition-colors cursor-pointer"
+                >
+                  Clear all
+                </button>
               )}
             </div>
           </div>,
@@ -354,37 +401,37 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
   return (
     <div className={`space-y-2 ${className}`} ref={containerRef}>
       {label && (
-        <div className="flex items-center justify-between">
-          <label className="text-xs font-bold text-slate-300 flex items-center space-x-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+        <div className="flex items-center justify-between gap-2">
+          <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-pink-400" />
             <span>{label}</span>
           </label>
-          <span className="text-[10px] font-mono text-slate-400">
-            {selectedInterests.length} / {maxSelectable} selected
+          <span className="text-[10px] font-mono text-slate-500">
+            {selectedInterests.length}/{maxSelectable}
           </span>
         </div>
       )}
 
-      {/* Selected Chips Box / Dropdown Opener */}
       <div
         ref={triggerRef}
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
           if (disabled) return;
-          if (!isOpen) {
-            updateMenuPosition();
-          }
+          if (!isOpen) updateMenuPosition();
           setIsOpen((prev) => !prev);
         }}
-        className={`min-h-[48px] p-2 bg-slate-950 border rounded-xl sm:rounded-2xl flex flex-wrap items-center gap-1.5 transition-all cursor-pointer select-none relative ${
+        className={`min-h-[52px] p-2.5 bg-slate-950 border rounded-2xl flex flex-wrap items-center gap-1.5 transition-all cursor-pointer select-none ${
           isOpen
-            ? 'border-indigo-500 ring-2 ring-indigo-500/20 bg-slate-900 shadow-lg'
-            : 'border-slate-800 hover:border-slate-700'
+            ? 'border-pink-500/70 ring-2 ring-pink-500/15 bg-slate-900 shadow-lg'
+            : 'border-slate-800 hover:border-slate-600'
         } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
       >
         {selectedInterests.length === 0 ? (
-          <span className="text-xs text-slate-500 px-1">{placeholder}</span>
+          <span className="text-xs text-slate-500 px-1.5 py-1 flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5 text-slate-600" />
+            {placeholder}
+          </span>
         ) : (
           selectedInterests.map((itemStr) => {
             const itemObj = findInterestByIdOrName(itemStr);
@@ -394,15 +441,15 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
             return (
               <span
                 key={displayName}
-                className="inline-flex items-center space-x-1.5 pl-2.5 pr-1.5 py-1 rounded-lg bg-indigo-950/70 border border-indigo-500/30 text-indigo-300 text-xs font-semibold shadow-sm animate-in fade-in zoom-in-95 duration-100"
+                className="inline-flex items-center gap-1 pl-2 pr-1 py-1 rounded-full bg-pink-950/50 border border-pink-500/35 text-pink-200 text-[11px] font-semibold"
               >
-                <span className="text-indigo-400">{getCategoryIcon(category, 'w-3 h-3')}</span>
-                <span>{displayName}</span>
+                <span className="text-pink-400/90">{getCategoryIcon(category, 'w-3 h-3')}</span>
+                <span className="max-w-[140px] truncate">{displayName}</span>
                 {!disabled && (
                   <button
                     type="button"
                     onClick={(e) => removeInterest(displayName, e)}
-                    className="p-0.5 hover:bg-indigo-500/30 text-indigo-300 hover:text-white rounded-md transition-colors ml-0.5"
+                    className="p-0.5 hover:bg-pink-500/25 text-pink-300/80 hover:text-white rounded-full transition-colors"
                     title={`Remove ${displayName}`}
                   >
                     <X className="w-3 h-3" />
@@ -413,10 +460,11 @@ export const InterestSelector: React.FC<InterestSelectorProps> = ({
           })
         )}
 
-        <div className="ml-auto pl-1 flex items-center space-x-1 shrink-0 text-slate-400 pointer-events-none">
-          <Plus className="w-4 h-4" />
+        <div className="ml-auto pl-1 flex items-center text-slate-500 pointer-events-none">
           <ChevronDown
-            className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180 text-indigo-400' : ''}`}
+            className={`w-4 h-4 transition-transform duration-200 ${
+              isOpen ? 'rotate-180 text-pink-400' : ''
+            }`}
           />
         </div>
       </div>

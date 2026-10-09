@@ -54,9 +54,9 @@ export function generateTaxonomySeedSql(): string {
       }, ${c.orderNum != null ? Number(c.orderNum) : idx})`
   ).join(',\n');
 
-  // Allowed country codes array
-  const defaultCountryCodes = ALL_WORLDWIDE_COUNTRIES.slice(0, 30).map((c) => `'${sqlEscape(c.code)}'`).join(',');
-  const defaultLanguageNames = ALL_LANGUAGES.filter((l) => l.popular).map((l) => `'${sqlEscape(l.name)}'`).join(',');
+  // Full catalog allow-lists (admin can disable later via Global Taxonomies)
+  const defaultCountryCodes = ALL_WORLDWIDE_COUNTRIES.map((c) => `'${sqlEscape(c.code)}'`).join(',');
+  const defaultLanguageNames = ALL_LANGUAGES.map((l) => `'${sqlEscape(l.name)}'`).join(',');
   const defaultZodiacKeys = ALL_ZODIAC_SIGNS.map((z) => `'${sqlEscape(z.key)}'`).join(',');
   const defaultInterestNames = ALL_INTERESTS.map((i) => `'${sqlEscape(i.name)}'`).join(',');
 

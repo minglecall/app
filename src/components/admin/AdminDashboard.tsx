@@ -98,7 +98,7 @@ import { AdminTaxonomyManager } from './AdminTaxonomyManager';
 import { AdminCreatorTargetConfig } from './AdminCreatorTargetConfig';
 import { AdminFinancialModule } from './finance/AdminFinancialModule';
 import { ALL_WORLDWIDE_COUNTRIES, getAllowedCountries } from '../../utils/countries';
-import { ALL_WORLDWIDE_LANGUAGES } from '../../utils/languages';
+import { getAllowedLanguages } from '../../utils/taxonomies';
 import { uploadMediaDirectlyToR2 } from '../../utils/r2Storage';
 import { UnifiedImageUploader } from '../common/UnifiedImageUploader';
 import { getFallbackAvatar } from '../../utils/avatars';
@@ -2507,7 +2507,7 @@ export const AdminDashboard: React.FC = () => {
                         }}
                         className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-amber-500"
                       >
-                        {ALL_WORLDWIDE_COUNTRIES.map((c) => (
+                        {getAllowedCountries(systemSettings.allowedCountryCodes).map((c) => (
                           <option key={c.code} value={c.name} className="bg-slate-900 text-white">
                             {c.flag} {c.name} ({c.code})
                           </option>
@@ -2535,8 +2535,11 @@ export const AdminDashboard: React.FC = () => {
                         }}
                         className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 focus:outline-none focus:border-amber-500 text-sm"
                       >
-                        <option value="">+ Add language from worldwide list ({ALL_WORLDWIDE_LANGUAGES.length})...</option>
-                        {ALL_WORLDWIDE_LANGUAGES.map((l) => (
+                        <option value="">
+                          + Add language from taxonomies (
+                          {getAllowedLanguages(systemSettings.allowedLanguages).length})...
+                        </option>
+                        {getAllowedLanguages(systemSettings.allowedLanguages).map((l) => (
                           <option key={l.code} value={l.name} className="bg-slate-900 text-white">
                             {l.name} ({l.nativeName})
                           </option>

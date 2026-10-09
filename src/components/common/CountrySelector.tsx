@@ -46,7 +46,7 @@ export const CountrySelector: React.FC<CountrySelectorProps> = ({
     if (!searchQuery.trim()) return availableCountries;
     const q = searchQuery.toLowerCase();
     return availableCountries.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase().includes(q) || c.region.toLowerCase().includes(q)
+      (c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase().includes(q)
     );
   }, [availableCountries, searchQuery]);
 
@@ -111,12 +111,11 @@ export const CountrySelector: React.FC<CountrySelectorProps> = ({
           {selectedCountry ? (
             <>
               <SvgFlag countryCode={selectedCountry.code} size="sm" className="rounded shadow" />
-              <div className="min-w-0">
-                <div className="text-xs sm:text-sm font-bold text-white truncate flex items-center space-x-1.5">
-                  <span>{selectedCountry.name}</span>
-                  <span className="text-[10px] font-mono text-slate-400 uppercase">({selectedCountry.code})</span>
-                </div>
-                <div className="text-[10px] text-slate-400 font-mono">{selectedCountry.region}</div>
+              <div className="text-xs sm:text-sm font-bold text-white truncate flex items-center space-x-1.5 min-w-0">
+                <span className="truncate">{selectedCountry.name}</span>
+                <span className="text-[10px] font-mono text-slate-400 uppercase shrink-0">
+                  ({selectedCountry.code})
+                </span>
               </div>
             </>
           ) : (
@@ -188,12 +187,13 @@ export const CountrySelector: React.FC<CountrySelectorProps> = ({
                   >
                     <div className="flex items-center space-x-2.5 min-w-0 pointer-events-none">
                       <SvgFlag countryCode={c.code} size="sm" className="rounded shadow-sm" />
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold truncate flex items-center space-x-1.5">
-                          <span className={isSelected ? 'text-indigo-300' : 'text-white'}>{c.name}</span>
-                          <span className="text-[10px] font-mono text-slate-400 uppercase">({c.code})</span>
-                        </div>
-                        <div className="text-[10px] text-slate-500 font-mono">{c.region}</div>
+                      <div className="text-xs font-bold truncate flex items-center space-x-1.5 min-w-0">
+                        <span className={`truncate ${isSelected ? 'text-indigo-300' : 'text-white'}`}>
+                          {c.name}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400 uppercase shrink-0">
+                          ({c.code})
+                        </span>
                       </div>
                     </div>
 
