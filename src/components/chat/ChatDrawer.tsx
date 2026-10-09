@@ -14,6 +14,7 @@ import {
   ShieldAlert,
   UserX,
   ExternalLink,
+  User,
   Check,
   CheckCircle2,
   UserCheck,
@@ -636,39 +637,57 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   <span className="hidden sm:inline">Inbox</span>
                 </button>
 
-                {/* Selected User Avatar with Top Left Status Dot */}
-                <div className="relative shrink-0">
-                  <img
-                    src={currentChatUser.avatarUrl}
-                    alt={currentChatUser.name}
-                    className="w-10 h-10 rounded-full object-cover ring-2 ring-[var(--app-hairline)]"
-                  />
-                  <span
-                    className={`absolute -top-0.5 -left-0.5 w-3.5 h-3.5 rounded-full border-2 border-[var(--app-card)] ${getStatusDot(
-                      currentChatUser.onlineStatus
-                    )}`}
-                  />
-                </div>
-
-                {/* User Details */}
-                <div className="min-w-0">
-                  <div className="flex items-center space-x-1.5">
-                    <h3 className="font-extrabold text-sm text-app-heading truncate">{currentChatUser.name}</h3>
-                    <span className="text-xs shrink-0" title={currentChatUser.nationality}>
-                      {getCountryFlag(currentChatUser.countryCode, currentChatUser.nationality)}
-                    </span>
-                    {isUserFriend && (
-                      <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-mono font-bold shrink-0 hidden sm:inline-flex items-center gap-0.5">
-                        <UserCheck className="w-3 h-3 text-emerald-400" />
-                        <span>Friend</span>
-                      </span>
-                    )}
+                {/* Selected User Avatar + name → public profile */}
+                <button
+                  type="button"
+                  onClick={() => onOpenProfile?.(currentChatUser.id)}
+                  className="flex items-center space-x-3 min-w-0 text-left rounded-xl hover:bg-app-input/60 px-1 py-0.5 -mx-1 transition-colors cursor-pointer"
+                  title={`View ${currentChatUser.name}'s profile`}
+                >
+                  <div className="relative shrink-0">
+                    <img
+                      src={currentChatUser.avatarUrl}
+                      alt={currentChatUser.name}
+                      className="w-10 h-10 rounded-full object-cover ring-2 ring-[var(--app-hairline)]"
+                    />
+                    <span
+                      className={`absolute -top-0.5 -left-0.5 w-3.5 h-3.5 rounded-full border-2 border-[var(--app-card)] ${getStatusDot(
+                        currentChatUser.onlineStatus
+                      )}`}
+                    />
                   </div>
-                </div>
+
+                  <div className="min-w-0">
+                    <div className="flex items-center space-x-1.5">
+                      <h3 className="font-extrabold text-sm text-app-heading truncate">{currentChatUser.name}</h3>
+                      <span className="text-xs shrink-0" title={currentChatUser.nationality}>
+                        {getCountryFlag(currentChatUser.countryCode, currentChatUser.nationality)}
+                      </span>
+                      {isUserFriend && (
+                        <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-mono font-bold shrink-0 hidden sm:inline-flex items-center gap-0.5">
+                          <UserCheck className="w-3 h-3 text-emerald-400" />
+                          <span>Friend</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </button>
               </div>
 
               {/* Header Right Action Buttons */}
               <div className="flex items-center space-x-2 shrink-0">
+                {onOpenProfile && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenProfile(currentChatUser.id)}
+                    className="p-2 bg-app-input hover:bg-brand-soft border border-hairline text-app-muted hover:text-app-heading rounded-xl transition-all cursor-pointer flex items-center justify-center shrink-0"
+                    title={`View ${currentChatUser.name}'s profile`}
+                    aria-label={`View ${currentChatUser.name}'s profile`}
+                  >
+                    <User className="w-4 h-4 text-pink-400" />
+                  </button>
+                )}
+
                 {/* Direct Video Call Button */}
                 <button
                   onClick={() => {

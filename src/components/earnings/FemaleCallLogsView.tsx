@@ -14,7 +14,8 @@ import {
   Sparkles,
   ShieldCheck,
   Globe,
-  DollarSign
+  DollarSign,
+  User,
 } from 'lucide-react';
 import { getCountryFlag } from '../../utils/flags';
 import { getFallbackAvatar } from '../../utils/avatars';
@@ -24,6 +25,7 @@ export type CallLogFilterKey = 'all' | 'missed' | 'answered' | 'non_friends' | '
 interface FemaleCallLogsViewProps {
   onOpenChat: (userId: string) => void;
   onStartCall: (userId: string) => void;
+  onOpenProfile?: (userId: string) => void;
   /** When true, hide page banner / filter chips (HostShell owns chrome). */
   shellMode?: boolean;
   /** Controlled filter when used inside HostShell. */
@@ -34,6 +36,7 @@ interface FemaleCallLogsViewProps {
 export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
   onOpenChat,
   onStartCall,
+  onOpenProfile,
   shellMode = false,
   activeFilter: controlledFilter,
   onFilterChange,
@@ -341,7 +344,13 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
               >
                 {/* Profile Info */}
                 <div className="flex items-center space-x-4">
-                  <div className="relative shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onOpenProfile?.(targetUserId)}
+                    className="relative shrink-0 rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-brand cursor-pointer"
+                    title={`View ${targetDisplayName}'s profile`}
+                    aria-label={`View ${targetDisplayName}'s profile`}
+                  >
                     <img
                       src={targetAvatar}
                       alt={targetDisplayName}
@@ -355,11 +364,18 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
                     <span className="absolute -bottom-1 -right-1 p-1 bg-slate-950 rounded-full border border-slate-800 text-[10px]">
                       {getCountryFlag(targetCode, targetCountry)}
                     </span>
-                  </div>
+                  </button>
 
                   <div>
                     <div className="flex items-center space-x-2 flex-wrap gap-1">
-                      <h3 className="font-extrabold text-white text-sm sm:text-base">{targetDisplayName}</h3>
+                      <button
+                        type="button"
+                        onClick={() => onOpenProfile?.(targetUserId)}
+                        className="font-extrabold text-white text-sm sm:text-base hover:text-brand transition-colors cursor-pointer text-left"
+                        title={`View ${targetDisplayName}'s profile`}
+                      >
+                        {targetDisplayName}
+                      </button>
                       
                       {isMissedCall ? (
                         <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-bold flex items-center space-x-1">
@@ -472,6 +488,18 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
                           aria-label="Add Friend"
                         >
                           <UserPlus className="w-4 h-4 text-pink-200" />
+                        </button>
+                      )}
+
+                      {onOpenProfile && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenProfile(targetUserId)}
+                          className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-all cursor-pointer"
+                          title="View Profile"
+                          aria-label="View Profile"
+                        >
+                          <User className="w-4 h-4 text-pink-400" />
                         </button>
                       )}
 

@@ -19,6 +19,7 @@ interface HostDashboardProps {
   onAppSurfaceChange: (surface: HostAppSurface) => void;
   onOpenChat?: (userId: string) => void;
   onStartCall?: (userId: string) => void;
+  onOpenProfile?: (userId: string) => void;
 }
 
 const EARNINGS_TIMEFRAMES: HostEarningsTimeframe[] = ['daily', 'weekly', 'monthly', 'yearly'];
@@ -43,6 +44,7 @@ export const HostDashboard: React.FC<HostDashboardProps> = ({
   onAppSurfaceChange,
   onOpenChat,
   onStartCall,
+  onOpenProfile,
 }) => {
   const { currentUser, systemSettings, callLogs } = useApp();
 
@@ -145,6 +147,7 @@ export const HostDashboard: React.FC<HostDashboardProps> = ({
           }}
           onOpenChat={(id) => onOpenChat?.(id)}
           onStartCall={(id) => onStartCall?.(id)}
+          onOpenProfile={(id) => onOpenProfile?.(id)}
         />
       ) : (
         <FemaleHostAnalyticsDashboard

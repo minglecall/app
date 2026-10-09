@@ -4,7 +4,7 @@
  * Only claims known social prefixes. Other v1 modules (e.g. finance) must return null
  * so later router handlers can serve them — never swallow with "Unimplemented v1 path".
  */
-const { send, readJsonBody, requireAuth, isAdminRole } = require('./helpers');
+const { send, readJsonBody, requireAuth, isAdminRole, mapPublicProfileRow } = require('./helpers');
 
 /** Prefixes owned by this social v1 handler (must match Express mounts under /api/v1). */
 const SOCIAL_V1_PREFIXES = [
@@ -16,6 +16,7 @@ const SOCIAL_V1_PREFIXES = [
   'reviews',
   'reports',
   'admin/reports',
+  'users',
 ];
 
 function v1Path(fullPath, req) {
@@ -150,6 +151,45 @@ async function handleV1(fullPath, req, res) {
   const body = method !== 'GET' ? await readJsonBody(req) : {};
 
   try {
+    // GET /api/v1/users/:id/public
+    if (method === 'GET' && /^users\/[^/]+\/public$/.test(path.split('?')[0])) {
+      const targetId = decodeURIComponent(path.split('?')[0].replace(/^users\//, '').replace(/\/public$/, ''));
+      if (!targetId) {
+        return send(res, 400, { success: false, error: { message: 'Invalid user id', code: 'INVALID_ID' } });
+      }
+      if (targetId !== me) {
+        const { data: blockRows } = await client
+          .from('blocked_users')
+          .select('user_id, blocked_user_id')
+          .or(
+            `and(user_id.eq.${me},blocked_user_id.eq.${targetId}),and(user_id.eq.${targetId},blocked_user_id.eq.${me})`
+          )
+          .limit(1);
+        if (blockRows && blockRows.length > 0) {
+          return send(res, 404, { success: false, error: { message: 'Profile not found', code: 'NOT_FOUND' } });
+        }
+      }
+      const selectCols =
+        'id, name, gender, age, dob, nationality, country_code, spoken_languages, bio, extended_bio, location_city, zodiac, interests, tags, interested_in, avatar_url, gallery, gallery_videos, intro_video_url, is_verified, online_status, role, response_rate, hourly_coin_rate, rating_score, total_reviews_count, total_calls_hosted, exact_location, is_using_mock_location, mock_location_city, mock_location_country, mock_location_country_code, created_at, is_banned';
+      let { data, error } = await client.from('profiles').select(selectCols).eq('id', targetId).maybeSingle();
+      if (error && /column|does not exist/i.test(String(error.message || ''))) {
+        const fallback = await client
+          .from('profiles')
+          .select(
+            'id, name, gender, age, dob, nationality, country_code, spoken_languages, bio, extended_bio, location_city, zodiac, interests, tags, avatar_url, gallery, intro_video_url, is_verified, online_status, role, hourly_coin_rate, created_at, is_banned'
+          )
+          .eq('id', targetId)
+          .maybeSingle();
+        data = fallback.data;
+        error = fallback.error;
+      }
+      if (error) throw error;
+      if (!data || data.is_banned) {
+        return send(res, 404, { success: false, error: { message: 'Profile not found', code: 'NOT_FOUND' } });
+      }
+      return send(res, 200, { success: true, data: { user: mapPublicProfileRow(data) } });
+    }
+
     if (path === 'matches/me' && method === 'GET') {
       const { data, error } = await client
         .from('matches')

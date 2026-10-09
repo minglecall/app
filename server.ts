@@ -70,6 +70,7 @@ import {
   createFriendsRouter,
   createMessagesRouter,
   createFinanceRouter,
+  createUsersPublicRouter,
 } from './server/routes';
 import {
   requireAuth,
@@ -2039,6 +2040,7 @@ async function startServer(): Promise<express.Express> {
   app.use('/api/v1/admin/reports', createAdminReportsRouter(runtime));
   app.use('/api/v1/reviews', createReviewsRouter(runtime));
   app.use('/api/v1/feed', createFeedRouter(runtime));
+  app.use('/api/v1/users', createUsersPublicRouter(runtime));
   app.use('/api/messages', createMessagesRouter(runtime));
   app.use('/api/v1/finance', createFinanceRouter(runtime));
 

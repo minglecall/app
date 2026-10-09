@@ -36,17 +36,41 @@ export function normalizePath(pathname: string): string {
   return trimmed || '/';
 }
 
+/** Public peer profile deep link: `/profile/<userId>` (exact `/profile` remains own edit page). */
+export function parsePublicProfilePath(pathname: string): string | null {
+  const normalized = normalizePath(pathname);
+  const match = normalized.match(/^\/profile\/([^/]+)$/);
+  if (!match) return null;
+  let id = match[1];
+  try {
+    id = decodeURIComponent(id);
+  } catch {
+    // keep raw segment
+  }
+  id = String(id || '').trim();
+  if (!id) return null;
+  return id;
+}
+
+export function publicProfilePath(userId: string): string {
+  return `/profile/${encodeURIComponent(String(userId || '').trim())}`;
+}
+
 export function tabToPath(tab: string): string {
   return TAB_PATHS[tab] ?? TAB_PATHS[DEFAULT_TAB];
 }
 
 export function pathToTab(pathname: string): string {
   const normalized = normalizePath(pathname);
+  // `/profile/<id>` is not the edit tab — fall through to default unless exact `/profile`.
+  if (parsePublicProfilePath(normalized)) return DEFAULT_TAB;
   return PATH_TO_TAB[normalized] ?? DEFAULT_TAB;
 }
 
 export function isKnownAppPath(pathname: string): boolean {
-  return normalizePath(pathname) in PATH_TO_TAB;
+  const normalized = normalizePath(pathname);
+  if (normalized in PATH_TO_TAB) return true;
+  return parsePublicProfilePath(normalized) != null;
 }
 
 export function isSetupLocation(pathname?: string, hash?: string): boolean {
