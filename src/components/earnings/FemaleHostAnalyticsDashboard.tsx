@@ -92,11 +92,26 @@ function getManagedHostsForLeader(leader: UserProfile, allUsers: UserProfile[]):
   });
 }
 
+export type HostAnalyticsSection =
+  | 'overview'
+  | 'targets'
+  | 'financial'
+  | 'engagement'
+  | 'ratings'
+  | 'payouts';
+
 interface FemaleHostAnalyticsDashboardProps {
   user?: UserProfile;
   onOpenCallLogs?: () => void;
   onOpenChat?: (userId: string) => void;
   onStartCall?: (userId: string) => void;
+  /** When true, hide page banner / in-page tabs (HostShell owns chrome). */
+  shellMode?: boolean;
+  /** Controlled section when used inside HostShell. */
+  activeSection?: HostAnalyticsSection;
+  onSectionChange?: (section: HostAnalyticsSection) => void;
+  timeframe?: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  onTimeframeChange?: (tf: 'daily' | 'weekly' | 'monthly' | 'yearly') => void;
 }
 
 export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboardProps> = ({
@@ -104,6 +119,11 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
   onOpenCallLogs,
   onOpenChat,
   onStartCall,
+  shellMode = false,
+  activeSection: controlledSection,
+  onSectionChange,
+  timeframe: controlledTimeframe,
+  onTimeframeChange,
 }) => {
   const {
     currentUser,
@@ -205,12 +225,20 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
   const canEarnCoins = Boolean(activeUser.teamLeaderId) || Boolean(systemSettings.enableRegularFemaleCoinEarning);
 
   // Active Timeframe for Analytics Chart
-  const [timeframe, setTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly'>('daily');
+  const [internalTimeframe, setInternalTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly'>('daily');
+  const timeframe = controlledTimeframe ?? internalTimeframe;
+  const setTimeframe = (tf: 'daily' | 'weekly' | 'monthly' | 'yearly') => {
+    onTimeframeChange?.(tf);
+    if (controlledTimeframe === undefined) setInternalTimeframe(tf);
+  };
 
   // Active Sub-tab in Analytics Dashboard
-  const [activeSection, setActiveSection] = useState<
-    'targets' | 'financial' | 'engagement' | 'ratings' | 'payouts'
-  >('targets');
+  const [internalSection, setInternalSection] = useState<HostAnalyticsSection>('targets');
+  const activeSection = controlledSection ?? internalSection;
+  const setActiveSection = (section: HostAnalyticsSection) => {
+    onSectionChange?.(section);
+    if (controlledSection === undefined) setInternalSection(section);
+  };
 
   // Financial Calculations (Fixed Peg)
   // Header = CURRENT PERIOD (creator_metrics; resets on period close).
@@ -268,9 +296,17 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
   // Real hourly volume breakdown from callLogs
   const peakHoursData = hostMetrics.peakHours;
   return (
-    <div id="female-host-analytics-dashboard" className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-6 space-y-6">
+    <div
+      id="female-host-analytics-dashboard"
+      className={
+        shellMode
+          ? 'space-y-5'
+          : 'max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-6 space-y-6'
+      }
+    >
       
-      {/* 1. Header Banner */}
+      {/* 1. Header Banner — hidden inside HostShell */}
+      {!shellMode && (
       <div className="relative rounded-3xl bg-gradient-to-r from-emerald-950 via-[#0E1B1B] to-[#0A0E17] border border-emerald-500/30 p-6 sm:p-8 shadow-2xl overflow-hidden">
         {/* Glow ambient */}
         <div className="absolute top-0 right-0 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -403,8 +439,10 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           )}
         </div>
       </div>
+      )}
 
-      {/* 2. TOP KPI CARDS (Financial & Call Overview) */}
+      {/* 2. TOP KPI CARDS — Overview only in shell; always when legacy layout */}
+      {(!shellMode || activeSection === 'overview') && (
       <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {/* Card 1: Revenue or Total Calls */}
         {canEarnCoins ? (
@@ -520,9 +558,10 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
           </div>
         </div>
       </div>
+      )}
 
-      {/* Team Leader: Managed Hosts roster (keeps existing hub content below) */}
-      {isTeamLeaderViewer && (
+      {/* Team Leader: Managed Hosts roster — Overview only in shell; always in legacy layout */}
+      {isTeamLeaderViewer && (!shellMode || activeSection === 'overview') && (
         <div className="p-5 sm:p-6 bg-[#13161F] border border-amber-500/30 rounded-3xl space-y-4 shadow-xl">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div>
@@ -677,7 +716,8 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                 </p>
               </div>
 
-              {/* Timeframe Filter Buttons */}
+              {/* Timeframe Filter Buttons — HostShell L2 owns this in shellMode */}
+              {!shellMode && (
               <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
                 {(['daily', 'weekly', 'monthly', 'yearly'] as const).map((tf) => (
                   <button
@@ -693,6 +733,7 @@ export const FemaleHostAnalyticsDashboard: React.FC<FemaleHostAnalyticsDashboard
                   </button>
                 ))}
               </div>
+              )}
             </div>
 
             {/* Recharts Area/Bar Graph — single real Call earnings series */}

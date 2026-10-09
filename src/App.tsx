@@ -8,6 +8,7 @@ import { MomentsFeed } from './components/social/MomentsFeed';
 import { QuickMatchRoulette } from './components/discovery/QuickMatchRoulette';
 import { FemaleEarningsDashboard } from './components/earnings/FemaleEarningsDashboard';
 import { FemaleCallLogsView } from './components/earnings/FemaleCallLogsView';
+import { HostDashboard } from './components/earnings/HostDashboard';
 import { AdminDashboard } from './components/admin/AdminDashboard';
 import { TeamLeaderDashboard } from './components/teamleader/TeamLeaderDashboard';
 import { UserProfilePage } from './components/profile/UserProfilePage';
@@ -142,8 +143,20 @@ const MainApp: React.FC = () => {
     );
   }
 
+  const isFemaleHostStudioUser =
+    currentUser.role === 'female_creator' ||
+    currentUser.role === 'female_host' ||
+    currentUser.role === 'team_leader' ||
+    currentUser.role === 'agency_manager';
+
+  const isHostStudioSurface =
+    isFemaleHostStudioUser && (activeTab === 'earnings' || activeTab === 'call_logs');
+
   const isShellLayout =
-    activeTab === 'admin' || activeTab === 'team_leader' || activeTab === 'profile';
+    activeTab === 'admin' ||
+    activeTab === 'team_leader' ||
+    activeTab === 'profile' ||
+    isHostStudioSurface;
 
   return (
     <div
@@ -212,7 +225,16 @@ const MainApp: React.FC = () => {
           />
         )}
 
-        {activeTab === 'earnings' && (
+        {isHostStudioSurface && (
+          <HostDashboard
+            appSurface={activeTab === 'call_logs' ? 'call_logs' : 'earnings'}
+            onAppSurfaceChange={(surface) => setActiveTab(surface)}
+            onOpenChat={(id) => setChatUserId(id)}
+            onStartCall={(id) => startCall(id)}
+          />
+        )}
+
+        {activeTab === 'earnings' && !isHostStudioSurface && (
           <FemaleEarningsDashboard
             onOpenStore={() => setIsStoreOpen(true)}
             onStartCall={(id) => startCall(id)}
@@ -221,7 +243,7 @@ const MainApp: React.FC = () => {
           />
         )}
 
-        {activeTab === 'call_logs' && (
+        {activeTab === 'call_logs' && !isHostStudioSurface && (
           <FemaleCallLogsView
             onOpenChat={(id) => setChatUserId(id)}
             onStartCall={(id) => startCall(id)}

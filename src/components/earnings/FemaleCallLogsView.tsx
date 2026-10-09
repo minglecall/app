@@ -19,14 +19,24 @@ import {
 import { getCountryFlag } from '../../utils/flags';
 import { getFallbackAvatar } from '../../utils/avatars';
 
+export type CallLogFilterKey = 'all' | 'missed' | 'answered' | 'non_friends' | 'friends';
+
 interface FemaleCallLogsViewProps {
   onOpenChat: (userId: string) => void;
   onStartCall: (userId: string) => void;
+  /** When true, hide page banner / filter chips (HostShell owns chrome). */
+  shellMode?: boolean;
+  /** Controlled filter when used inside HostShell. */
+  activeFilter?: CallLogFilterKey;
+  onFilterChange?: (filter: CallLogFilterKey) => void;
 }
 
 export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
   onOpenChat,
   onStartCall,
+  shellMode = false,
+  activeFilter: controlledFilter,
+  onFilterChange,
 }) => {
   const {
     currentUser,
@@ -39,7 +49,12 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
     systemSettings,
   } = useApp();
 
-  const [activeFilter, setActiveFilter] = useState<'all' | 'missed' | 'answered' | 'non_friends' | 'friends'>('all');
+  const [internalFilter, setInternalFilter] = useState<CallLogFilterKey>('all');
+  const activeFilter = controlledFilter ?? internalFilter;
+  const setActiveFilter = (filter: CallLogFilterKey) => {
+    onFilterChange?.(filter);
+    if (controlledFilter === undefined) setInternalFilter(filter);
+  };
   const [searchQuery, setSearchQuery] = useState('');
 
   const isLikelyUUID = (str?: string) => {
@@ -108,8 +123,15 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-      {/* Header Banner */}
+    <div
+      className={
+        shellMode
+          ? 'space-y-5'
+          : 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8'
+      }
+    >
+      {/* Header Banner — hidden inside HostShell */}
+      {!shellMode && (
       <div className="bg-gradient-to-r from-pink-950/80 via-purple-950/40 to-slate-900 border border-pink-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
         <div>
           <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-pink-500/20 border border-pink-500/40 text-pink-300 text-xs font-semibold mb-2">
@@ -186,9 +208,17 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
           )}
         </div>
       </div>
+      )}
 
-      {/* Filter Tabs & Search Bar */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-900 border border-slate-800 p-3 rounded-2xl">
+      {/* Filter Tabs & Search — filter chips hidden in shellMode (L2 owns filters) */}
+      <div
+        className={`flex flex-col sm:flex-row items-center gap-4 ${
+          shellMode
+            ? 'justify-end'
+            : 'justify-between bg-slate-900 border border-slate-800 p-3 rounded-2xl'
+        }`}
+      >
+        {!shellMode && (
         <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-bold w-full sm:w-auto overflow-x-auto">
           <button
             onClick={() => setActiveFilter('all')}
@@ -244,16 +274,17 @@ export const FemaleCallLogsView: React.FC<FemaleCallLogsViewProps> = ({
             <span>Current Friends</span>
           </button>
         </div>
+        )}
 
         {/* Search */}
-        <div className="relative w-full sm:w-64 shrink-0">
+        <div className={`relative w-full shrink-0 ${shellMode ? 'sm:w-72' : 'sm:w-64'}`}>
           <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-500" />
           <input
             type="text"
             placeholder={isCreatorOrAdmin ? 'Search caller...' : 'Search creator / call...'}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500"
+            className="w-full pl-9 pr-3 py-2.5 min-h-11 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500"
           />
         </div>
       </div>
