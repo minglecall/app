@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Flame, PhoneCall, ShieldCheck, Video } from 'lucide-react';
 import { UserProfile, CreatorMetrics } from '../../types';
 import { Badge, MediaCard } from '../ui';
@@ -10,6 +10,8 @@ import { isCurrentlyPeakHour } from '../../utils/discoveryAlgorithm';
 import {
   DiscoveryCardLayout,
   DiscoveryCardSlotId,
+  DiscoveryCardViewportId,
+  DiscoveryCardViewportLayout,
   DiscoveryCardWidgetConfig,
   DiscoveryCardWidgetId,
   groupWidgetsBySlot,
@@ -18,6 +20,7 @@ import {
   widgetBoxAlignClasses,
   widgetPaddingStyle,
 } from '../../../shared/discoveryCardLayout';
+import type { MediaCardAspect } from '../ui/MediaCard';
 
 export interface DiscoveryCardProps {
   user: UserProfile;
@@ -30,10 +33,37 @@ export interface DiscoveryCardProps {
   className?: string;
   /** When true, call button does not fire (admin preview) */
   previewMode?: boolean;
+  /** Admin preview: force which viewport layout to render (ignores window width) */
+  previewViewport?: DiscoveryCardViewportId;
 }
 
 const STATUS_BADGE_CLASS =
   'backdrop-blur-md shadow-md shadow-black/50 font-bold text-white border';
+
+const MD_UP_QUERY = '(min-width: 768px)';
+
+function useMdUp(): boolean {
+  const [isMdUp, setIsMdUp] = useState(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    return window.matchMedia(MD_UP_QUERY).matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia(MD_UP_QUERY);
+    const onChange = () => setIsMdUp(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  return isMdUp;
+}
+
+function asMediaAspect(v: string): MediaCardAspect {
+  if (v === '9/16' || v === '2/3' || v === '3/4') return v;
+  return '3/4';
+}
 
 export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   user,
@@ -45,9 +75,15 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   peakHoursEnd,
   className,
   previewMode = false,
+  previewViewport,
 }) => {
   const layout = useMemo(() => parseDiscoveryCardLayout(layoutProp), [layoutProp]);
-  const bySlot = useMemo(() => groupWidgetsBySlot(layout), [layout]);
+  const isMdUp = useMdUp();
+  const activeViewportId: DiscoveryCardViewportId =
+    previewViewport ?? (isMdUp ? 'desktop' : 'mobile');
+  const vp: DiscoveryCardViewportLayout =
+    activeViewportId === 'desktop' ? layout.desktop : layout.mobile;
+  const bySlot = useMemo(() => groupWidgetsBySlot(vp), [vp]);
 
   const isUserOnline = user.onlineStatus === 'online';
   const isUserBusy = user.onlineStatus === 'busy' || user.onlineStatus === 'in_call';
@@ -65,6 +101,11 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     if (layout.photoSource === 'galleryFirst') return galleryUrl || avatarUrl || fallbackAvatar;
     return avatarUrl || galleryUrl || fallbackAvatar;
   })();
+
+  const aspectMobile = asMediaAspect(layout.mobile.cardAspect);
+  const aspectDesktop = asMediaAspect(layout.desktop.cardAspect);
+  // In forced preview, lock both sides to the active viewport aspect so the card matches the toggle
+  const previewAspect = previewViewport ? asMediaAspect(vp.cardAspect) : null;
 
   const wrapPad = (w: DiscoveryCardWidgetConfig, node: React.ReactNode): React.ReactNode => {
     if (node == null) return null;
@@ -90,7 +131,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             <Badge
               tone="brand"
               className={`${STATUS_BADGE_CLASS} !bg-orange-500 !text-white !border-orange-200/70`}
-              style={{ fontSize: layout.badgeFontPx }}
+              style={{ fontSize: vp.badgeFontPx }}
             >
               <Flame className="w-2.5 h-2.5" /> Ready
             </Badge>
@@ -100,9 +141,9 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             <Badge
               tone="neutral"
               className={`${STATUS_BADGE_CLASS} !bg-emerald-500 !text-white !border-emerald-200/70`}
-              style={{ fontSize: layout.badgeFontPx }}
+              style={{ fontSize: vp.badgeFontPx }}
             >
-              {layout.statusBadgePing ? (
+              {vp.statusBadgePing ? (
                 <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/80" />
                   <span className="relative inline-flex h-2 w-2 rounded-full bg-white shadow-sm" />
@@ -116,7 +157,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             <Badge
               tone="warning"
               className={`${STATUS_BADGE_CLASS} !bg-amber-500 !text-white !border-amber-200/70`}
-              style={{ fontSize: layout.badgeFontPx }}
+              style={{ fontSize: vp.badgeFontPx }}
             >
               Busy
             </Badge>
@@ -126,7 +167,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             <Badge
               tone="neutral"
               className={`${STATUS_BADGE_CLASS} !bg-slate-900/85 !text-white !border-white/40`}
-              style={{ fontSize: layout.badgeFontPx }}
+              style={{ fontSize: vp.badgeFontPx }}
             >
               Offline
             </Badge>
@@ -141,7 +182,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           w,
           <span title="Verified" aria-label="Verified" className="drop-shadow-md shrink-0">
             <ShieldCheck
-              style={{ width: layout.verifiedIconPx, height: layout.verifiedIconPx }}
+              style={{ width: vp.verifiedIconPx, height: vp.verifiedIconPx }}
               className="text-emerald-400"
               strokeWidth={2.5}
             />
@@ -155,7 +196,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             className={`font-display font-bold text-on-media drop-shadow-md leading-tight truncate ${
               w.widthPercent >= 100 ? 'block w-full whitespace-nowrap' : 'block max-w-full'
             }`}
-            style={{ fontSize: layout.nameFontPx }}
+            style={{ fontSize: vp.nameFontPx }}
             title={user.name}
           >
             {user.name}
@@ -167,7 +208,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           w,
           <span
             className="font-medium text-white/90 drop-shadow-sm shrink-0 leading-none"
-            style={{ fontSize: layout.metaFontPx }}
+            style={{ fontSize: vp.metaFontPx }}
           >
             {user.age}
           </span>
@@ -179,7 +220,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           <SvgFlag
             countryCode={user.countryCode}
             nationality={countryName}
-            size={layout.flagSize}
+            size={vp.flagSize}
             rounded={true}
             className="block"
           />
@@ -192,7 +233,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             className={`text-white/90 font-medium drop-shadow-sm leading-none ${
               w.widthPercent >= 100 ? 'block w-full truncate whitespace-nowrap' : 'truncate'
             }`}
-            style={{ fontSize: layout.metaFontPx }}
+            style={{ fontSize: vp.metaFontPx }}
             title={countryName}
           >
             {countryName}
@@ -201,10 +242,10 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
       case 'callButton': {
         const btnStyle: React.CSSProperties = {
-          width: layout.callStyle === 'circle' ? layout.callButtonPx : undefined,
-          height: layout.callButtonPx,
-          minWidth: layout.callStyle === 'pill' ? layout.callButtonPx * 1.6 : layout.callButtonPx,
-          borderRadius: layout.callStyle === 'circle' ? 9999 : 12,
+          width: vp.callStyle === 'circle' ? vp.callButtonPx : undefined,
+          height: vp.callButtonPx,
+          minWidth: vp.callStyle === 'pill' ? vp.callButtonPx * 1.6 : vp.callButtonPx,
+          borderRadius: vp.callStyle === 'circle' ? 9999 : 12,
         };
         return wrapPad(
           w,
@@ -226,9 +267,9 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             style={btnStyle}
           >
             {isUserBusy ? (
-              <PhoneCall style={{ width: layout.callIconPx, height: layout.callIconPx }} />
+              <PhoneCall style={{ width: vp.callIconPx, height: vp.callIconPx }} />
             ) : (
-              <Video style={{ width: layout.callIconPx, height: layout.callIconPx }} />
+              <Video style={{ width: vp.callIconPx, height: vp.callIconPx }} />
             )}
           </button>
         );
@@ -306,8 +347,8 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       src={primaryAvatar}
       fallbackSrc={fallbackAvatar}
       alt={user.name}
-      aspectMobile={layout.cardAspectMobile}
-      aspectDesktop={layout.cardAspectDesktop}
+      aspectMobile={previewAspect ?? aspectMobile}
+      aspectDesktop={previewAspect ?? aspectDesktop}
       showPhoto={layout.showPhoto}
       objectFit={layout.photoFit}
       objectPosition={layout.photoPosition}

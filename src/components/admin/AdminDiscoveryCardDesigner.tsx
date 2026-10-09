@@ -4,8 +4,10 @@ import {
   ArrowDown,
   ArrowUp,
   LayoutTemplate,
+  Monitor,
   RotateCcw,
   Save,
+  Smartphone,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { UserProfile } from '../../types';
@@ -15,6 +17,8 @@ import {
   DISCOVERY_CARD_WIDGETS,
   DiscoveryCardLayout,
   DiscoveryCardSlotId,
+  DiscoveryCardViewportId,
+  DiscoveryCardViewportLayout,
   DiscoveryCardWidgetId,
   SIZE_BOUNDS,
   PAD_BOUNDS,
@@ -68,20 +72,33 @@ function cloneLayout(raw: unknown): DiscoveryCardLayout {
   );
 }
 
+function patchViewport(
+  layout: DiscoveryCardLayout,
+  viewport: DiscoveryCardViewportId,
+  patch: Partial<DiscoveryCardViewportLayout> & { widgets?: DiscoveryCardViewportLayout['widgets'] }
+): DiscoveryCardLayout {
+  return parseDiscoveryCardLayout({
+    ...layout,
+    [viewport]: { ...layout[viewport], ...patch },
+  });
+}
+
 export const AdminDiscoveryCardDesigner: React.FC = () => {
   const { systemSettings, updateSystemSettings, showToast } = useApp();
   const [draft, setDraft] = useState<DiscoveryCardLayout>(() =>
     cloneLayout(systemSettings.discoveryCardLayout ?? DEFAULT_DISCOVERY_CARD_LAYOUT)
   );
+  const [editorViewport, setEditorViewport] = useState<DiscoveryCardViewportId>('mobile');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setDraft(cloneLayout(systemSettings.discoveryCardLayout ?? DEFAULT_DISCOVERY_CARD_LAYOUT));
   }, [systemSettings.discoveryCardLayout]);
 
-  const conflicts = useMemo(() => getDiscoveryCardConflicts(draft), [draft]);
+  const vp = draft[editorViewport];
+  const conflicts = useMemo(() => getDiscoveryCardConflicts(vp), [vp]);
   const blocksSave = discoveryCardLayoutBlocksSave(draft);
-  const bySlot = useMemo(() => groupWidgetsBySlot(draft), [draft]);
+  const bySlot = useMemo(() => groupWidgetsBySlot(vp), [vp]);
 
   const updateWidget = (
     id: DiscoveryCardWidgetId,
@@ -101,7 +118,8 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
     }>
   ) => {
     setDraft((prev) => {
-      const widgets = prev.widgets.map((w) => {
+      const current = prev[editorViewport];
+      const widgets = current.widgets.map((w) => {
         if (w.id !== id) return w;
         let slot = patch.slot ?? w.slot;
         if (!WIDGET_ALLOWED_SLOTS[id].includes(slot)) {
@@ -123,7 +141,7 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
           widthPercent: patch.widthPercent !== undefined ? patch.widthPercent : w.widthPercent,
         };
       });
-      return parseDiscoveryCardLayout({ ...prev, widgets });
+      return patchViewport(prev, editorViewport, { widgets });
     });
   };
 
@@ -136,30 +154,42 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
     const a = list[idx];
     const b = list[swap];
     setDraft((prev) => {
-      const widgets = prev.widgets.map((w) => {
+      const current = prev[editorViewport];
+      const widgets = current.widgets.map((w) => {
         if (w.id === a.id) return { ...w, order: b.order };
         if (w.id === b.id) return { ...w, order: a.order };
         return w;
       });
-      // If orders equal, force sequential
-      const slotWidgets = widgets.filter((w) => w.enabled && w.slot === slot).sort((x, y) => x.order - y.order);
+      const slotWidgets = widgets
+        .filter((w) => w.enabled && w.slot === slot)
+        .sort((x, y) => x.order - y.order);
       slotWidgets.forEach((w, i) => {
         const target = widgets.find((x) => x.id === w.id);
         if (target) target.order = i;
       });
-      return parseDiscoveryCardLayout({ ...prev, widgets });
+      return patchViewport(prev, editorViewport, { widgets });
     });
+  };
+
+  const updateVpField = <K extends keyof DiscoveryCardViewportLayout>(
+    key: K,
+    value: DiscoveryCardViewportLayout[K]
+  ) => {
+    setDraft((prev) => patchViewport(prev, editorViewport, { [key]: value }));
   };
 
   const handleSave = async () => {
     if (blocksSave) {
-      showToast('Cannot save', 'Fix overcrowded top corners (max 2 chip widgets per corner).', 'error');
+      showToast(
+        'Cannot save',
+        'Fix overcrowded top corners on Mobile and Desktop (max 2 chip widgets per corner).',
+        'error'
+      );
       return;
     }
     const safe = parseDiscoveryCardLayout(draft);
     setSaving(true);
     try {
-      // updateSystemSettings already toasts success / persists to Supabase
       updateSystemSettings({ discoveryCardLayout: safe });
     } catch (e: any) {
       showToast('Save failed', e?.message || 'Failed to save layout', 'error');
@@ -173,6 +203,35 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
     showToast('Reset', 'Default layout restored in the editor (not saved yet).', 'info');
   };
 
+  const viewportToggle = (
+    <div className="inline-flex rounded-xl border border-slate-700 bg-slate-950/80 p-0.5">
+      <button
+        type="button"
+        onClick={() => setEditorViewport('mobile')}
+        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-colors ${
+          editorViewport === 'mobile'
+            ? 'bg-pink-600 text-white'
+            : 'text-slate-400 hover:text-slate-200'
+        }`}
+      >
+        <Smartphone className="w-3.5 h-3.5" />
+        Mobile
+      </button>
+      <button
+        type="button"
+        onClick={() => setEditorViewport('desktop')}
+        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-colors ${
+          editorViewport === 'desktop'
+            ? 'bg-pink-600 text-white'
+            : 'text-slate-400 hover:text-slate-200'
+        }`}
+      >
+        <Monitor className="w-3.5 h-3.5" />
+        Desktop
+      </button>
+    </div>
+  );
+
   return (
     <div id="admin-discovery-card-designer" className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -182,29 +241,11 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
             Discovery Card Designer
           </h3>
           <p className="text-xs text-slate-400 max-w-xl">
-            Toggle widgets, assign bounded slots, and clamp sizes. Overlaps are resolved by moving or disabling
-            widgets — invalid config never crashes the live grid.
+            Edit Mobile and Desktop layouts separately. Widget placement, sizes, and aspect apply per
+            breakpoint; photo settings are shared. Invalid config never crashes the live grid.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleReset}
-            className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 border border-slate-700"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Reset
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving || blocksSave}
-            className="px-3 py-1.5 rounded-xl bg-pink-600 hover:bg-pink-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5"
-          >
-            <Save className="w-3.5 h-3.5" />
-            {saving ? 'Saving…' : 'Save layout'}
-          </button>
-        </div>
+        {viewportToggle}
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_280px] gap-4">
@@ -212,14 +253,16 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
         <div className="space-y-4">
           {/* Widgets */}
           <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
-            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Widgets</h4>
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+              Widgets — {editorViewport === 'mobile' ? 'Mobile' : 'Desktop'}
+            </h4>
             <p className="text-[10px] text-slate-500">
-              Zone + Next line + Align + <strong className="text-slate-400">Width %</strong> (0=auto, 100=full row).
-              Example: Name 80% + Status 20% on one line; Country Next line + Width 100% for a full-width country row.
+              Zone + Next line + Align + <strong className="text-slate-400">Width %</strong> (0=auto,
+              100=full row). Changes apply only to the selected breakpoint.
             </p>
             <div className="space-y-2">
               {DISCOVERY_CARD_WIDGETS.map((id) => {
-                const w = draft.widgets.find((x) => x.id === id)!;
+                const w = vp.widgets.find((x) => x.id === id)!;
                 const allowed = WIDGET_ALLOWED_SLOTS[id];
                 return (
                   <div
@@ -377,7 +420,9 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
 
           {/* Slot order */}
           <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
-            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Slot order</h4>
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+              Slot order — {editorViewport === 'mobile' ? 'Mobile' : 'Desktop'}
+            </h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {(Object.keys(bySlot) as DiscoveryCardSlotId[]).map((slot) => {
                 const list = bySlot[slot];
@@ -426,13 +471,15 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
             <div className="rounded-2xl border border-amber-500/40 bg-amber-950/30 p-4 space-y-2">
               <h4 className="text-xs font-bold text-amber-200 uppercase tracking-wider flex items-center gap-1.5">
                 <AlertTriangle className="w-3.5 h-3.5" />
-                Overlap / shared slots
+                Overlap / shared slots ({editorViewport === 'mobile' ? 'Mobile' : 'Desktop'})
               </h4>
               {conflicts.map((c) => (
                 <div key={c.slot} className="text-xs text-amber-100/90 space-y-1.5">
                   <div>
                     <strong>{SLOT_LABELS[c.slot]}</strong>: {c.widgets.map((id) => WIDGET_LABELS[id]).join(' + ')}
-                    {c.blocksSave ? ' — too crowded (max 2 chips). Move or disable one.' : ' — move one or turn one off if crowded.'}
+                    {c.blocksSave
+                      ? ' — too crowded (max 2 chips). Move or disable one.'
+                      : ' — move one or turn one off if crowded.'}
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     {c.widgets.map((id) => (
@@ -453,7 +500,9 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
 
           {/* Sizes */}
           <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
-            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Sizes (clamped)</h4>
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+              Sizes — {editorViewport === 'mobile' ? 'Mobile' : 'Desktop'}
+            </h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               {(
                 [
@@ -470,18 +519,14 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                   <label key={key} className="space-y-1">
                     <span className="text-slate-400 font-semibold flex justify-between">
                       <span>{label}</span>
-                      <span className="font-mono text-slate-300">{draft[key]}</span>
+                      <span className="font-mono text-slate-300">{vp[key]}</span>
                     </span>
                     <input
                       type="range"
                       min={bounds.min}
                       max={bounds.max}
-                      value={draft[key]}
-                      onChange={(e) =>
-                        setDraft((prev) =>
-                          parseDiscoveryCardLayout({ ...prev, [key]: Number(e.target.value) })
-                        )
-                      }
+                      value={vp[key]}
+                      onChange={(e) => updateVpField(key, Number(e.target.value))}
                       className="w-full accent-pink-500"
                     />
                     <span className="text-[10px] text-slate-500 font-mono">
@@ -494,12 +539,8 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
               <label className="flex items-center gap-2 cursor-pointer sm:col-span-2">
                 <input
                   type="checkbox"
-                  checked={draft.statusBadgePing}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, statusBadgePing: e.target.checked })
-                    )
-                  }
+                  checked={vp.statusBadgePing}
+                  onChange={(e) => updateVpField('statusBadgePing', e.target.checked)}
                   className="accent-pink-500 w-4 h-4"
                 />
                 <span className="text-slate-300 font-semibold">Online badge status dot</span>
@@ -508,12 +549,8 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
               <label className="space-y-1">
                 <span className="text-slate-400 font-semibold">Flag size</span>
                 <select
-                  value={draft.flagSize}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, flagSize: e.target.value })
-                    )
-                  }
+                  value={vp.flagSize}
+                  onChange={(e) => updateVpField('flagSize', e.target.value as DiscoveryCardViewportLayout['flagSize'])}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200"
                 >
                   <option value="xs">xs</option>
@@ -525,11 +562,9 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
               <label className="space-y-1">
                 <span className="text-slate-400 font-semibold">Call style</span>
                 <select
-                  value={draft.callStyle}
+                  value={vp.callStyle}
                   onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, callStyle: e.target.value })
-                    )
+                    updateVpField('callStyle', e.target.value as DiscoveryCardViewportLayout['callStyle'])
                   }
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200"
                 >
@@ -538,43 +573,41 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
                 </select>
               </label>
 
-              <label className="space-y-1">
-                <span className="text-slate-400 font-semibold">Mobile aspect</span>
+              <label className="space-y-1 sm:col-span-2">
+                <span className="text-slate-400 font-semibold">
+                  {editorViewport === 'mobile' ? 'Mobile' : 'Desktop'} aspect
+                </span>
                 <select
-                  value={draft.cardAspectMobile}
+                  value={vp.cardAspect}
                   onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, cardAspectMobile: e.target.value })
+                    updateVpField(
+                      'cardAspect',
+                      e.target.value as DiscoveryCardViewportLayout['cardAspect']
                     )
                   }
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200"
                 >
-                  <option value="9/16">9/16 (tall)</option>
-                  <option value="2/3">2/3</option>
-                </select>
-              </label>
-
-              <label className="space-y-1">
-                <span className="text-slate-400 font-semibold">Desktop aspect</span>
-                <select
-                  value={draft.cardAspectDesktop}
-                  onChange={(e) =>
-                    setDraft((prev) =>
-                      parseDiscoveryCardLayout({ ...prev, cardAspectDesktop: e.target.value })
-                    )
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200"
-                >
-                  <option value="3/4">3/4</option>
-                  <option value="2/3">2/3</option>
+                  {editorViewport === 'mobile' ? (
+                    <>
+                      <option value="9/16">9/16 (tall)</option>
+                      <option value="2/3">2/3</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="3/4">3/4</option>
+                      <option value="2/3">2/3</option>
+                    </>
+                  )}
                 </select>
               </label>
             </div>
           </div>
 
-          {/* Picture */}
+          {/* Picture — shared */}
           <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3">
-            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Card picture</h4>
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+              Card picture <span className="text-slate-500 font-semibold normal-case">(shared)</span>
+            </h4>
             <label className="flex items-center gap-2 text-xs font-semibold text-slate-200 cursor-pointer">
               <input
                 type="checkbox"
@@ -643,9 +676,15 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
           </div>
         </div>
 
-        {/* Preview — high z + offset so it stays above app header while scrolling */}
+        {/* Preview — sticky with Save/Reset */}
         <div className="rounded-2xl border border-slate-800 bg-[#0F1115] p-4 space-y-3 xl:sticky xl:top-24 xl:z-30 xl:self-start h-fit shadow-xl">
-          <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Live preview</h4>
+          <div className="flex items-center justify-between gap-2">
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Live preview</h4>
+            <span className="text-[10px] font-bold text-pink-300">
+              Editing: {editorViewport === 'mobile' ? 'Mobile' : 'Desktop'}
+            </span>
+          </div>
+          <div className="flex justify-center">{viewportToggle}</div>
           <div className="max-w-[220px] mx-auto">
             <DiscoveryCard
               user={PREVIEW_USER}
@@ -653,13 +692,34 @@ export const AdminDiscoveryCardDesigner: React.FC = () => {
               onStartCall={() => undefined}
               onOpenProfile={() => undefined}
               previewMode
+              previewViewport={editorViewport}
               peakHoursStart="00:00"
               peakHoursEnd="00:00"
             />
           </div>
           <p className="text-[10px] text-slate-500 text-center">
-            Preview uses a sample Online + Verified host photo. Save to apply on Discovery.
+            Preview uses a sample Online + Verified host. Save applies both Mobile and Desktop to
+            Discovery.
           </p>
+          <div className="flex flex-col gap-2 pt-1 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving || blocksSave}
+              className="w-full px-3 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 disabled:opacity-50 text-white text-xs font-bold flex items-center justify-center gap-1.5"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {saving ? 'Saving…' : 'Save layout'}
+            </button>
+            <button
+              type="button"
+              onClick={handleReset}
+              className="w-full px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 border border-slate-700"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Reset
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -3,6 +3,9 @@
  * Isolated from api/router.ts so list/create/update users still work when the router crashes.
  */
 const { createClient } = require('@supabase/supabase-js');
+const {
+  mapProfileRow: mapProfileRowShared,
+} = require('./_lib/cjs/helpers');
 
 function send(res, status, body) {
   res.statusCode = status;
@@ -24,8 +27,14 @@ function bearer(req) {
   return m ? m[1].trim() : null;
 }
 
+/** Prefer shared mapper so gallery video sentinel is never returned as a photo URL. */
 function mapProfileRow(p) {
-  if (!p) return null;
+  if (typeof mapProfileRowShared === 'function') {
+    return mapProfileRowShared(p);
+  }
+  // Minimal fallback if helpers failed to load
+  const GALLERY_VIDEOS_SENTINEL_PREFIX = '__mc_gv1__:';
+  const gallery = Array.isArray(p.gallery) ? p.gallery : [];
   return {
     id: p.id,
     authId: p.auth_id || p.id,
@@ -44,7 +53,8 @@ function mapProfileRow(p) {
     avatarUrl:
       p.avatar_url ||
       'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
-    gallery: Array.isArray(p.gallery) ? p.gallery : [],
+    gallery: gallery.filter((u) => u && !String(u).startsWith(GALLERY_VIDEOS_SENTINEL_PREFIX)),
+    galleryVideos: Array.isArray(p.gallery_videos) ? p.gallery_videos : [],
     isVerified: Boolean(p.is_verified),
     isOnboarded: p.is_onboarded !== false,
     onlineStatus: p.online_status || 'offline',

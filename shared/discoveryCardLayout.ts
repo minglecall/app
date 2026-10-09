@@ -1,6 +1,9 @@
 /**
  * Bounded discovery-card layout config.
  * Parser never throws — invalid input falls back to defaults + clamps.
+ *
+ * v2: independent mobile / desktop viewports + shared photo settings.
+ * v1 flat JSON is migrated by cloning into both viewports.
  */
 
 export const DISCOVERY_CARD_WIDGETS = [
@@ -26,6 +29,8 @@ export const DISCOVERY_CARD_SLOTS = [
 ] as const;
 
 export type DiscoveryCardSlotId = (typeof DISCOVERY_CARD_SLOTS)[number];
+
+export type DiscoveryCardViewportId = 'mobile' | 'desktop';
 
 export const WIDGET_ALLOWED_SLOTS: Record<DiscoveryCardWidgetId, readonly DiscoveryCardSlotId[]> = {
   statusBadge: ['topLeft', 'topRight', 'metaPrimary', 'metaSecondary'],
@@ -136,8 +141,8 @@ export interface DiscoveryCardWidgetConfig {
   widthPercent: number;
 }
 
-export interface DiscoveryCardLayout {
-  version: 1;
+/** Per-breakpoint placement + sizing (widgets, fonts, call button, aspect). */
+export interface DiscoveryCardViewportLayout {
   widgets: DiscoveryCardWidgetConfig[];
   nameFontPx: number;
   metaFontPx: number;
@@ -148,10 +153,16 @@ export interface DiscoveryCardLayout {
   flagSize: DiscoveryFlagSize;
   callButtonPx: number;
   callIconPx: number;
-  cardAspectMobile: DiscoveryAspectMobile;
-  cardAspectDesktop: DiscoveryAspectDesktop;
   callStyle: DiscoveryCallStyle;
-  /** Show host photo as card background */
+  /** Aspect for this viewport (mobile: 9/16|2/3; desktop: 3/4|2/3). */
+  cardAspect: DiscoveryAspectMobile | DiscoveryAspectDesktop;
+}
+
+export interface DiscoveryCardLayout {
+  version: 2;
+  mobile: DiscoveryCardViewportLayout;
+  desktop: DiscoveryCardViewportLayout;
+  /** Show host photo as card background (shared) */
   showPhoto: boolean;
   /** Which media field to prefer for the card image */
   photoSource: DiscoveryPhotoSource;
@@ -212,26 +223,6 @@ function defaultWidgets(): DiscoveryCardWidgetConfig[] {
   }));
 }
 
-export const DEFAULT_DISCOVERY_CARD_LAYOUT: DiscoveryCardLayout = {
-  version: 1,
-  widgets: defaultWidgets(),
-  nameFontPx: SIZE_BOUNDS.nameFontPx.default,
-  metaFontPx: SIZE_BOUNDS.metaFontPx.default,
-  badgeFontPx: SIZE_BOUNDS.badgeFontPx.default,
-  statusBadgePing: true,
-  verifiedIconPx: SIZE_BOUNDS.verifiedIconPx.default,
-  flagSize: 'sm',
-  callButtonPx: SIZE_BOUNDS.callButtonPx.default,
-  callIconPx: SIZE_BOUNDS.callIconPx.default,
-  cardAspectMobile: '9/16',
-  cardAspectDesktop: '3/4',
-  callStyle: 'circle',
-  showPhoto: true,
-  photoSource: 'avatarThenGallery',
-  photoFit: 'cover',
-  photoPosition: 'center',
-};
-
 function coerceFlagSize(v: unknown): DiscoveryFlagSize {
   return v === 'xs' || v === 'md' || v === 'sm' ? v : 'sm';
 }
@@ -271,6 +262,36 @@ function coerceBoxAlignH(v: unknown, fallback: DiscoveryBoxAlignH): DiscoveryBox
 function coerceBoxAlignV(v: unknown, fallback: DiscoveryBoxAlignV): DiscoveryBoxAlignV {
   return v === 'top' || v === 'center' || v === 'bottom' ? v : fallback;
 }
+
+function deepCloneWidgets(widgets: DiscoveryCardWidgetConfig[]): DiscoveryCardWidgetConfig[] {
+  return widgets.map((w) => ({ ...w }));
+}
+
+function defaultViewport(kind: DiscoveryCardViewportId): DiscoveryCardViewportLayout {
+  return {
+    widgets: defaultWidgets(),
+    nameFontPx: SIZE_BOUNDS.nameFontPx.default,
+    metaFontPx: SIZE_BOUNDS.metaFontPx.default,
+    badgeFontPx: SIZE_BOUNDS.badgeFontPx.default,
+    statusBadgePing: true,
+    verifiedIconPx: SIZE_BOUNDS.verifiedIconPx.default,
+    flagSize: 'sm',
+    callButtonPx: SIZE_BOUNDS.callButtonPx.default,
+    callIconPx: SIZE_BOUNDS.callIconPx.default,
+    callStyle: 'circle',
+    cardAspect: kind === 'mobile' ? '9/16' : '3/4',
+  };
+}
+
+export const DEFAULT_DISCOVERY_CARD_LAYOUT: DiscoveryCardLayout = {
+  version: 2,
+  mobile: defaultViewport('mobile'),
+  desktop: defaultViewport('desktop'),
+  showPhoto: true,
+  photoSource: 'avatarThenGallery',
+  photoFit: 'cover',
+  photoPosition: 'center',
+};
 
 /** Split ordered widgets into lines using nextLine flags. */
 export function splitSlotIntoLines(
@@ -348,6 +369,77 @@ function normalizeWidgets(raw: unknown): DiscoveryCardWidgetConfig[] {
   return list.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 }
 
+function normalizeViewport(
+  raw: unknown,
+  kind: DiscoveryCardViewportId,
+  /** Flat v1 fields used when viewport object is missing */
+  flatFallback?: any
+): DiscoveryCardViewportLayout {
+  const def = defaultViewport(kind);
+  const src =
+    raw && typeof raw === 'object'
+      ? (raw as any)
+      : flatFallback && typeof flatFallback === 'object'
+        ? flatFallback
+        : null;
+
+  if (!src) {
+    return { ...def, widgets: defaultWidgets() };
+  }
+
+  const aspectRaw =
+    src.cardAspect !== undefined
+      ? src.cardAspect
+      : kind === 'mobile'
+        ? src.cardAspectMobile
+        : src.cardAspectDesktop;
+
+  return {
+    widgets: normalizeWidgets(src.widgets),
+    nameFontPx: clampInt(
+      src.nameFontPx,
+      SIZE_BOUNDS.nameFontPx.min,
+      SIZE_BOUNDS.nameFontPx.max,
+      SIZE_BOUNDS.nameFontPx.default
+    ),
+    metaFontPx: clampInt(
+      src.metaFontPx,
+      SIZE_BOUNDS.metaFontPx.min,
+      SIZE_BOUNDS.metaFontPx.max,
+      SIZE_BOUNDS.metaFontPx.default
+    ),
+    badgeFontPx: clampInt(
+      src.badgeFontPx,
+      SIZE_BOUNDS.badgeFontPx.min,
+      SIZE_BOUNDS.badgeFontPx.max,
+      SIZE_BOUNDS.badgeFontPx.default
+    ),
+    statusBadgePing: src.statusBadgePing === undefined ? true : Boolean(src.statusBadgePing),
+    verifiedIconPx: clampInt(
+      src.verifiedIconPx,
+      SIZE_BOUNDS.verifiedIconPx.min,
+      SIZE_BOUNDS.verifiedIconPx.max,
+      SIZE_BOUNDS.verifiedIconPx.default
+    ),
+    flagSize: coerceFlagSize(src.flagSize),
+    callButtonPx: clampInt(
+      src.callButtonPx,
+      SIZE_BOUNDS.callButtonPx.min,
+      SIZE_BOUNDS.callButtonPx.max,
+      SIZE_BOUNDS.callButtonPx.default
+    ),
+    callIconPx: clampInt(
+      src.callIconPx,
+      SIZE_BOUNDS.callIconPx.min,
+      SIZE_BOUNDS.callIconPx.max,
+      SIZE_BOUNDS.callIconPx.default
+    ),
+    callStyle: coerceCallStyle(src.callStyle),
+    cardAspect:
+      kind === 'mobile' ? coerceAspectMobile(aspectRaw) : coerceAspectDesktop(aspectRaw),
+  };
+}
+
 /**
  * Build CSS margin offsets from widget pad fields (negatives allowed for nudge).
  * Named for backward compatibility with existing padT/R/B/L config keys.
@@ -377,49 +469,67 @@ export function widgetBoxAlignClasses(w: Pick<DiscoveryCardWidgetConfig, 'boxAli
   return `flex ${h} ${v} ${self}`;
 }
 
+export function getViewportLayout(
+  layout: DiscoveryCardLayout,
+  viewport: DiscoveryCardViewportId
+): DiscoveryCardViewportLayout {
+  return viewport === 'desktop' ? layout.desktop : layout.mobile;
+}
+
 /**
- * Parse any raw value (object, JSON string, null) into a safe DiscoveryCardLayout.
- * Never throws.
+ * Parse any raw value (object, JSON string, null) into a safe DiscoveryCardLayout (v2).
+ * Never throws. Migrates v1 flat layouts by cloning into both viewports.
  */
 export function parseDiscoveryCardLayout(raw: unknown): DiscoveryCardLayout {
   let obj: any = raw;
   if (typeof raw === 'string') {
     const trimmed = raw.trim();
-    if (!trimmed) return { ...DEFAULT_DISCOVERY_CARD_LAYOUT, widgets: defaultWidgets() };
+    if (!trimmed) {
+      return {
+        ...DEFAULT_DISCOVERY_CARD_LAYOUT,
+        mobile: { ...DEFAULT_DISCOVERY_CARD_LAYOUT.mobile, widgets: defaultWidgets() },
+        desktop: { ...DEFAULT_DISCOVERY_CARD_LAYOUT.desktop, widgets: defaultWidgets() },
+      };
+    }
     try {
       obj = JSON.parse(trimmed);
     } catch {
-      return { ...DEFAULT_DISCOVERY_CARD_LAYOUT, widgets: defaultWidgets() };
+      return {
+        ...DEFAULT_DISCOVERY_CARD_LAYOUT,
+        mobile: { ...DEFAULT_DISCOVERY_CARD_LAYOUT.mobile, widgets: defaultWidgets() },
+        desktop: { ...DEFAULT_DISCOVERY_CARD_LAYOUT.desktop, widgets: defaultWidgets() },
+      };
     }
   }
   if (!obj || typeof obj !== 'object') {
-    return { ...DEFAULT_DISCOVERY_CARD_LAYOUT, widgets: defaultWidgets() };
+    return {
+      ...DEFAULT_DISCOVERY_CARD_LAYOUT,
+      mobile: { ...DEFAULT_DISCOVERY_CARD_LAYOUT.mobile, widgets: defaultWidgets() },
+      desktop: { ...DEFAULT_DISCOVERY_CARD_LAYOUT.desktop, widgets: defaultWidgets() },
+    };
+  }
+
+  const hasViewportObjects =
+    (obj.mobile && typeof obj.mobile === 'object') || (obj.desktop && typeof obj.desktop === 'object');
+
+  // v1 flat: widgets at root — use as fallback for both viewports
+  const flatFallback = !hasViewportObjects && Array.isArray(obj.widgets) ? obj : undefined;
+
+  const mobile = normalizeViewport(obj.mobile, 'mobile', flatFallback);
+  let desktop = normalizeViewport(obj.desktop, 'desktop', flatFallback);
+
+  // When migrating v1 with no desktop object, clone mobile widgets so both start identical
+  if (flatFallback && !(obj.desktop && typeof obj.desktop === 'object')) {
+    desktop = {
+      ...desktop,
+      widgets: deepCloneWidgets(mobile.widgets),
+    };
   }
 
   return {
-    version: 1,
-    widgets: normalizeWidgets(obj.widgets),
-    nameFontPx: clampInt(obj.nameFontPx, SIZE_BOUNDS.nameFontPx.min, SIZE_BOUNDS.nameFontPx.max, SIZE_BOUNDS.nameFontPx.default),
-    metaFontPx: clampInt(obj.metaFontPx, SIZE_BOUNDS.metaFontPx.min, SIZE_BOUNDS.metaFontPx.max, SIZE_BOUNDS.metaFontPx.default),
-    badgeFontPx: clampInt(obj.badgeFontPx, SIZE_BOUNDS.badgeFontPx.min, SIZE_BOUNDS.badgeFontPx.max, SIZE_BOUNDS.badgeFontPx.default),
-    statusBadgePing: obj.statusBadgePing === undefined ? true : Boolean(obj.statusBadgePing),
-    verifiedIconPx: clampInt(
-      obj.verifiedIconPx,
-      SIZE_BOUNDS.verifiedIconPx.min,
-      SIZE_BOUNDS.verifiedIconPx.max,
-      SIZE_BOUNDS.verifiedIconPx.default
-    ),
-    flagSize: coerceFlagSize(obj.flagSize),
-    callButtonPx: clampInt(
-      obj.callButtonPx,
-      SIZE_BOUNDS.callButtonPx.min,
-      SIZE_BOUNDS.callButtonPx.max,
-      SIZE_BOUNDS.callButtonPx.default
-    ),
-    callIconPx: clampInt(obj.callIconPx, SIZE_BOUNDS.callIconPx.min, SIZE_BOUNDS.callIconPx.max, SIZE_BOUNDS.callIconPx.default),
-    cardAspectMobile: coerceAspectMobile(obj.cardAspectMobile),
-    cardAspectDesktop: coerceAspectDesktop(obj.cardAspectDesktop),
-    callStyle: coerceCallStyle(obj.callStyle),
+    version: 2,
+    mobile,
+    desktop,
     showPhoto: obj.showPhoto === undefined ? true : Boolean(obj.showPhoto),
     photoSource: coercePhotoSource(obj.photoSource),
     photoFit: coercePhotoFit(obj.photoFit),
@@ -436,13 +546,13 @@ export interface SlotConflict {
 
 /** Enabled widgets grouped by slot, sorted by order. */
 export function groupWidgetsBySlot(
-  layout: DiscoveryCardLayout
+  viewport: Pick<DiscoveryCardViewportLayout, 'widgets'>
 ): Record<DiscoveryCardSlotId, DiscoveryCardWidgetConfig[]> {
   const groups = Object.fromEntries(DISCOVERY_CARD_SLOTS.map((s) => [s, [] as DiscoveryCardWidgetConfig[]])) as Record<
     DiscoveryCardSlotId,
     DiscoveryCardWidgetConfig[]
   >;
-  for (const w of layout.widgets) {
+  for (const w of viewport.widgets) {
     if (!w.enabled) continue;
     const slot = WIDGET_ALLOWED_SLOTS[w.id].includes(w.slot) ? w.slot : WIDGET_DEFAULT_SLOT[w.id];
     groups[slot].push({ ...w, slot });
@@ -454,8 +564,10 @@ export function groupWidgetsBySlot(
 }
 
 /** Detect shared-slot conflicts; top corners with >2 chip widgets block save. */
-export function getDiscoveryCardConflicts(layout: DiscoveryCardLayout): SlotConflict[] {
-  const groups = groupWidgetsBySlot(layout);
+export function getDiscoveryCardConflicts(
+  viewport: Pick<DiscoveryCardViewportLayout, 'widgets'>
+): SlotConflict[] {
+  const groups = groupWidgetsBySlot(viewport);
   const conflicts: SlotConflict[] = [];
 
   for (const slot of DISCOVERY_CARD_SLOTS) {
@@ -473,6 +585,10 @@ export function getDiscoveryCardConflicts(layout: DiscoveryCardLayout): SlotConf
   return conflicts;
 }
 
+/** True if either viewport has a blocking conflict. */
 export function discoveryCardLayoutBlocksSave(layout: DiscoveryCardLayout): boolean {
-  return getDiscoveryCardConflicts(layout).some((c) => c.blocksSave);
+  return (
+    getDiscoveryCardConflicts(layout.mobile).some((c) => c.blocksSave) ||
+    getDiscoveryCardConflicts(layout.desktop).some((c) => c.blocksSave)
+  );
 }

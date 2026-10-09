@@ -1709,12 +1709,15 @@ export async function updateUserProfileAdmin(
         const photos = writingGallery
           ? splitGalleryPhotosAndVideos(payload.gallery).photos
           : existingSplit.photos;
-        payload.gallery = mergeGalleryWithVideoSentinel(photos, payload.gallery_videos);
-      } else if (writingGallery && Array.isArray(existingSplit.videos)) {
-        payload.gallery = mergeGalleryWithVideoSentinel(
-          splitGalleryPhotosAndVideos(payload.gallery).photos,
-          existingSplit.videos
-        );
+        const videos = Array.isArray(payload.gallery_videos) ? payload.gallery_videos : [];
+        // Avoid empty `__mc_gv1__:[]` sentinel — it renders as a blank photo via raw gallery APIs.
+        payload.gallery =
+          videos.length > 0 ? mergeGalleryWithVideoSentinel(photos, videos) : photos;
+      } else if (writingGallery) {
+        const photos = splitGalleryPhotosAndVideos(payload.gallery).photos;
+        const keepVideos = Array.isArray(existingSplit.videos) ? existingSplit.videos : [];
+        payload.gallery =
+          keepVideos.length > 0 ? mergeGalleryWithVideoSentinel(photos, keepVideos) : photos;
       }
     }
 

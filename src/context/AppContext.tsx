@@ -2027,16 +2027,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
             if (isCurrentLoggedIn && localUser) {
               // Preserve active logged-in user's profile and location state so background sync never reverts local edits
+              const isDisplayableGalleryPhoto = (url: string) => {
+                const u = String(url || '').trim();
+                if (!u) return false;
+                if (u.startsWith('__mc_gv1__:')) return false;
+                if (u.startsWith('blob:') || u.startsWith('data:')) return false;
+                return (
+                  u.startsWith('http://') ||
+                  u.startsWith('https://') ||
+                  u.startsWith('/api/storage/media')
+                );
+              };
               const mergePhotoGalleries = (localG?: string[], remoteG?: string[]) => {
                 const local = Array.isArray(localG) ? localG : [];
                 const remote = Array.isArray(remoteG) ? remoteG : [];
-                if (!local.length) return remote;
-                if (!remote.length) return local;
+                if (!local.length) return remote.filter(isDisplayableGalleryPhoto);
+                if (!remote.length) return local.filter(isDisplayableGalleryPhoto);
                 const seen = new Set<string>();
                 const out: string[] = [];
                 for (const url of [...remote, ...local]) {
                   const u = String(url || '').trim();
-                  if (!u || seen.has(u)) continue;
+                  if (!isDisplayableGalleryPhoto(u) || seen.has(u)) continue;
                   seen.add(u);
                   out.push(u);
                 }
@@ -2829,14 +2840,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 })();
                 const incomingPhotos = Array.isArray(liveProfile.gallery) ? liveProfile.gallery : [];
                 const localPhotos = Array.isArray(u.gallery) ? u.gallery : [];
+                const isDisplayableGalleryPhoto = (url: string) => {
+                  const s = String(url || '').trim();
+                  if (!s || s.startsWith('__mc_gv1__:') || s.startsWith('blob:') || s.startsWith('data:')) {
+                    return false;
+                  }
+                  return (
+                    s.startsWith('http://') ||
+                    s.startsWith('https://') ||
+                    s.startsWith('/api/storage/media')
+                  );
+                };
                 const mergedPhotos = (() => {
-                  if (!localPhotos.length) return incomingPhotos;
-                  if (!incomingPhotos.length) return localPhotos;
+                  if (!localPhotos.length) return incomingPhotos.filter(isDisplayableGalleryPhoto);
+                  if (!incomingPhotos.length) return localPhotos.filter(isDisplayableGalleryPhoto);
                   const seen = new Set<string>();
                   const out: string[] = [];
                   for (const url of [...incomingPhotos, ...localPhotos]) {
                     const s = String(url || '').trim();
-                    if (!s || seen.has(s)) continue;
+                    if (!isDisplayableGalleryPhoto(s) || seen.has(s)) continue;
                     seen.add(s);
                     out.push(s);
                   }
@@ -4948,13 +4970,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       delete sanitizedUpdates.avatarUrl;
     }
     if (sanitizedUpdates.gallery) {
-      sanitizedUpdates.gallery = sanitizedUpdates.gallery.filter(
-        (url) =>
-          url &&
-          !url.startsWith('blob:') &&
-          !url.startsWith('data:') &&
-          !url.startsWith('__mc_gv1__:')
-      );
+      sanitizedUpdates.gallery = sanitizedUpdates.gallery.filter((url) => {
+        const u = String(url || '').trim();
+        if (!u || u.startsWith('blob:') || u.startsWith('data:') || u.startsWith('__mc_gv1__:')) {
+          return false;
+        }
+        return (
+          u.startsWith('http://') ||
+          u.startsWith('https://') ||
+          u.startsWith('/api/storage/media')
+        );
+      });
     }
     if (sanitizedUpdates.galleryVideos) {
       sanitizedUpdates.galleryVideos = sanitizedUpdates.galleryVideos

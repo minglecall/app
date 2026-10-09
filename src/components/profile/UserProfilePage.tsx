@@ -2043,10 +2043,21 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   <span className="font-bold text-app-heading text-xs">Add photo</span>
                 </button>
 
-                {(currentUser.gallery && currentUser.gallery.length > 0
-                  ? currentUser.gallery
-                  : [currentUser.avatarUrl]
-                ).map((img, idx) => (
+                {(() => {
+                  const rawGallery = Array.isArray(currentUser.gallery) ? currentUser.gallery : [];
+                  const displayGallery = rawGallery.filter((url) => {
+                    const u = String(url || '').trim();
+                    if (!u || u.startsWith('__mc_gv1__:') || u.startsWith('blob:') || u.startsWith('data:')) {
+                      return false;
+                    }
+                    return (
+                      u.startsWith('http://') ||
+                      u.startsWith('https://') ||
+                      u.startsWith('/api/storage/media')
+                    );
+                  });
+                  const tiles = displayGallery.length > 0 ? displayGallery : [currentUser.avatarUrl];
+                  return tiles.map((img, idx) => (
                   <div
                     key={`photo-${extractStorageKeyFromMediaUrl(img) || img || idx}`}
                     className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
@@ -2070,10 +2081,13 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                       <span className="text-[10px] text-app-heading font-mono font-bold">
                         Photo #{idx + 1}
                       </span>
-                      {currentUser.gallery && currentUser.gallery.length > 0 && (
+                      {displayGallery.length > 0 && (
                         <button
                           type="button"
-                          onClick={() => handleRemoveGalleryPhoto(idx)}
+                          onClick={() => {
+                            const realIndex = rawGallery.indexOf(img);
+                            handleRemoveGalleryPhoto(realIndex >= 0 ? realIndex : idx);
+                          }}
                           className="p-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer"
                           title="Remove from gallery"
                         >
@@ -2082,7 +2096,8 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                       )}
                     </div>
                   </div>
-                ))}
+                  ));
+                })()}
               </div>
             </div>
           )}

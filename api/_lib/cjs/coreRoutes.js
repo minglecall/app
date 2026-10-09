@@ -1404,13 +1404,16 @@ async function handleSupabase(path, req, res) {
         const photos = writingGallery
           ? splitGalleryPhotosAndVideos(payload.gallery).photos
           : existingSplit.photos;
-        payload.gallery = mergeGalleryWithVideoSentinel(photos, payload.gallery_videos);
-      } else if (writingGallery && Array.isArray(existingSplit.videos)) {
-        // Keep existing sentinel videos alongside the new photo list.
-        payload.gallery = mergeGalleryWithVideoSentinel(
-          splitGalleryPhotosAndVideos(payload.gallery).photos,
-          existingSplit.videos
-        );
+        const videos = Array.isArray(payload.gallery_videos) ? payload.gallery_videos : [];
+        // Only embed sentinel when there are real videos — empty `__mc_gv1__:[]`
+        // was showing up as a blank broken photo tile via /api/users.
+        payload.gallery =
+          videos.length > 0 ? mergeGalleryWithVideoSentinel(photos, videos) : photos;
+      } else if (writingGallery) {
+        const photos = splitGalleryPhotosAndVideos(payload.gallery).photos;
+        const keepVideos = Array.isArray(existingSplit.videos) ? existingSplit.videos : [];
+        payload.gallery =
+          keepVideos.length > 0 ? mergeGalleryWithVideoSentinel(photos, keepVideos) : photos;
       }
     }
 
