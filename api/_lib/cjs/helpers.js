@@ -149,12 +149,8 @@ function mapProfileRow(p) {
     avatarUrl:
       p.avatar_url ||
       'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=400',
-    gallery: Array.isArray(p.gallery) ? p.gallery : [],
-    galleryVideos: Array.isArray(p.gallery_videos)
-      ? p.gallery_videos
-      : Array.isArray(p.galleryVideos)
-        ? p.galleryVideos
-        : [],
+    gallery: splitGalleryPhotosAndVideos(Array.isArray(p.gallery) ? p.gallery : []).photos,
+    galleryVideos: resolveGalleryVideosFromRow(p),
     introVideoUrl: p.intro_video_url || p.introVideoUrl || undefined,
     isVerified: Boolean(p.is_verified),
     isOnboarded: p.is_onboarded !== false,
@@ -172,6 +168,47 @@ function mapProfileRow(p) {
     commissionPercent: p.commission_percent != null ? Number(p.commission_percent) : undefined,
     createdAt: p.created_at,
   };
+}
+
+/** Persist gallery videos inside profiles.gallery (TEXT[]) when gallery_videos column is missing. */
+const GALLERY_VIDEOS_SENTINEL_PREFIX = '__mc_gv1__:';
+
+function encodeGalleryVideosSentinel(videos) {
+  return `${GALLERY_VIDEOS_SENTINEL_PREFIX}${JSON.stringify(Array.isArray(videos) ? videos : [])}`;
+}
+
+function splitGalleryPhotosAndVideos(gallery) {
+  const photos = [];
+  let videos = null;
+  if (!Array.isArray(gallery)) return { photos, videos };
+  for (const item of gallery) {
+    const s = String(item || '');
+    if (s.startsWith(GALLERY_VIDEOS_SENTINEL_PREFIX)) {
+      try {
+        const parsed = JSON.parse(s.slice(GALLERY_VIDEOS_SENTINEL_PREFIX.length));
+        videos = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        videos = [];
+      }
+    } else if (s) {
+      photos.push(s);
+    }
+  }
+  return { photos, videos };
+}
+
+function mergeGalleryWithVideoSentinel(photos, videos) {
+  const cleanPhotos = (Array.isArray(photos) ? photos : []).filter(
+    (u) => u && !String(u).startsWith(GALLERY_VIDEOS_SENTINEL_PREFIX)
+  );
+  return [...cleanPhotos, encodeGalleryVideosSentinel(videos || [])];
+}
+
+function resolveGalleryVideosFromRow(p) {
+  if (Array.isArray(p.gallery_videos)) return p.gallery_videos;
+  if (Array.isArray(p.galleryVideos)) return p.galleryVideos;
+  const fromGallery = splitGalleryPhotosAndVideos(p.gallery).videos;
+  return Array.isArray(fromGallery) ? fromGallery : [];
 }
 
 function findAuthUserByEmail(users, email) {
@@ -982,6 +1019,11 @@ module.exports = {
   sanitizePublicSignupRole,
   getPasswordPolicyError,
   mapProfileRow,
+  GALLERY_VIDEOS_SENTINEL_PREFIX,
+  encodeGalleryVideosSentinel,
+  splitGalleryPhotosAndVideos,
+  mergeGalleryWithVideoSentinel,
+  resolveGalleryVideosFromRow,
   findAuthUserByEmail,
   requireAuth,
   isAdminRole,

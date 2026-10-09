@@ -9,6 +9,32 @@ import {
   GalleryVideoItem,
 } from '../types';
 
+/** Fallback when profiles.gallery_videos column is not migrated yet. */
+const GALLERY_VIDEOS_SENTINEL_PREFIX = '__mc_gv1__:';
+
+function splitGalleryPhotosAndVideos(gallery: unknown): {
+  photos: string[];
+  videos: GalleryVideoItem[] | null;
+} {
+  const photos: string[] = [];
+  let videos: GalleryVideoItem[] | null = null;
+  if (!Array.isArray(gallery)) return { photos, videos };
+  for (const item of gallery) {
+    const s = String(item || '');
+    if (s.startsWith(GALLERY_VIDEOS_SENTINEL_PREFIX)) {
+      try {
+        const parsed = JSON.parse(s.slice(GALLERY_VIDEOS_SENTINEL_PREFIX.length));
+        videos = normalizeGalleryVideos(parsed);
+      } catch {
+        videos = [];
+      }
+    } else if (s) {
+      photos.push(s);
+    }
+  }
+  return { photos, videos };
+}
+
 function normalizeGalleryVideos(raw: unknown): GalleryVideoItem[] {
   if (!raw) return [];
   let arr: unknown[] = [];
@@ -124,8 +150,16 @@ export function mapDbProfileToUserProfile(db: DbProfile): UserProfile {
     interestedIn: db.interested_in || [],
     tags: db.tags || [],
     avatarUrl: db.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-    gallery: db.gallery || [],
-    galleryVideos: normalizeGalleryVideos((db as any).gallery_videos),
+    gallery: (() => {
+      const split = splitGalleryPhotosAndVideos(db.gallery || []);
+      return split.photos;
+    })(),
+    galleryVideos: (() => {
+      const fromCol = normalizeGalleryVideos((db as any).gallery_videos);
+      if (fromCol.length > 0) return fromCol;
+      const split = splitGalleryPhotosAndVideos(db.gallery || []);
+      return split.videos || [];
+    })(),
     introVideoUrl: db.intro_video_url || undefined,
     verificationVideoUrl: db.verification_video_url || undefined,
     isVerified: db.is_verified,

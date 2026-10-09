@@ -10,7 +10,14 @@ const {
   requireAuth,
   isAdminRole,
   mapProfileRow,
+  splitGalleryPhotosAndVideos,
+  mergeGalleryWithVideoSentinel,
 } = require('./helpers');
+
+function isMissingGalleryVideosColumnError(err) {
+  const msg = String((err && err.message) || err || '');
+  return /gallery_videos/i.test(msg) && (/column/i.test(msg) || /schema cache/i.test(msg));
+}
 
 /** Offline if no heartbeat / last_seen within this window (client heartbeat ~15s). */
 const PRESENCE_STALE_MS = 90_000;
@@ -1363,16 +1370,62 @@ async function handleSupabase(path, req, res) {
     if (!isAdminRole(auth.role, auth.email) && payload.id !== auth.profileId) {
       return send(res, 403, { success: false, error: { message: 'Forbidden' } });
     }
-    const { data, error } = await auth.client
+
+    // When gallery_videos column is absent, videos live in a gallery TEXT[] sentinel.
+    // Preserve that sentinel on photo-only writes; embed it when saving videos.
+    const writingVideos = payload.gallery_videos !== undefined;
+    const writingGallery = payload.gallery !== undefined;
+    let videosForSentinelFallback;
+    let photosForSentinelFallback;
+    if (writingGallery || writingVideos) {
+      const { data: curGalleryRow } = await auth.client
+        .from('profiles')
+        .select('gallery')
+        .eq('id', payload.id)
+        .maybeSingle();
+      const existingSplit = splitGalleryPhotosAndVideos(curGalleryRow && curGalleryRow.gallery);
+      if (writingVideos) {
+        photosForSentinelFallback = writingGallery
+          ? splitGalleryPhotosAndVideos(payload.gallery).photos
+          : existingSplit.photos;
+        videosForSentinelFallback = payload.gallery_videos;
+      } else if (writingGallery && Array.isArray(existingSplit.videos)) {
+        // Keep existing sentinel videos alongside the new photo list.
+        payload.gallery = mergeGalleryWithVideoSentinel(
+          splitGalleryPhotosAndVideos(payload.gallery).photos,
+          existingSplit.videos
+        );
+      }
+    }
+
+    let result = await auth.client
       .from('profiles')
       .upsert(payload, { onConflict: 'id', defaultToNull: false })
       .select('*')
       .maybeSingle();
-    if (error) return send(res, 500, { success: false, error: { message: error.message } });
-    if (!data) {
+
+    if (result.error && isMissingGalleryVideosColumnError(result.error)) {
+      delete payload.gallery_videos;
+      if (videosForSentinelFallback !== undefined) {
+        payload.gallery = mergeGalleryWithVideoSentinel(
+          photosForSentinelFallback || [],
+          videosForSentinelFallback
+        );
+      }
+      result = await auth.client
+        .from('profiles')
+        .upsert(payload, { onConflict: 'id', defaultToNull: false })
+        .select('*')
+        .maybeSingle();
+    }
+
+    if (result.error) {
+      return send(res, 500, { success: false, error: { message: result.error.message } });
+    }
+    if (!result.data) {
       return send(res, 500, { success: false, error: { message: 'Profile was not updated' } });
     }
-    return send(res, 200, { success: true, user: mapProfileRow(data) });
+    return send(res, 200, { success: true, user: mapProfileRow(result.data) });
   }
 
   if (path === 'supabase/user-statuses' && req.method === 'GET') {

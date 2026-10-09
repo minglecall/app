@@ -378,6 +378,7 @@ interface AppContextType {
   addFeedPost: (
     post: Omit<FeedPost, 'id' | 'createdAt' | 'likes' | 'commentsCount'>
   ) => Promise<boolean>;
+  deleteFeedPost: (postId: string) => Promise<boolean>;
   refreshFeedPosts: () => Promise<void>;
   fetchUserMoments: (userId: string) => Promise<FeedPost[]>;
 
@@ -4874,7 +4875,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
     if (sanitizedUpdates.gallery) {
       sanitizedUpdates.gallery = sanitizedUpdates.gallery.filter(
-        (url) => url && !url.startsWith('blob:') && !url.startsWith('data:')
+        (url) =>
+          url &&
+          !url.startsWith('blob:') &&
+          !url.startsWith('data:') &&
+          !url.startsWith('__mc_gv1__:')
       );
     }
     if (sanitizedUpdates.galleryVideos) {
@@ -7920,6 +7925,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
+  const deleteFeedPost = async (postId: string): Promise<boolean> => {
+    if (!postId) return false;
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      showToast('Sign in required', 'Please sign in to delete a moment.', 'warning');
+      return false;
+    }
+    try {
+      const res = await authFetch(`/api/v1/feed/${encodeURIComponent(postId)}`, {
+        method: 'DELETE',
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        showToast('Delete failed', json?.error?.message || 'Could not delete moment.', 'error');
+        return false;
+      }
+      setFeedPosts((prev) => prev.filter((p) => p.id !== postId));
+      showToast('Moment removed', 'Your moment was deleted.', 'info');
+      return true;
+    } catch (err: any) {
+      showToast('Delete failed', err?.message || 'Network error', 'error');
+      return false;
+    }
+  };
+
   const toggleFavorite = async (userId: string): Promise<boolean> => {
     if (!currentUser?.id || currentUser.id === 'guest_user') {
       showToast('Sign in required', 'Please sign in to manage favorites.', 'warning');
@@ -10035,6 +10064,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         likeUserMoment,
         tipMomentCreator,
         addFeedPost,
+        deleteFeedPost,
         refreshFeedPosts,
         fetchUserMoments,
         createTeamLeader,

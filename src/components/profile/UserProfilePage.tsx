@@ -46,7 +46,7 @@ import {
   FileText,
   Film,
 } from 'lucide-react';
-import type { GalleryVideoItem } from '../../types';
+import type { FeedPost, GalleryVideoItem } from '../../types';
 import {
   POPULAR_MOCK_LOCATIONS,
   detectExactBrowserLocation,
@@ -104,6 +104,9 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     claimDailyBonus,
     dailyBonusClaimed,
     feedPosts,
+    addFeedPost,
+    deleteFeedPost,
+    fetchUserMoments,
     callLogs,
     logoutUser,
   } = useApp();
@@ -122,6 +125,13 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
 
   // Navigation section inside profile shell
   const [profileSection, setProfileSection] = useState<ProfileSectionKey>('overview');
+  const [mediaSubTab, setMediaSubTab] = useState<'photos' | 'videos' | 'moments'>('photos');
+  const [isAddMomentModalOpen, setIsAddMomentModalOpen] = useState(false);
+  const [momentCaption, setMomentCaption] = useState('');
+  const [momentMediaUrl, setMomentMediaUrl] = useState('');
+  const [momentPublishing, setMomentPublishing] = useState(false);
+  const [myMoments, setMyMoments] = useState<FeedPost[]>([]);
+  const [momentsLoading, setMomentsLoading] = useState(false);
 
   const navItems = useMemo((): ProfileNavItem[] => {
     return PROFILE_NAV_ITEMS.flatMap((item) => {
@@ -238,6 +248,65 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     const key = String(vid.storageKey || '').trim();
     if (key && videoBlobPreviews[key]) return videoBlobPreviews[key];
     return normalizeMediaUrl(vid.url, vid.storageKey) || (key ? `/api/storage/media?key=${encodeURIComponent(key)}` : '');
+  };
+
+  const loadMyMoments = useCallback(async () => {
+    if (!currentUser?.id || currentUser.id === 'guest_user') {
+      setMyMoments([]);
+      return;
+    }
+    setMomentsLoading(true);
+    try {
+      const fromApi = await fetchUserMoments(currentUser.id);
+      if (fromApi.length > 0) {
+        setMyMoments(fromApi);
+      } else {
+        setMyMoments(feedPosts.filter((p) => p.creatorId === currentUser.id));
+      }
+    } catch {
+      setMyMoments(feedPosts.filter((p) => p.creatorId === currentUser.id));
+    } finally {
+      setMomentsLoading(false);
+    }
+  }, [currentUser.id, fetchUserMoments, feedPosts]);
+
+  useEffect(() => {
+    if (profileSection === 'media' && mediaSubTab === 'moments') {
+      void loadMyMoments();
+    }
+  }, [profileSection, mediaSubTab, loadMyMoments]);
+
+  const handlePublishMoment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (momentPublishing) return;
+    if (!momentCaption.trim() || !momentMediaUrl.trim()) {
+      showToast('Photo Required', 'Please upload a photo and add a caption for your moment.', 'warning');
+      return;
+    }
+    setMomentPublishing(true);
+    const ok = await addFeedPost({
+      creatorId: currentUser.id,
+      creatorName: currentUser.name,
+      creatorAvatar: currentUser.avatarUrl,
+      creatorCountry: `${currentUser.countryCode} ${currentUser.nationality}`,
+      mediaType: 'image',
+      mediaUrl: momentMediaUrl,
+      caption: momentCaption,
+    });
+    setMomentPublishing(false);
+    if (ok) {
+      setMomentCaption('');
+      setMomentMediaUrl('');
+      setIsAddMomentModalOpen(false);
+      await loadMyMoments();
+    }
+  };
+
+  const handleRemoveMoment = async (postId: string) => {
+    const ok = await deleteFeedPost(postId);
+    if (ok) {
+      setMyMoments((prev) => prev.filter((p) => p.id !== postId));
+    }
   };
 
   // Direct file upload to Cloudflare R2
@@ -1791,9 +1860,9 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
         </div>
       )}
 
-      {/* 6. TAB CONTENT 5: MEDIA & GALLERY */}
+      {/* 6. TAB CONTENT 5: GALLERY & MOMENTS (Photos / Videos / Moments) */}
       {profileSection === 'media' && (
-        <div className="space-y-4">
+        <div className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
           <input
             ref={videoFileInputRef}
             type="file"
@@ -1805,76 +1874,103 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
             }}
           />
 
-          {/* Photos */}
-          <div className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
-            <div className="border-b border-hairline pb-3">
+          <div className="border-b border-hairline pb-3 space-y-3">
+            <div>
               <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
-                <ImageIcon className="w-4 h-4 text-pink-400" />
-                <span>Photo Gallery</span>
+                <Camera className="w-4 h-4 text-pink-400" />
+                <span>Gallery & Moments</span>
               </h2>
               <p className="text-xs text-app-muted mt-0.5">
-                Photos sync to your public profile via Cloudflare R2.
+                Photos, profile videos, and feed moments — square tiles, same layout.
               </p>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-              <button
-                type="button"
-                onClick={() => setIsAddGalleryModalOpen(true)}
-                className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
-              >
-                <div className="w-10 h-10 rounded-xl bg-pink-500/10 group-hover:bg-pink-500/20 text-pink-400 flex items-center justify-center mb-1.5 transition-colors">
-                  <Plus className="w-5 h-5" />
-                </div>
-                <span className="font-bold text-app-heading text-xs">Add photo</span>
-              </button>
-
-              {(currentUser.gallery && currentUser.gallery.length > 0
-                ? currentUser.gallery
-                : [currentUser.avatarUrl]
-              ).map((img, idx) => (
-                <div
-                  key={`photo-${idx}`}
-                  className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
-                >
-                  <img
-                    src={normalizeMediaUrl(img)}
-                    alt="gallery"
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5">
-                    <span className="text-[10px] text-app-heading font-mono font-bold">
-                      Photo #{idx + 1}
-                    </span>
-                    {currentUser.gallery && currentUser.gallery.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveGalleryPhoto(idx)}
-                        className="p-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer"
-                        title="Remove from gallery"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
+            <div className="flex rounded-xl border border-hairline bg-app-input p-0.5 gap-0.5">
+              {(
+                [
+                  { id: 'photos' as const, label: 'Photos', icon: ImageIcon },
+                  { id: 'videos' as const, label: 'Videos', icon: Film },
+                  { id: 'moments' as const, label: 'Moments', icon: Sparkles },
+                ] as const
+              ).map((tab) => {
+                const Icon = tab.icon;
+                const active = mediaSubTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setMediaSubTab(tab.id)}
+                    className={`flex-1 min-h-9 px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold uppercase tracking-wide flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      active
+                        ? 'bg-app-card text-app-heading shadow-sm border border-hairline'
+                        : 'text-app-muted hover:text-app-heading border border-transparent'
+                    }`}
+                  >
+                    <Icon className={`w-3.5 h-3.5 ${active ? (tab.id === 'videos' ? 'text-cyan-400' : 'text-pink-400') : ''}`} />
+                    <span>{tab.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
+          {/* Photos */}
+          {mediaSubTab === 'photos' && (
+            <div className="space-y-3">
+              <p className="text-xs text-app-muted">Photos sync to your public profile via Cloudflare R2.</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsAddGalleryModalOpen(true)}
+                  className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-pink-500/10 group-hover:bg-pink-500/20 text-pink-400 flex items-center justify-center mb-1.5 transition-colors">
+                    <Plus className="w-5 h-5" />
+                  </div>
+                  <span className="font-bold text-app-heading text-xs">Add photo</span>
+                </button>
+
+                {(currentUser.gallery && currentUser.gallery.length > 0
+                  ? currentUser.gallery
+                  : [currentUser.avatarUrl]
+                ).map((img, idx) => (
+                  <div
+                    key={`photo-${idx}`}
+                    className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
+                  >
+                    <img
+                      src={normalizeMediaUrl(img)}
+                      alt="gallery"
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5">
+                      <span className="text-[10px] text-app-heading font-mono font-bold">
+                        Photo #{idx + 1}
+                      </span>
+                      {currentUser.gallery && currentUser.gallery.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveGalleryPhoto(idx)}
+                          className="p-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer"
+                          title="Remove from gallery"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Videos */}
-          <div className="p-4 sm:p-6 bg-app-card border border-hairline rounded-2xl space-y-4">
-            <div className="border-b border-hairline pb-3 space-y-2">
+          {mediaSubTab === 'videos' && (
+            <div className="space-y-3">
               <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-bold text-app-heading font-mono uppercase tracking-wider flex items-center gap-2">
-                    <Film className="w-4 h-4 text-cyan-400" />
-                    <span>Video Gallery</span>
-                  </h2>
-                  <p className="text-xs text-app-muted mt-0.5">
-                    Multiple videos allowed. Shared quota: {profileVideoQuotaMb} MB total per account.
-                  </p>
-                </div>
+                <p className="text-xs text-app-muted">
+                  Shared quota: {profileVideoQuotaMb} MB total per account.
+                </p>
                 <span className="shrink-0 text-[10px] font-mono font-bold text-cyan-300 bg-cyan-500/10 border border-cyan-500/30 px-2 py-1 rounded-lg">
                   {formatMb(usedVideoBytes)} / {profileVideoQuotaMb} MB
                 </span>
@@ -1889,61 +1985,119 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                   }}
                 />
               </div>
-            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button
-                type="button"
-                disabled={isUploadingVideo || remainingVideoBytes <= 0}
-                onClick={() => videoFileInputRef.current?.click()}
-                className="min-h-[140px] rounded-2xl border-2 border-dashed border-hairline hover:border-cyan-500/60 bg-app-input flex flex-col items-center justify-center text-center p-4 transition-all cursor-pointer group disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <div className="w-10 h-10 rounded-xl bg-cyan-500/10 group-hover:bg-cyan-500/20 text-cyan-400 flex items-center justify-center mb-1.5 transition-colors">
-                  {isUploadingVideo ? (
-                    <RefreshCw className="w-5 h-5 animate-spin" />
-                  ) : (
-                    <Plus className="w-5 h-5" />
-                  )}
-                </div>
-                <span className="font-bold text-app-heading text-xs">
-                  {isUploadingVideo ? `Uploading… ${videoUploadProgress}%` : 'Add video'}
-                </span>
-                <span className="text-[10px] text-app-muted font-mono mt-1">
-                  {remainingVideoBytes > 0
-                    ? `${formatMb(remainingVideoBytes)} MB left · max ${maxSingleVideoMb} MB each`
-                    : 'Quota full — remove a video to free space'}
-                </span>
-              </button>
-
-              {galleryVideos.map((vid, idx) => (
-                <div
-                  key={`vid-${vid.storageKey || vid.url}-${idx}`}
-                  className="relative rounded-2xl overflow-hidden border border-hairline bg-app-input shadow-md"
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                <button
+                  type="button"
+                  disabled={isUploadingVideo || remainingVideoBytes <= 0}
+                  onClick={() => videoFileInputRef.current?.click()}
+                  className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-cyan-500/60 bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <video
-                    src={resolveGalleryVideoSrc(vid)}
-                    controls
-                    playsInline
-                    preload="metadata"
-                    className="w-full aspect-video object-cover bg-black"
-                  />
-                  <div className="flex items-center justify-between gap-2 px-2.5 py-2 border-t border-hairline">
-                    <span className="text-[10px] font-mono text-app-muted truncate">
-                      Video #{idx + 1} · {formatMb(vid.sizeBytes || 0)} MB
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveGalleryVideo(idx)}
-                      className="p-1.5 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer shrink-0"
-                      title="Remove video"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                  <div className="w-10 h-10 rounded-xl bg-cyan-500/10 group-hover:bg-cyan-500/20 text-cyan-400 flex items-center justify-center mb-1.5 transition-colors">
+                    {isUploadingVideo ? (
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Plus className="w-5 h-5" />
+                    )}
                   </div>
-                </div>
-              ))}
+                  <span className="font-bold text-app-heading text-xs">
+                    {isUploadingVideo ? `Uploading… ${videoUploadProgress}%` : 'Add video'}
+                  </span>
+                  <span className="text-[10px] text-app-muted font-mono mt-1 px-1 leading-tight">
+                    {remainingVideoBytes > 0
+                      ? `${formatMb(remainingVideoBytes)} MB left`
+                      : 'Quota full'}
+                  </span>
+                </button>
+
+                {galleryVideos.map((vid, idx) => (
+                  <div
+                    key={`vid-${vid.storageKey || vid.url}-${idx}`}
+                    className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-black"
+                  >
+                    <video
+                      src={resolveGalleryVideoSrc(vid)}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      className="absolute inset-0 w-full h-full object-cover bg-black"
+                    />
+                    <div className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/85 via-black/40 to-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-end justify-between p-2.5 pointer-events-none">
+                      <span className="text-[10px] text-white font-mono font-bold truncate pr-2">
+                        Video #{idx + 1} · {formatMb(vid.sizeBytes || 0)} MB
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveGalleryVideo(idx)}
+                        className="p-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer pointer-events-auto shrink-0"
+                        title="Remove video"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
+
+          {/* Moments */}
+          {mediaSubTab === 'moments' && (
+            <div className="space-y-3">
+              <p className="text-xs text-app-muted">
+                Share photos to the public Moments feed. Stored on R2 and published via the Moments API.
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsAddMomentModalOpen(true)}
+                  className="aspect-square rounded-2xl border-2 border-dashed border-hairline hover:border-pink-500/60 bg-app-input flex flex-col items-center justify-center text-center p-3 transition-all cursor-pointer group"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-pink-500/10 group-hover:bg-pink-500/20 text-pink-400 flex items-center justify-center mb-1.5 transition-colors">
+                    <Plus className="w-5 h-5" />
+                  </div>
+                  <span className="font-bold text-app-heading text-xs">Add moment</span>
+                </button>
+
+                {momentsLoading && myMoments.length === 0 ? (
+                  <div className="aspect-square rounded-2xl border border-hairline bg-app-input flex items-center justify-center">
+                    <RefreshCw className="w-5 h-5 text-app-muted animate-spin" />
+                  </div>
+                ) : (
+                  myMoments.map((post) => (
+                    <div
+                      key={post.id}
+                      className="relative aspect-square rounded-2xl overflow-hidden border border-hairline group shadow-md bg-app-input"
+                    >
+                      <img
+                        src={normalizeMediaUrl(post.mediaUrl)}
+                        alt={post.caption || 'Moment'}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-end justify-between gap-2 p-2.5">
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-white font-mono font-bold truncate">
+                            {post.caption || 'Moment'}
+                          </p>
+                          <p className="text-[9px] text-white/70 font-mono">
+                            {post.likes || 0} likes
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveMoment(post.id)}
+                          className="p-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white transition-colors cursor-pointer shrink-0"
+                          title="Delete moment"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
       {/* 6. TAB CONTENT 5: SECURITY & PASSWORD MANAGEMENT */}
@@ -2292,6 +2446,94 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                 Cancel
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 9. ADD MOMENT MODAL */}
+      {isAddMomentModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+          <div
+            className="bg-app-card border border-hairline rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 relative max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-hairline pb-3">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-pink-500/20 border border-pink-500/40 flex items-center justify-center text-pink-400">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-app-heading font-mono">Share a Moment</h3>
+                  <p className="text-[11px] text-app-muted">Stored via R2 · published to Moments feed</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddMomentModalOpen(false)}
+                className="p-2 rounded-xl bg-app-input hover:bg-brand-soft text-app-muted hover:text-app-heading transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={(e) => void handlePublishMoment(e)} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-app-muted font-mono mb-2">Moment Photo</label>
+                <UnifiedImageUploader
+                  currentImageUrl={momentMediaUrl}
+                  onImageUploaded={(url) => setMomentMediaUrl(url)}
+                  userId={currentUser.id}
+                  category="moment"
+                  aspectRatio="16:9"
+                  targetRole={currentUser.role}
+                  targetName={currentUser.name}
+                  accentColor="pink"
+                  title="Moment Photo"
+                  subtitle="Upload a photo for your moment post"
+                  showPresets={false}
+                  showUrlInput={true}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-app-muted font-mono mb-1">Caption</label>
+                <textarea
+                  rows={3}
+                  value={momentCaption}
+                  onChange={(e) => setMomentCaption(e.target.value)}
+                  placeholder="What's on your mind today?"
+                  className="w-full px-3 py-2 bg-app-input border border-hairline rounded-xl text-xs text-app-heading focus:outline-none focus:border-pink-500"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2 border-t border-hairline">
+                <button
+                  type="button"
+                  onClick={() => setIsAddMomentModalOpen(false)}
+                  disabled={momentPublishing}
+                  className="w-1/2 py-2.5 bg-app-input hover:bg-brand-soft text-app-muted rounded-xl font-bold text-xs transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={momentPublishing || !momentMediaUrl.trim() || !momentCaption.trim()}
+                  className="w-1/2 py-2.5 bg-pink-600 hover:bg-pink-500 text-white rounded-xl font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
+                >
+                  {momentPublishing ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Publishing…</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Publish Moment</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
