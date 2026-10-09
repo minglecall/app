@@ -621,9 +621,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Mail className="w-7 h-7 animate-bounce" />
                 </div>
                 <h3 className="text-base font-bold text-app-heading">Enter 6-Digit Verification Code</h3>
-                <p className="text-xs text-app-muted max-w-sm mx-auto">
-                  We've dispatched a 6-digit OTP code & confirmation link to <strong className="text-app-heading">{email}</strong>.
-                </p>
                 <div className="inline-flex items-center space-x-1.5 px-2.5 py-1 bg-app-input border border-hairline rounded-full text-[11px] text-app-muted">
                   <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Dual Verification: 6-Digit OTP + Instant Email Link</span>

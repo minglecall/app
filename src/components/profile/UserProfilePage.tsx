@@ -750,7 +750,7 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               </div>
             )}
 
-            {/* Female Host Stats / Rate */}
+            {/* Female Host Stats / Earnings (opens host earnings dashboard) */}
             {isFemale && (
               <div className="flex items-center space-x-2">
                 {canEarnCoins ? (
@@ -764,11 +764,14 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
                     </div>
                     {onNavigateToTab && (
                       <button
+                        id="profile-host-earnings-amount-btn"
+                        type="button"
                         onClick={() => onNavigateToTab('earnings')}
-                        className="px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 font-mono font-bold text-xs transition-all shadow-sm flex items-center space-x-1"
+                        className="px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 font-mono font-bold text-xs transition-all shadow-sm flex items-center space-x-1.5 cursor-pointer"
+                        title="Open host earnings dashboard"
                       >
                         <DollarSign className="w-3.5 h-3.5" />
-                        <span>Payouts</span>
+                        <span>${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)}</span>
                       </button>
                     )}
                   </>
@@ -896,15 +899,27 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
           {isFemale ? (
             canEarnCoins ? (
               <button
-                onClick={() => setProfileSection('rates_earnings')}
+                id="profile-menu-host-earnings-btn"
+                type="button"
+                onClick={() => {
+                  if (onNavigateToTab) {
+                    onNavigateToTab('earnings');
+                    return;
+                  }
+                  setProfileSection('rates_earnings');
+                }}
                 className={`px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all shrink-0 flex items-center space-x-1.5 ${
                   profileSection === 'rates_earnings'
                     ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
                     : 'text-app-muted hover:text-app-heading hover:bg-app-input'
                 }`}
+                title="Open host earnings dashboard"
               >
                 <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Host Rates & Analytics</span>
+                <span>Earnings</span>
+                <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-mono text-[10px]">
+                  ${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)}
+                </span>
               </button>
             ) : null
           ) : (

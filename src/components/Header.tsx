@@ -202,23 +202,6 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* Logged In Only: Female Earnings pill (Only if eligible to earn coins) */}
-            {isLoggedIn && isFemale && (currentUser.teamLeaderId || systemSettings.enableRegularFemaleCoinEarning) && (
-              <button
-                id="header-earnings-pill"
-                onClick={() => setActiveTab('earnings')}
-                className="flex items-center space-x-1 sm:space-x-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 hover:border-emerald-400 transition-all shrink-0"
-              >
-                <DollarSign className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400 shrink-0" />
-                <span className="font-bold text-xs text-emerald-200">
-                  ${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)}
-                </span>
-                <span className="hidden sm:inline-block text-[10px] bg-emerald-500 text-slate-950 px-1.5 py-0.2 font-extrabold rounded-full uppercase">
-                  Payout
-                </span>
-              </button>
-            )}
-
             {/* Logged In Only: Team Leader Guild pill */}
             {isLoggedIn && currentUser.role === 'team_leader' && (
               <button
@@ -386,23 +369,26 @@ export const Header: React.FC<HeaderProps> = ({
                                 </button>
                               </div>
                             ) : (currentUser.teamLeaderId || systemSettings.enableRegularFemaleCoinEarning) ? (
-                              <div className="flex items-center justify-between">
+                              <button
+                                type="button"
+                                id="persona-earnings-amount-btn"
+                                onClick={() => {
+                                  setShowPersonaMenu(false);
+                                  handleNav('earnings');
+                                }}
+                                className="w-full flex items-center justify-between text-left cursor-pointer hover:opacity-90 transition-opacity"
+                              >
                                 <div>
                                   <div className="text-[10px] text-app-muted uppercase font-semibold">Creator Earnings</div>
                                   <div className="text-sm font-black text-emerald-500 font-mono flex items-center space-x-1">
-                                    <span>🪙</span>
-                                    <span>{currentUser.earningsCoins}</span>
+                                    <DollarSign className="w-3.5 h-3.5" />
+                                    <span>${(currentUser.totalLifetimeEarnedUSD || 0).toFixed(2)}</span>
                                   </div>
                                 </div>
-                                <button
-                                  onClick={() => {
-                                    handleNav('earnings');
-                                  }}
-                                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] rounded-lg transition-all shadow-sm cursor-pointer"
-                                >
-                                  Payouts ➔
-                                </button>
-                              </div>
+                                <span className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] rounded-lg transition-all shadow-sm">
+                                  Dashboard ➔
+                                </span>
+                              </button>
                             ) : (
                               <div className="flex items-center justify-between">
                                 <div>

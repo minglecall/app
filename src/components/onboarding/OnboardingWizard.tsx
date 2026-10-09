@@ -9,8 +9,6 @@ import {
   ArrowLeft,
   X,
   FileText,
-  User,
-  Lock,
   Check,
   Video,
   Loader2,
@@ -455,7 +453,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                       ? 'Host Specialties & Bio'
                       : 'Interests & Dating Bio'
                     : currentStep === 3
-                    ? 'Cloudflare R2 Media Portfolio'
+                    ? 'Avatar & Bio'
                     : 'Compliance & Platform Agreements'}
                 </p>
               </div>
@@ -513,47 +511,22 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
               </div>
 
               {/* Requirement 1: User Date Picker for DOB */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <DatePicker
-                    id="reg-dob-picker"
-                    value={formData.dob}
-                    onChange={(newDob, newAge) => {
-                      setFormData((prev) => ({ ...prev, dob: newDob, age: newAge }));
-                      if (newAge < 18) {
-                        setValidationError('You must be at least 18 years old to join the platform.');
-                      } else {
-                        setValidationError(null);
-                      }
-                    }}
-                    minAge={18}
-                    label="DATE OF BIRTH (DOB)"
-                    required
-                  />
-                  <p className="text-[10px] text-slate-500">Pick birth date. Age calculated automatically with 18+ verification.</p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-semibold text-slate-300 uppercase font-mono tracking-wider">
-                    GENDER IDENTITY
-                  </label>
-                  <div className="flex items-center h-12 px-4 bg-[#0F1115] border border-slate-800 rounded-2xl text-xs text-slate-300 font-medium capitalize">
-                    <User className="w-4 h-4 text-slate-500 mr-2" />
-                    <span>
-                      {formData.gender} (
-                      {isFemaleHost
-                        ? 'Creator Host'
-                        : user.role === 'female_user'
-                          ? 'Female Member'
-                          : user.role === 'other_user'
-                            ? 'Member (Other)'
-                            : 'Male Consumer'}
-                      )
-                    </span>
-                    <Lock className="w-3.5 h-3.5 text-slate-600 ml-auto" />
-                  </div>
-                  <p className="text-[10px] text-slate-500">Assigned role from account creation.</p>
-                </div>
+              <div className="space-y-1.5">
+                <DatePicker
+                  id="reg-dob-picker"
+                  value={formData.dob}
+                  onChange={(newDob, newAge) => {
+                    setFormData((prev) => ({ ...prev, dob: newDob, age: newAge }));
+                    if (newAge < 18) {
+                      setValidationError('You must be at least 18 years old to join the platform.');
+                    } else {
+                      setValidationError(null);
+                    }
+                  }}
+                  minAge={18}
+                  label="DATE OF BIRTH"
+                  required
+                />
               </div>
 
               {/* Requirement 2: Worldwide Countries Dropdown with Real Vector SVG Flags */}
@@ -566,7 +539,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     countryCode: country.code,
                   }))
                 }
-                label="COUNTRY / NATIONALITY (REAL SVG VECTOR FLAG) *"
+                label="COUNTRY / NATIONALITY *"
                 required
               />
 
@@ -579,7 +552,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     zodiac: zodiac ? zodiac.name : '',
                   }))
                 }
-                label="ZODIAC SIGN (ASTRONOMICAL SVG GLYPH)"
+                label="ZODIAC SIGN *"
                 placeholder="Choose your astrological sign..."
               />
 
@@ -592,7 +565,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     spokenLanguages: languages,
                   }))
                 }
-                label="SPOKEN LANGUAGES (MULTI-SELECT CHIPS) *"
+                label="LANGUAGES (MULTI-SELECT) *"
                 required
               />
             </div>
@@ -684,21 +657,9 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
             </div>
           )}
 
-          {/* ================= STEP 3: CLOUDFLARE R2 MEDIA UPLOADS & PREVIEW ================= */}
+          {/* ================= STEP 3: AVATAR & BIO MEDIA ================= */}
           {currentStep === 3 && (
             <div className="space-y-6">
-              <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl flex items-start space-x-3.5">
-                <div className="p-2 rounded-xl bg-indigo-500/20 text-indigo-300">
-                  <Upload className="w-4 h-4" />
-                </div>
-                <div>
-                  <div className="text-xs font-bold text-white">Direct Cloudflare R2 Media Storage</div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">
-                    Your photos and video introductions are streamed directly to Cloudflare R2 object storage with fast preview and global delivery.
-                  </div>
-                </div>
-              </div>
-
               {/* Primary Avatar Photo Upload with Curated Gallery & Instant R2 Preview */}
               <UnifiedImageUploader
                 currentImageUrl={localAvatarPreview || formData.avatarUrl || (isFemaleHost ? FALLBACK_FEMALE_AVATAR : FALLBACK_MALE_AVATAR)}
