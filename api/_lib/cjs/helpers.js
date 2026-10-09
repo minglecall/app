@@ -312,12 +312,13 @@ async function requireAuth(req) {
     profile = byId || null;
   }
   if (!profile && authUser.email) {
-    const { data: byEmail } = await client
+    // limit(1) avoids maybeSingle() hard-fail when duplicate emails exist
+    const { data: byEmailRows } = await client
       .from('profiles')
       .select('*')
       .ilike('email', String(authUser.email).trim().toLowerCase())
-      .maybeSingle();
-    profile = byEmail || null;
+      .limit(1);
+    profile = Array.isArray(byEmailRows) && byEmailRows[0] ? byEmailRows[0] : null;
   }
   const profileId = String((profile && profile.id) || authUser.id);
   const role = String((profile && profile.role) || '').toLowerCase();

@@ -1265,7 +1265,9 @@ function profilePayloadFromBody(body, auth) {
   const country = pick('countryCode', 'country_code');
   const payload = {
     id,
-    auth_id: raw.authId || raw.auth_id || (id === auth.userId ? auth.userId : undefined),
+    // Only write auth_id when the client explicitly sends it — auto-setting on
+    // partial gallery/media patches can break upserts / unique lookups.
+    auth_id: raw.authId !== undefined || raw.auth_id !== undefined ? raw.authId || raw.auth_id : undefined,
     name: raw.name,
     email: raw.email ? String(raw.email).toLowerCase().trim() : undefined,
     gender: raw.gender,
@@ -1375,12 +1377,28 @@ async function handleSupabase(path, req, res) {
     // gallery_videos column is missing on production). Prefer column when present.
     const writingVideos = payload.gallery_videos !== undefined;
     const writingGallery = payload.gallery !== undefined;
+    const profileLookupId = payload.id;
     if (writingGallery || writingVideos) {
-      const { data: curGalleryRow } = await auth.client
-        .from('profiles')
-        .select('gallery')
-        .eq('id', payload.id)
-        .maybeSingle();
+      let curGalleryRow = null;
+      {
+        const byId = await auth.client
+          .from('profiles')
+          .select('id, gallery')
+          .eq('id', profileLookupId)
+          .maybeSingle();
+        curGalleryRow = byId.data || null;
+      }
+      if (!curGalleryRow && auth.userId) {
+        const byAuth = await auth.client
+          .from('profiles')
+          .select('id, gallery')
+          .eq('auth_id', auth.userId)
+          .maybeSingle();
+        curGalleryRow = byAuth.data || null;
+        if (curGalleryRow && curGalleryRow.id) {
+          payload.id = String(curGalleryRow.id);
+        }
+      }
       const existingSplit = splitGalleryPhotosAndVideos(curGalleryRow && curGalleryRow.gallery);
       if (writingVideos) {
         const photos = writingGallery
@@ -1396,27 +1414,79 @@ async function handleSupabase(path, req, res) {
       }
     }
 
-    let result = await auth.client
-      .from('profiles')
-      .upsert(payload, { onConflict: 'id', defaultToNull: false })
-      .select('*')
-      .maybeSingle();
+    // Partial UPDATE (not upsert): upsert without name fails NOT NULL on insert-miss,
+    // and was returning "Profile was not updated" after successful R2 uploads.
+    const updateId = payload.id;
+    const patch = { ...payload };
+    delete patch.id;
+
+    function isNoRowResult(res) {
+      if (res && res.data) return false;
+      if (!res || !res.error) return true;
+      const code = String(res.error.code || '');
+      const msg = String(res.error.message || '');
+      return code === 'PGRST116' || /0 rows|multiple \(or no\) rows/i.test(msg);
+    }
+
+    async function runProfileUpdate(body) {
+      let res = await auth.client
+        .from('profiles')
+        .update(body)
+        .eq('id', updateId)
+        .select('*')
+        .maybeSingle();
+      // Only fall through on "no matching row" — do not mask real DB errors.
+      if (isNoRowResult(res) && auth.userId) {
+        const byAuth = await auth.client
+          .from('profiles')
+          .update(body)
+          .eq('auth_id', auth.userId)
+          .select('*')
+          .maybeSingle();
+        if (!isNoRowResult(byAuth) || byAuth.data) res = byAuth;
+      }
+      if (isNoRowResult(res) && (payload.email || auth.email)) {
+        const email = String(payload.email || auth.email)
+          .toLowerCase()
+          .trim();
+        const byEmail = await auth.client
+          .from('profiles')
+          .update(body)
+          .ilike('email', email)
+          .select('*')
+          .limit(1);
+        if (!byEmail.error && Array.isArray(byEmail.data) && byEmail.data[0]) {
+          res = { data: byEmail.data[0], error: null };
+        }
+      }
+      return res;
+    }
+
+    let result = await runProfileUpdate(patch);
 
     // Column missing: drop gallery_videos and retry — gallery sentinel already set.
     if (result.error && isMissingGalleryVideosColumnError(result.error)) {
-      delete payload.gallery_videos;
-      result = await auth.client
-        .from('profiles')
-        .upsert(payload, { onConflict: 'id', defaultToNull: false })
-        .select('*')
-        .maybeSingle();
+      delete patch.gallery_videos;
+      result = await runProfileUpdate(patch);
     }
 
     if (result.error) {
+      console.error('[supabase/update-profile] update failed:', result.error.message, {
+        id: updateId,
+        keys: Object.keys(patch),
+      });
       return send(res, 500, { success: false, error: { message: result.error.message } });
     }
     if (!result.data) {
-      return send(res, 500, { success: false, error: { message: 'Profile was not updated' } });
+      console.error('[supabase/update-profile] no row matched', {
+        id: updateId,
+        authUserId: auth.userId,
+        keys: Object.keys(patch),
+      });
+      return send(res, 500, {
+        success: false,
+        error: { message: 'Profile was not updated — no matching profile row for this account' },
+      });
     }
     return send(res, 200, { success: true, user: mapProfileRow(result.data) });
   }

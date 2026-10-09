@@ -572,7 +572,14 @@ export async function persistUserProfileUpdate(
     });
     const data = await res.json().catch(() => null);
     if (!res.ok || !data?.success) {
-      console.warn('persistUserProfileUpdate rejected:', data?.error || res.status);
+      const errMsg =
+        (typeof data?.error === 'string' && data.error) ||
+        data?.error?.message ||
+        `HTTP ${res.status}`;
+      console.warn('persistUserProfileUpdate rejected:', errMsg, {
+        userId,
+        keys: Object.keys(updates),
+      });
       return false;
     }
     return true;

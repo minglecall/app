@@ -5029,11 +5029,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     const saveGen = ++profileSaveGenRef.current;
-    const email = sanitizedUpdates.email || targetBefore?.email;
-    const payload: Partial<UserProfile> = {
-      ...sanitizedUpdates,
-      ...(email ? { email } : {}),
-    };
+    // Include email only when the caller is actually updating it. Attaching email on
+    // every gallery/media save can trip unique(email) conflicts and is unnecessary
+    // once the server resolves the profile from the auth session.
+    const payload: Partial<UserProfile> = { ...sanitizedUpdates };
     const silentSuccess = Boolean(options?.silentSuccess);
     const task = profileSaveChainRef.current.then(async () => {
       const saved = await persistUserProfileUpdate(userId, payload);
@@ -5075,13 +5074,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 : { userId: pendingSelfProfileRef.current.userId, fields: cleared };
           }
         }
-        showToast(
-          'Profile Save Failed',
-          touchingMedia
-            ? 'Upload may have reached storage, but your profile was not updated. Please try again.'
-            : 'Your changes are still on screen. Click Save again.',
-          'error'
-        );
+        // When silentSuccess is set, the caller owns both success and failure toasts.
+        if (!silentSuccess) {
+          showToast(
+            'Profile Save Failed',
+            touchingMedia
+              ? 'Upload may have reached storage, but your profile was not updated. Please try again.'
+              : 'Your changes are still on screen. Click Save again.',
+            'error'
+          );
+        }
         return false;
       }
       if (!silentSuccess) {
