@@ -32,7 +32,22 @@ export async function getAccessToken(): Promise<string | null> {
   if (!isSupabaseConfigured()) return null;
   try {
     const { data } = await supabase.auth.getSession();
-    return data.session?.access_token || null;
+    let session = data.session;
+    if (!session?.access_token) return null;
+
+    // getSession() can return an expired access_token; refresh before API calls.
+    // This is the usual cause of "Invalid or expired authentication token" on Vercel
+    // while localhost still works with a freshly signed-in session.
+    const expiresAtMs = Number(session.expires_at || 0) * 1000;
+    const needsRefresh = !expiresAtMs || expiresAtMs <= Date.now() + 60_000;
+    if (needsRefresh) {
+      const { data: refreshed, error } = await supabase.auth.refreshSession();
+      if (!error && refreshed.session?.access_token) {
+        session = refreshed.session;
+      }
+    }
+
+    return session?.access_token || null;
   } catch {
     return null;
   }

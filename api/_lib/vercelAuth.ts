@@ -107,10 +107,33 @@ export async function requireAuthFromBearer(
 
   const { data: userData, error: userErr } = await admin.auth.getUser(token);
   if (userErr || !userData?.user) {
+    let hint = '';
+    try {
+      const parts = String(token).split('.');
+      if (parts.length >= 2) {
+        const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+        const iss = String(payload.iss || '').replace(/\/$/, '');
+        const expected = String(url || '').replace(/\/$/, '');
+        if (payload.exp && Number(payload.exp) * 1000 < Date.now()) {
+          hint = ' Session expired — sign out and sign in again.';
+        } else if (iss && expected && !iss.startsWith(expected)) {
+          hint =
+            ' Browser session project does not match server SUPABASE URL. On Vercel, VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be from the same project, then Redeploy.';
+        } else if (userErr?.message) {
+          hint = ` (${String(userErr.message).slice(0, 120)})`;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     return {
       ok: false,
       status: 401,
-      error: { message: 'Invalid or expired authentication token.', code: 'UNAUTHORIZED' },
+      error: {
+        message: `Invalid or expired authentication token.${hint}`,
+        code: 'UNAUTHORIZED',
+      },
     };
   }
 

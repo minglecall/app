@@ -114,6 +114,7 @@ export function AdminEmailPanel() {
   const [saving, setSaving] = useState(false);
   const [savingTemplates, setSavingTemplates] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [verifyingKey, setVerifyingKey] = useState(false);
   const [env, setEnv] = useState<EmailEnv>({});
   const [policy, setPolicy] = useState<EmailPolicy>(DEFAULT_POLICY);
   const [templates, setTemplates] = useState<EmailTemplatesMap>(
@@ -125,6 +126,18 @@ export function AdminEmailPanel() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [verifyResult, setVerifyResult] = useState<string | null>(null);
+  const [verifyOk, setVerifyOk] = useState<boolean | null>(null);
+
+  const apiErrorMessage = (data: any, fallback: string, status?: number) => {
+    const raw = data?.error;
+    const msg =
+      typeof raw === 'string' ? raw : typeof raw?.message === 'string' ? raw.message : fallback;
+    if (status === 401 || raw?.code === 'UNAUTHORIZED') {
+      return `${msg} Tip: sign out/in, then confirm Vercel VITE_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY match the same project.`;
+    }
+    return msg;
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -133,11 +146,7 @@ export function AdminEmailPanel() {
       const res = await authFetch('/api/admin/email');
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.success) {
-        throw new Error(
-          typeof data?.error === 'string'
-            ? data.error
-            : data?.error?.message || `Failed to load email status (${res.status})`
-        );
+        throw new Error(apiErrorMessage(data, `Failed to load email status (${res.status})`, res.status));
       }
       setEnv(data.data?.env || {});
       setPolicy({ ...DEFAULT_POLICY, ...(data.data?.policy || {}) });
@@ -220,6 +229,39 @@ export function AdminEmailPanel() {
     }));
   };
 
+  /** Probe RESEND_API_KEY only (GET /domains) — no recipient required. */
+  const verifyResendKey = async () => {
+    setVerifyingKey(true);
+    setVerifyResult(null);
+    setVerifyOk(null);
+    setError(null);
+    try {
+      const res = await authFetch('/api/admin/email/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 || res.status === 403) {
+        setVerifyOk(false);
+        setVerifyResult(apiErrorMessage(data, 'Authentication failed', res.status));
+        return;
+      }
+      const result = data?.data || data;
+      const ok = Boolean(result?.ok);
+      setVerifyOk(ok);
+      setVerifyResult(
+        result?.message ||
+          (ok ? 'Resend API key accepted.' : 'Resend / SMTP verification failed')
+      );
+    } catch (e: any) {
+      setVerifyOk(false);
+      setVerifyResult(e?.message || 'Verify failed');
+    } finally {
+      setVerifyingKey(false);
+    }
+  };
+
   const runTest = async () => {
     setTesting(true);
     setTestResult(null);
@@ -231,9 +273,13 @@ export function AdminEmailPanel() {
         body: JSON.stringify({ to: testTo.trim() || undefined, name: 'Admin' }),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.status === 401 || res.status === 403) {
+        setTestResult(apiErrorMessage(data, 'Authentication failed', res.status));
+        return;
+      }
       const result = data?.data || data;
       setTestResult(result?.message || (result?.ok ? 'Connection OK' : 'Connection failed'));
-      await load();
+      if (result?.ok) await load();
     } catch (e: any) {
       setTestResult(e?.message || 'Test failed');
     } finally {
@@ -432,33 +478,65 @@ export function AdminEmailPanel() {
         <div className="rounded-2xl border border-slate-700 bg-slate-900/50 p-5 space-y-4">
           <div className="flex items-center gap-2 text-white font-semibold">
             <Send className="w-4 h-4 text-pink-400" />
-            Connection test
+            Resend / SMTP connection
           </div>
           <p className="text-xs text-slate-400">
-            Uses the <strong className="text-slate-300">connection test</strong> template when a recipient is
-            provided.
+            <strong className="text-slate-300">Verify API key</strong> checks{' '}
+            <code className="text-pink-300/90">RESEND_API_KEY</code> against Resend (no email sent).{' '}
+            <strong className="text-slate-300">Send test email</strong> uses the connection-test template.
           </p>
-          <input
-            type="email"
-            value={testTo}
-            onChange={(e) => setTestTo(e.target.value)}
-            placeholder="recipient@example.com (optional)"
-            className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
-          />
-          <button
-            type="button"
-            disabled={testing || !env.configured}
-            onClick={() => void runTest()}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-pink-600 hover:bg-pink-500 disabled:opacity-50 text-white text-sm font-semibold"
-          >
-            {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Shield className="w-4 h-4" />}
-            Run Resend / SMTP test
-          </button>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={verifyingKey}
+              onClick={() => void verifyResendKey()}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 disabled:opacity-50 text-white text-sm font-semibold"
+            >
+              {verifyingKey ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Shield className="w-4 h-4 text-emerald-400" />
+              )}
+              Verify Resend API key
+            </button>
+          </div>
+          {verifyResult && (
+            <div
+              className={`text-xs rounded-lg px-3 py-2 border ${
+                verifyOk
+                  ? 'text-emerald-200 bg-emerald-500/10 border-emerald-500/30'
+                  : 'text-rose-200 bg-rose-500/10 border-rose-500/30'
+              }`}
+            >
+              {verifyResult}
+            </div>
+          )}
+
+          <div className="border-t border-slate-800 pt-4 space-y-3">
+            <input
+              type="email"
+              value={testTo}
+              onChange={(e) => setTestTo(e.target.value)}
+              placeholder="recipient@example.com"
+              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-pink-500/40"
+            />
+            <button
+              type="button"
+              disabled={testing || !testTo.trim().includes('@')}
+              onClick={() => void runTest()}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-pink-600 hover:bg-pink-500 disabled:opacity-50 text-white text-sm font-semibold"
+            >
+              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              Send test email
+            </button>
+          </div>
+
           {!env.configured && (
             <div className="flex items-start gap-2 text-xs text-amber-300/90">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-              Set <code>RESEND_API_KEY</code> or <code>SMTP_HOST</code>/<code>SMTP_USER</code>/
-              <code>SMTP_PASS</code> in Vercel, then redeploy.
+              Set <code>RESEND_API_KEY</code> (recommended) or <code>SMTP_HOST</code>/
+              <code>SMTP_USER</code>/<code>SMTP_PASS</code> in Vercel Production env, then Redeploy.
             </div>
           )}
           {testResult && (

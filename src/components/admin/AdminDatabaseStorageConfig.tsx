@@ -125,12 +125,22 @@ export const AdminDatabaseStorageConfig: React.FC<AdminDatabaseStorageConfigProp
         body: JSON.stringify({ email: testEmailAddress.trim(), name: 'Admin Test Recipient' }),
       });
       const data = await res.json();
+      const errMsg =
+        typeof data?.error === 'string'
+          ? data.error
+          : data?.error?.message || data?.message || 'Failed to dispatch email';
       if (res.ok && data.success) {
         setTestEmailResult(data);
         showToast('Email Dispatched ✉️', `Sent test OTP (${data.code}) to ${testEmailAddress}`, 'success');
       } else {
-        setTestEmailResult({ success: false, message: data.error || 'Failed to dispatch email' });
-        showToast('Dispatch Notice', data.error || 'Failed to send test email', 'error');
+        setTestEmailResult({ success: false, message: errMsg });
+        showToast(
+          res.status === 401 ? 'Session expired' : 'Dispatch Notice',
+          res.status === 401
+            ? `${errMsg} Sign out/in, and confirm Vercel Supabase env vars match.`
+            : errMsg,
+          'error'
+        );
       }
     } catch (e: any) {
       setTestEmailResult({ success: false, message: e.message });
