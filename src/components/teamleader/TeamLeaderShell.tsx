@@ -254,7 +254,7 @@ export const TeamLeaderShell: React.FC<TeamLeaderShellProps> = ({
   return (
     <div
       id="team-leader-dashboard-container"
-      className="flex h-[calc(100dvh-3rem)] sm:h-[calc(100dvh-3.5rem)] w-full overflow-hidden bg-[#0B0D13] text-slate-100"
+      className="flex h-full min-h-0 w-full overflow-hidden bg-[#0B0D13] text-slate-100"
     >
       {/* Desktop sidebar — fixed pane height; nav scrolls independently */}
       <aside
@@ -376,7 +376,7 @@ export const TeamLeaderShell: React.FC<TeamLeaderShellProps> = ({
           )}
         </header>
 
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 sm:px-5 lg:px-6 py-5 pb-24 md:pb-8">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 sm:px-5 lg:px-6 pt-2 pb-24 md:pb-8">
           <div className="space-y-6 max-w-[1400px] w-full mx-auto">{children}</div>
         </div>
       </div>

@@ -112,7 +112,7 @@ export const Header: React.FC<HeaderProps> = ({
   const isAdmin = isLoggedIn && currentUser.role === 'admin';
 
   return (
-    <header id="main-app-header" className="sticky top-0 z-50 bg-chrome backdrop-blur-xl border-b border-hairline text-app w-full">
+    <header id="main-app-header" className="sticky top-0 z-50 shrink-0 bg-chrome backdrop-blur-xl border-b border-hairline text-app w-full">
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-12 sm:h-14 min-w-0">
           {/* Left Side: Brand Logo + Home & Admin Navigation */}

@@ -304,7 +304,7 @@ export const AdminShell: React.FC<AdminShellProps> = ({
   return (
     <div
       id="admin-dashboard-root"
-      className="fixed inset-x-0 top-12 sm:top-14 bottom-0 z-20 flex w-full overflow-hidden bg-[#0B0D13]"
+      className="flex h-full min-h-0 w-full overflow-hidden bg-[#0B0D13]"
     >
       {/* Desktop sidebar — viewport-locked; nav scrolls independently */}
       <aside
@@ -421,7 +421,7 @@ export const AdminShell: React.FC<AdminShellProps> = ({
           )}
         </header>
 
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 sm:px-5 lg:px-6 py-5 pb-24 md:pb-8">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 sm:px-5 lg:px-6 pt-2 pb-24 md:pb-8">
           <div className="space-y-6 max-w-[1400px] w-full mx-auto">{children}</div>
         </div>
       </div>
