@@ -142,8 +142,14 @@ const MainApp: React.FC = () => {
     );
   }
 
+  const isOpsDashboard = activeTab === 'admin' || activeTab === 'team_leader';
+
   return (
-    <div className="min-h-screen bg-app text-app flex flex-col font-sans selection-brand">
+    <div
+      className={`bg-app text-app flex flex-col font-sans selection-brand ${
+        isOpsDashboard ? 'h-dvh max-h-dvh overflow-hidden' : 'min-h-screen'
+      }`}
+    >
       {/* App Header */}
       <Header
         activeTab={activeTab}
@@ -155,8 +161,16 @@ const MainApp: React.FC = () => {
         onOpenMatch={() => setIsMatchOpen(true)}
       />
 
-      {/* Main View Content */}
-      <main className={`flex-1 app-fade-up ${isLoggedIn ? 'pb-24 md:pb-10' : 'pb-6'}`}>
+      {/* Main View Content — ops dashboards own their own scroll panes */}
+      <main
+        className={`flex-1 min-h-0 app-fade-up ${
+          isOpsDashboard
+            ? 'relative overflow-hidden pb-0 h-full'
+            : isLoggedIn
+              ? 'pb-24 md:pb-10'
+              : 'pb-6'
+        }`}
+      >
         {activeTab === 'home' && (
           <HomePage
             onStartCall={(id) => startCall(id)}
@@ -232,6 +246,7 @@ const MainApp: React.FC = () => {
         {activeTab === 'admin' && isLoggedIn && currentUser.role === 'admin' && <AdminDashboard />}
       </main>
 
+      {!isOpsDashboard && (
       <footer className="h-8 bg-app-surface border-t border-app px-4 sm:px-8 flex items-center justify-between text-[10px] text-app-muted">
         <div className="flex gap-4 items-center">
           <span>LiveCall</span>
@@ -246,6 +261,7 @@ const MainApp: React.FC = () => {
           <span className="hidden sm:inline text-app-muted">{currentUtcTime}</span>
         </div>
       </footer>
+      )}
 
       {/* Global Active Call Studio */}
       {activeCall && <VideoCallStudio onOpenStore={() => setIsStoreOpen(true)} />}

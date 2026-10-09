@@ -12,6 +12,10 @@ import { getFallbackAvatar } from '../../utils/avatars';
 import { AgencyHostLeaderboard } from './AgencyHostLeaderboard';
 import { AgencyMilestoneAlerts } from './AgencyMilestoneAlerts';
 import { TeamLeaderSettlementsPanel } from './TeamLeaderSettlementsPanel';
+import { TeamLeaderShell } from './TeamLeaderShell';
+import { TeamLeaderKpiBoard } from './TeamLeaderKpiBoard';
+import { TeamLeaderTabKey } from './teamLeaderNavConfig';
+import { buildTlKpiSeries } from '../../utils/teamLeaderKpiSeries';
 import { PasswordStrengthField } from '../auth/PasswordStrengthField';
 import { getPasswordPolicyError, isPasswordPolicyValid } from '../../../shared/passwordPolicy';
 import { authFetch } from '../../utils/apiClient';
@@ -84,9 +88,19 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     showToast,
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'creators' | 'leaderboard' | 'analytics' | 'payouts' | 'agency'>('creators');
+  const [activeTab, setActiveTab] = useState<TeamLeaderTabKey>('creators');
+  const [leaderboardView, setLeaderboardView] = useState<'milestones' | 'rankings'>('milestones');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'busy' | 'offline'>('all');
+
+  const navigateTl = (tab: TeamLeaderTabKey, nestedKey?: string) => {
+    setActiveTab(tab);
+    if (tab === 'leaderboard') {
+      setLeaderboardView((nestedKey as 'milestones' | 'rankings') || 'milestones');
+    }
+  };
+
+  const activeNestedKey = activeTab === 'leaderboard' ? leaderboardView : undefined;
   const [isSyncing, setIsSyncing] = useState(false);
   const [hydratedCreatorIds, setHydratedCreatorIds] = useState<Set<string>>(new Set());
   const [hydratedCreators, setHydratedCreators] = useState<UserProfile[]>([]);
@@ -311,6 +325,11 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
     systemSettings.teamLeaderSharePercent ??
     10;
 
+  const kpiSeries = useMemo(
+    () => buildTlKpiSeries(teamCallLogs, getCoinUsdPeg(systemSettings), 7),
+    [teamCallLogs, systemSettings.coinUsdPeg, systemSettings.femalePayoutRatioUSD, systemSettings.coinToUSDRatio]
+  );
+
   // Filtered Creators List
   const filteredCreators = useMemo(() => {
     return managedCreators.filter((c) => {
@@ -420,270 +439,72 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
   };
 
   return (
-    <div id="team-leader-dashboard-container" className="min-h-[calc(100vh-4rem)] pb-24 text-slate-100">
-      {/* Header Banner */}
-      <div className="bg-gradient-to-r from-[#12101E] via-[#1A1528] to-[#0E1322] border-b border-amber-500/20 px-4 sm:px-8 py-6 shadow-xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-6 relative z-10">
-          <div className="flex items-center space-x-4">
-            <div className="relative">
-              <img
-                src={currentUser.avatarUrl}
-                alt={currentUser.name}
-                className="w-16 h-16 rounded-2xl object-cover ring-2 ring-amber-400/80 shadow-lg shadow-amber-950/50"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).src = getFallbackAvatar(currentUser.name, 'female', 'team_leader');
-                }}
-              />
-              <span className="absolute -bottom-1 -right-1 bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 p-1 rounded-lg text-xs font-bold shadow-md">
-                👑
-              </span>
-            </div>
-            <div>
-              <div className="flex items-center space-x-2">
-                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-                  {currentUser.name}
-                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-mono font-semibold">
-                    TEAM LEADER
-                  </span>
-                </h1>
-              </div>
-              <p className="text-xs sm:text-sm text-slate-400 mt-0.5 flex items-center gap-2">
-                <Building className="w-3.5 h-3.5 text-amber-400" />
-                <span>{currentUser.agencyName || 'Your Agency'}</span>
-                <span className="text-slate-600">•</span>
-                <span className="text-amber-300/90 font-mono text-xs">
-                  {commissionPercent}% call-split (config)
-                </span>
-              </p>
-            </div>
-          </div>
+    <TeamLeaderShell
+      activeTab={activeTab}
+      activeNestedKey={activeNestedKey}
+      onNavigateTab={navigateTl}
+      onSyncDatabase={() => void handleSyncDatabase()}
+      onCreateCreator={() => setIsAddCreatorOpen(true)}
+      isSyncing={isSyncing}
+      brandName={currentUser.agencyName || 'Your Agency'}
+      brandSubtitle={currentUser.name || 'Team Leader'}
+      badges={{
+        creators: managedCreators.length,
+        leaderboard: 'LIVE',
+        analytics: teamCallLogs.length,
+      }}
+      headerKpis={[
+        {
+          label: 'Creators',
+          value: String(managedCreators.length),
+          accentClass: 'text-pink-300',
+        },
+        {
+          label: 'TL earnings',
+          value: isLoadingStats && !agencyStats ? '…' : `$${teamLeaderEarnedUSD.toFixed(2)}`,
+          accentClass: 'text-amber-300',
+        },
+        {
+          label: 'Host revenue',
+          value: `$${totalUSDEarned.toFixed(2)}`,
+          accentClass: 'text-emerald-400',
+        },
+        {
+          label: 'Video calls',
+          value: String(totalCallsHosted),
+          accentClass: 'text-sky-300',
+        },
+      ]}
+    >
+      {/* KPI board — Creators home only (hero TL earnings + small chart cards) */}
+      {activeTab === 'creators' && (
+        <TeamLeaderKpiBoard
+          series={kpiSeries}
+          creatorsTotal={managedCreators.length}
+          creatorsOnline={managedCreators.filter((c) => c.onlineStatus === 'online').length}
+          totalCalls={totalCallsHosted}
+          totalMinutes={totalMinutesInCalls}
+          hostCoins={totalCoinsEarnedByTeam}
+          hostUsd={totalUSDEarned}
+          tlUsd={teamLeaderEarnedUSD}
+          tlCoins={teamLeaderEarnedCoins}
+          tlLoading={isLoadingStats && !agencyStats}
+        />
+      )}
 
-          {/* Quick Action Buttons */}
-          <div className="flex items-center space-x-3">
-            <button
-              id="tl-sync-db-btn"
-              onClick={handleSyncDatabase}
-              disabled={isSyncing}
-              className="flex items-center space-x-2 px-3.5 py-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-amber-300 font-semibold text-xs sm:text-sm border border-amber-500/30 transition-all cursor-pointer disabled:opacity-50"
-              title="Sync and refresh latest creators from Supabase database"
-            >
-              <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-amber-400' : ''}`} />
-              <span>{isSyncing ? 'Syncing...' : 'Sync Database'}</span>
-            </button>
-
-            <button
-              id="tl-create-creator-btn"
-              onClick={() => setIsAddCreatorOpen(true)}
-              className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold text-xs sm:text-sm shadow-lg shadow-amber-950/50 hover:shadow-amber-500/20 transition-all cursor-pointer transform hover:-translate-y-0.5"
-            >
-              <UserPlus className="w-4 h-4" />
-              <span>+ Create Female Creator</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* KPI Overview Metrics */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-8 mt-6">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
-          {/* Card 1: Total Creators */}
-          <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span className="flex items-center space-x-1.5">
-                <span>Managed Creators</span>
-              </span>
-              <Users className="w-4 h-4 text-pink-400" />
-            </div>
-            <div className="mt-2">
-              <span className="text-xl sm:text-2xl font-bold font-mono text-white">
-                {managedCreators.length}
-              </span>
-              <span className="text-[10px] text-emerald-400 ml-1.5 font-medium">
-                {managedCreators.filter((c) => c.onlineStatus === 'online').length} online
-              </span>
-            </div>
-          </div>
-
-          {/* Card 2: Calls Hosted */}
-          <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span className="flex items-center space-x-1.5">
-                <span>Total Video Calls</span>
-              </span>
-              <PhoneCall className="w-4 h-4 text-emerald-400" />
-            </div>
-            <div className="mt-2">
-              <span className="text-xl sm:text-2xl font-bold font-mono text-white">
-                {totalCallsHosted}
-              </span>
-              <span className="text-[10px] text-slate-400 ml-1.5 font-mono">sessions</span>
-            </div>
-          </div>
-
-          {/* Card 3: Call Minutes */}
-          <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span className="flex items-center space-x-1.5">
-                <span>Live Minutes</span>
-              </span>
-              <Clock className="w-4 h-4 text-sky-400" />
-            </div>
-            <div className="mt-2">
-              <span className="text-xl sm:text-2xl font-bold font-mono text-white">
-                {totalMinutesInCalls.toLocaleString()}
-              </span>
-              <span className="text-[10px] text-slate-400 ml-1.5 font-mono">mins</span>
-            </div>
-          </div>
-
-          {/* Card 4: Host Coins Earned (managed hosts) */}
-          <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span className="flex items-center space-x-1.5">
-                <span>Host Coins</span>
-              </span>
-              <Coins className="w-4 h-4 text-amber-400" />
-            </div>
-            <div className="mt-2">
-              <span className="text-xl sm:text-2xl font-bold font-mono text-amber-300">
-                {totalCoinsEarnedByTeam.toLocaleString()}
-              </span>
-              <span className="text-[10px] text-slate-400 ml-1.5">🪙</span>
-            </div>
-          </div>
-
-          {/* Card 5: Host USD (Coin USD Peg from Economy) */}
-          <div className="bg-[#12151F]/90 border border-slate-800/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-amber-500/30 transition-all">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span className="flex items-center space-x-1.5">
-                <span>Host Revenue</span>
-              </span>
-              <DollarSign className="w-4 h-4 text-emerald-400" />
-            </div>
-            <div className="mt-2">
-              <span className="text-xl sm:text-2xl font-bold font-mono text-emerald-400">
-                ${totalUSDEarned.toFixed(2)}
-              </span>
-              <span className="text-[10px] text-slate-400 ml-1 font-mono">USD</span>
-            </div>
-            <div className="text-[9px] text-slate-500 mt-1 font-mono">
-              Payout USD @ Coin USD Peg (Economy)
-            </div>
-          </div>
-
-          {/* Card 6: Real TL earnings from call splits (NOT % of host payout) */}
-          <div className="bg-gradient-to-br from-amber-950/40 via-[#161922] to-slate-900 border border-amber-500/40 rounded-xl p-3.5 flex flex-col justify-between shadow-lg shadow-amber-950/30">
-            <div className="flex items-center justify-between text-amber-300 text-xs font-medium">
-              <span className="flex items-center space-x-1.5">
-                <span>TL Earnings</span>
-              </span>
-              <Percent className="w-4 h-4 text-amber-400" />
-            </div>
-            <div className="mt-2">
-              <span className="text-xl sm:text-2xl font-bold font-mono text-amber-300">
-                {isLoadingStats && !agencyStats ? '…' : `$${teamLeaderEarnedUSD.toFixed(2)}`}
-              </span>
-              <span className="text-[10px] text-amber-400/80 ml-1 font-mono font-bold">
-                ({teamLeaderEarnedCoins.toLocaleString()} 🪙)
-              </span>
-            </div>
-            <p className="text-[9px] text-amber-400/60 mt-1 font-mono">from call splits</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Navigation Tabs */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-8 mt-6">
-        <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-2">
-          <button
-            id="tl-tab-creators"
-            onClick={() => setActiveTab('creators')}
-            className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all shrink-0 cursor-pointer ${
-              activeTab === 'creators'
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            <span>My Creators & Overrides</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] font-mono">
-              {managedCreators.length}
-            </span>
-          </button>
-
-          <button
-            id="tl-tab-leaderboard"
-            onClick={() => setActiveTab('leaderboard')}
-            className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all shrink-0 cursor-pointer ${
-              activeTab === 'leaderboard'
-                ? 'bg-gradient-to-r from-amber-600 to-yellow-500 text-slate-950 font-bold shadow-md shadow-amber-950/40'
-                : 'text-amber-400 hover:text-amber-300 hover:bg-amber-950/30 border border-amber-500/20'
-            }`}
-          >
-            <Crown className="w-4 h-4 text-yellow-300" />
-            <span>Target Leaderboard & Boosts</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-amber-950 border border-amber-400/50 text-[10px] font-mono text-amber-300">
-              LIVE
-            </span>
-          </button>
-
-          <button
-            id="tl-tab-analytics"
-            onClick={() => setActiveTab('analytics')}
-            className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all shrink-0 cursor-pointer ${
-              activeTab === 'analytics'
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-            }`}
-          >
-            <TrendingUp className="w-4 h-4" />
-            <span>Call History & Analytics</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] font-mono">
-              {teamCallLogs.length}
-            </span>
-          </button>
-
-          <button
-            id="tl-tab-payouts"
-            onClick={() => setActiveTab('payouts')}
-            className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all shrink-0 cursor-pointer ${
-              activeTab === 'payouts'
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-            }`}
-          >
-            <DollarSign className="w-4 h-4" />
-            <span>Settlements</span>
-            </button>
-
-          <button
-            id="tl-tab-agency"
-            onClick={() => setActiveTab('agency')}
-            className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all shrink-0 cursor-pointer ${
-              activeTab === 'agency'
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-            }`}
-          >
-            <Building className="w-4 h-4" />
-            <span>Agency Guild Profile</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Main Tab Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-8 mt-6">
-        {/* ======================= TAB 0: TARGET LEADERBOARD ======================= */}
-        {activeTab === 'leaderboard' && (
-          <div className="space-y-6">
+      {/* ======================= TAB 0: TARGET LEADERBOARD ======================= */}
+      {activeTab === 'leaderboard' && (
+        <div className="space-y-6">
+          {leaderboardView === 'milestones' ? (
             <AgencyMilestoneAlerts creators={managedCreators} />
+          ) : (
             <AgencyHostLeaderboard creators={managedCreators} />
-          </div>
-        )}
+          )}
+        </div>
+      )}
 
-        {/* ======================= TAB 1: CREATORS & OVERRIDES ======================= */}
-        {activeTab === 'creators' && (
+      {/* ======================= TAB 1: CREATORS & OVERRIDES ======================= */}
+      {activeTab === 'creators' && (
           <div className="space-y-4">
             {/* Search and Filters */}
             <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -957,94 +778,9 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           </div>
         )}
 
-        {/* ======================= TAB 2: CALL HISTORY & ANALYTICS ======================= */}
-        {activeTab === 'analytics' && (
+      {/* ======================= TAB 2: CALL HISTORY & ANALYTICS ======================= */}
+      {activeTab === 'analytics' && (
           <div className="space-y-6">
-            {/* Header info banner */}
-            <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-                  <TrendingUp className="w-4 h-4 text-amber-400" />
-                  Agency Real-Time Call Telemetry & Creator Rankings
-                </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Live session duration, coin splits, creator leaderboards, and call performance for your agency team.
-                </p>
-              </div>
-
-              <div className="px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-xs font-bold flex items-center gap-2">
-                <span>Call split: {commissionPercent}% (config)</span>
-                <span>•</span>
-                <span>${teamLeaderEarnedUSD.toFixed(2)} TL earnings (from splits)</span>
-              </div>
-            </div>
-
-            {/* Agency Top Earners Leaderboard */}
-            {managedCreators.length > 0 && (
-              <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-5 space-y-3 shadow-xl">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs sm:text-sm font-black text-white font-mono uppercase tracking-wider flex items-center gap-2">
-                    <Award className="w-4 h-4 text-yellow-400" />
-                    <span>Top Agency Creator Performers</span>
-                  </h4>
-                  <span className="text-[11px] text-slate-400 font-mono">
-                    Ranked by Live Call Volume & Earnings
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
-                  {[...managedCreators]
-                    .sort((a, b) => (b.earningsCoins || 0) - (a.earningsCoins || 0))
-                    .slice(0, 3)
-                    .map((creator, rankIdx) => {
-                      const rankBadges = ['🥇 1st Place', '🥈 2nd Place', '🥉 3rd Place'];
-                      const rankColors = [
-                        'border-amber-500/40 bg-amber-500/10 text-amber-300',
-                        'border-slate-400/40 bg-slate-500/10 text-slate-300',
-                        'border-amber-700/40 bg-amber-900/10 text-amber-500',
-                      ];
-
-                      return (
-                        <div
-                          key={creator.id}
-                          className={`p-4 rounded-xl border ${rankColors[rankIdx]} space-y-3 relative overflow-hidden`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-mono font-black uppercase tracking-wider">
-                              {rankBadges[rankIdx]}
-                            </span>
-                            <span className="text-xs font-bold font-mono text-amber-400">
-                              ★ {(creator.ratingScore || 5.0).toFixed(1)}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center space-x-3">
-                            <img
-                              src={creator.avatarUrl}
-                              alt={creator.name}
-                              className="w-10 h-10 rounded-full object-cover ring-2 ring-slate-700"
-                            />
-                            <div className="min-w-0 flex-1">
-                              <h5 className="text-xs font-bold text-white truncate">{creator.name}</h5>
-                              <p className="text-[10px] text-slate-400 font-mono">
-                                {creator.nationality} • {creator.totalCallMinutes || 0} mins hosted
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono">
-                            <span className="text-slate-400 text-[10px]">Accumulated Coins:</span>
-                            <span className="font-black text-amber-300">
-                              {(creator.earningsCoins || 0).toLocaleString()} 🪙
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                </div>
-              </div>
-            )}
-
             {/* Call Logs Table */}
             {teamCallLogs.length === 0 ? (
               <div className="bg-[#12151F] border border-slate-800 rounded-2xl p-12 text-center">
@@ -1239,12 +975,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
                   <span className="font-mono font-bold text-amber-300">{commissionPercent}%</span>
                 </div>
                 <div className="flex justify-between py-2 border-b border-slate-800">
-                  <span className="text-slate-400">TL earnings (from splits):</span>
-                  <span className="font-mono font-bold text-amber-300">
-                    {teamLeaderEarnedCoins.toLocaleString()} 🪙 · ${teamLeaderEarnedUSD.toFixed(2)}
-                  </span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-slate-800">
                   <span className="text-slate-400">Spoken Languages:</span>
                   <span className="text-slate-200">{(currentUser.spokenLanguages || ['English', 'Spanish']).join(', ')}</span>
                 </div>
@@ -1290,7 +1020,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
             </div>
           </div>
         )}
-      </div>
 
       {/* ======================= MODAL: CREATE FEMALE CREATOR ======================= */}
       {isAddCreatorOpen && (
@@ -2047,6 +1776,6 @@ export const TeamLeaderDashboard: React.FC<TeamLeaderDashboardProps> = ({
           </div>
         </div>
       )}
-    </div>
+    </TeamLeaderShell>
   );
 };

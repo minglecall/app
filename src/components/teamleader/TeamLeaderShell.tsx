@@ -1,137 +1,82 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
   Award,
-  Banknote,
-  BarChart3,
-  Building2,
-  CalendarClock,
+  Building,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Cloud,
-  Coins,
   Crown,
-  Database,
-  FileCode2,
-  FileText,
-  Gift,
-  Globe,
-  Heart,
-  History,
-  Image as ImageIcon,
-  Key,
-  Landmark,
-  Languages,
-  Layers,
-  LayoutDashboard,
-  LayoutTemplate,
-  Mail,
+  DollarSign,
   Menu,
-  Package,
-  Percent,
-  Radio,
-  Rocket,
-  Ruler,
-  Settings,
-  Shield,
-  ShieldAlert,
-  Sliders,
+  RefreshCw,
   Sparkles,
-  Target,
-  Trash2,
   TrendingUp,
+  UserPlus,
   Users,
-  Wallet,
   X,
-  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import {
-  ADMIN_NAV_GROUPS,
-  AdminNavActionKey,
-  AdminNavIconName,
-  AdminSubTabKey,
-  defaultL2ForTab,
-  findAdminNavL1,
-} from './adminNavConfig';
+  TEAM_LEADER_NAV_GROUPS,
+  TeamLeaderNavActionKey,
+  TeamLeaderNavIconName,
+  TeamLeaderTabKey,
+  defaultL2ForTeamLeaderTab,
+  findTeamLeaderNavL1,
+} from './teamLeaderNavConfig';
 
-const ICON_MAP: Record<AdminNavIconName, LucideIcon> = {
-  TrendingUp,
-  Radio,
-  Coins,
-  Package,
-  Gift,
-  Landmark,
-  History,
+const ICON_MAP: Record<TeamLeaderNavIconName, LucideIcon> = {
   Users,
   Crown,
-  Target,
-  Globe,
-  Key,
-  Database,
-  Activity,
-  Mail,
-  Layers,
-  Rocket,
-  Trash2,
-  LayoutDashboard,
-  Building2,
-  ShieldAlert,
-  Award,
-  Percent,
-  Wallet,
-  Banknote,
-  CalendarClock,
-  Cloud,
-  Shield,
-  Sliders,
-  FileCode2,
-  Image: ImageIcon,
-  FileText,
-  Zap,
-  LayoutTemplate,
-  BarChart3,
-  Ruler,
-  Languages,
+  TrendingUp,
+  DollarSign,
+  Building,
+  RefreshCw,
+  UserPlus,
   Sparkles,
-  Heart,
+  Award,
 };
 
-const COLLAPSE_STORAGE_KEY = 'minglecall:admin-sidebar-collapsed';
+const COLLAPSE_STORAGE_KEY = 'minglecall:tl-sidebar-collapsed';
 
-export interface AdminShellHeaderKpi {
+export interface TeamLeaderShellHeaderKpi {
   label: string;
   value: string;
   accentClass?: string;
 }
 
-export interface AdminShellProps {
-  activeSubTab: AdminSubTabKey;
-  /** Active L2 key for the current L1 (undefined when L1 has no children). */
+export interface TeamLeaderShellProps {
+  activeTab: TeamLeaderTabKey;
   activeNestedKey?: string;
-  onNavigateTab: (tab: AdminSubTabKey, nestedKey?: string) => void;
-  onSetupWizard: () => void;
-  onResetData: () => void;
-  /** Optional badge text per L1 id (e.g. live call count). */
-  badges?: Partial<Record<AdminSubTabKey | AdminNavActionKey, string | number>>;
-  headerKpis?: AdminShellHeaderKpi[];
+  onNavigateTab: (tab: TeamLeaderTabKey, nestedKey?: string) => void;
+  onSyncDatabase: () => void;
+  onCreateCreator: () => void;
+  isSyncing?: boolean;
+  brandName?: string;
+  brandSubtitle?: string;
+  badges?: Partial<Record<TeamLeaderTabKey | TeamLeaderNavActionKey, string | number>>;
+  headerKpis?: TeamLeaderShellHeaderKpi[];
+  headerActions?: React.ReactNode;
   children: React.ReactNode;
 }
 
-function NavIcon({ name, className }: { name: AdminNavIconName; className?: string }) {
+function NavIcon({ name, className }: { name: TeamLeaderNavIconName; className?: string }) {
   const Icon = ICON_MAP[name];
   return <Icon className={className || 'w-4 h-4 shrink-0'} />;
 }
 
-export const AdminShell: React.FC<AdminShellProps> = ({
-  activeSubTab,
+export const TeamLeaderShell: React.FC<TeamLeaderShellProps> = ({
+  activeTab,
   activeNestedKey,
   onNavigateTab,
-  onSetupWizard,
-  onResetData,
+  onSyncDatabase,
+  onCreateCreator,
+  isSyncing,
+  brandName = 'Agency',
+  brandSubtitle = 'Team Leader',
   badges,
   headerKpis,
+  headerActions,
   children,
 }) => {
   const [collapsed, setCollapsed] = useState(() => {
@@ -142,11 +87,11 @@ export const AdminShell: React.FC<AdminShellProps> = ({
     }
   });
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [expandedL1, setExpandedL1] = useState<string | null>(activeSubTab);
+  const [expandedL1, setExpandedL1] = useState<string | null>(activeTab);
 
   useEffect(() => {
-    setExpandedL1(activeSubTab);
-  }, [activeSubTab]);
+    setExpandedL1(activeTab);
+  }, [activeTab]);
 
   useEffect(() => {
     try {
@@ -173,29 +118,29 @@ export const AdminShell: React.FC<AdminShellProps> = ({
   const closeMobile = useCallback(() => setMobileOpen(false), []);
 
   const currentLabel = useMemo(() => {
-    const item = findAdminNavL1(activeSubTab);
-    if (!item) return 'Admin';
+    const item = findTeamLeaderNavL1(activeTab);
+    if (!item) return 'Agency';
     if (activeNestedKey && item.children) {
       const child = item.children.find((c) => c.id === activeNestedKey);
       if (child) return `${item.label} · ${child.label}`;
     }
     return item.label;
-  }, [activeSubTab, activeNestedKey]);
+  }, [activeTab, activeNestedKey]);
 
   const handleL1Click = (id: string, kind: 'tab' | 'action', hasChildren: boolean) => {
     if (kind === 'action') {
-      if (id === 'setup-wizard') onSetupWizard();
-      else if (id === 'reset-data') onResetData();
+      if (id === 'sync-db') onSyncDatabase();
+      else if (id === 'create-creator') onCreateCreator();
       closeMobile();
       return;
     }
 
-    const tab = id as AdminSubTabKey;
+    const tab = id as TeamLeaderTabKey;
     if (hasChildren) {
       setExpandedL1((prev) => (prev === tab ? null : tab));
-      const nested = activeSubTab === tab && activeNestedKey ? activeNestedKey : defaultL2ForTab(tab);
+      const nested =
+        activeTab === tab && activeNestedKey ? activeNestedKey : defaultL2ForTeamLeaderTab(tab);
       onNavigateTab(tab, nested);
-      // Mobile: keep drawer open until an L2 item is chosen
       return;
     }
 
@@ -203,7 +148,7 @@ export const AdminShell: React.FC<AdminShellProps> = ({
     closeMobile();
   };
 
-  const handleL2Click = (tab: AdminSubTabKey, nestedKey: string) => {
+  const handleL2Click = (tab: TeamLeaderTabKey, nestedKey: string) => {
     onNavigateTab(tab, nestedKey);
     closeMobile();
   };
@@ -213,7 +158,7 @@ export const AdminShell: React.FC<AdminShellProps> = ({
 
     return (
       <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain py-3 px-2 space-y-4 scrollbar-thin">
-        {ADMIN_NAV_GROUPS.map((group) => (
+        {TEAM_LEADER_NAV_GROUPS.map((group) => (
           <div key={group.id}>
             {!iconOnly && (
               <div className="px-2.5 mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
@@ -222,7 +167,7 @@ export const AdminShell: React.FC<AdminShellProps> = ({
             )}
             <ul className="space-y-0.5">
               {group.items.map((item) => {
-                const isActive = item.kind === 'tab' && item.id === activeSubTab;
+                const isActive = item.kind === 'tab' && item.id === activeTab;
                 const isExpanded = expandedL1 === item.id;
                 const hasChildren = Boolean(item.children?.length);
                 const badge = badges?.[item.id];
@@ -234,26 +179,29 @@ export const AdminShell: React.FC<AdminShellProps> = ({
                       type="button"
                       id={item.buttonId}
                       title={iconOnly ? item.label : item.title}
+                      disabled={item.id === 'sync-db' && isSyncing}
                       onClick={() => handleL1Click(item.id, item.kind, hasChildren)}
-                      className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition-colors cursor-pointer ${
-                        item.kind === 'action' && item.id === 'reset-data'
-                          ? 'text-rose-200 hover:bg-rose-950/60 border border-transparent hover:border-rose-700/40'
-                          : item.kind === 'action' && item.id === 'setup-wizard'
-                            ? 'text-pink-100 bg-gradient-to-r from-purple-600/80 to-pink-600/80 hover:from-purple-500 hover:to-pink-500'
+                      className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50 ${
+                        item.kind === 'action' && item.id === 'create-creator'
+                          ? 'text-slate-950 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400'
+                          : item.kind === 'action' && item.id === 'sync-db'
+                            ? 'text-amber-300 hover:bg-amber-950/40 border border-transparent hover:border-amber-500/30'
                             : isActive
-                              ? 'bg-indigo-600/90 text-white shadow-sm'
-                              : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                              ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40 shadow-sm'
+                              : 'text-slate-300 hover:bg-slate-800/80 hover:text-white border border-transparent'
                       } ${iconOnly ? 'justify-center' : ''}`}
                     >
                       <NavIcon
                         name={item.icon}
                         className={`w-4 h-4 shrink-0 ${
-                          item.id === 'monitoring' && isActive ? 'text-rose-200 animate-pulse' : ''
+                          item.id === 'sync-db' && isSyncing ? 'animate-spin' : ''
                         }`}
                       />
                       {!iconOnly && (
                         <>
-                          <span className="flex-1 truncate">{item.label}</span>
+                          <span className="flex-1 truncate">
+                            {item.id === 'sync-db' && isSyncing ? 'Syncing...' : item.label}
+                          </span>
                           {badge != null && badge !== '' && (
                             <span className="text-[10px] font-mono text-slate-400 tabular-nums">{badge}</span>
                           )}
@@ -276,14 +224,16 @@ export const AdminShell: React.FC<AdminShellProps> = ({
                             <li key={child.id}>
                               <button
                                 type="button"
-                                onClick={() => handleL2Click(item.id as AdminSubTabKey, child.id)}
+                                onClick={() => handleL2Click(item.id as TeamLeaderTabKey, child.id)}
                                 className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] font-medium transition-colors cursor-pointer ${
                                   childActive
-                                    ? 'bg-slate-800 text-white'
+                                    ? 'bg-slate-800 text-amber-200'
                                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                                 }`}
                               >
-                                {child.icon && <NavIcon name={child.icon} className="w-3.5 h-3.5 shrink-0" />}
+                                {child.icon && (
+                                  <NavIcon name={child.icon} className="w-3.5 h-3.5 shrink-0" />
+                                )}
                                 <span className="truncate">{child.label}</span>
                               </button>
                             </li>
@@ -303,12 +253,12 @@ export const AdminShell: React.FC<AdminShellProps> = ({
 
   return (
     <div
-      id="admin-dashboard-root"
-      className="fixed inset-x-0 top-12 sm:top-14 bottom-0 z-20 flex w-full overflow-hidden bg-[#0B0D13]"
+      id="team-leader-dashboard-container"
+      className="flex h-[calc(100dvh-3rem)] sm:h-[calc(100dvh-3.5rem)] w-full overflow-hidden bg-[#0B0D13] text-slate-100"
     >
-      {/* Desktop sidebar — viewport-locked; nav scrolls independently */}
+      {/* Desktop sidebar — fixed pane height; nav scrolls independently */}
       <aside
-        className={`hidden md:flex flex-col shrink-0 self-stretch h-full max-h-full min-h-0 overflow-hidden border-r border-slate-800 bg-[#12151F] transition-[width] duration-200 ${
+        className={`hidden md:flex flex-col shrink-0 h-full min-h-0 border-r border-slate-800 bg-[#12151F] transition-[width] duration-200 ${
           collapsed ? 'w-[64px]' : 'w-[260px]'
         }`}
       >
@@ -319,11 +269,11 @@ export const AdminShell: React.FC<AdminShellProps> = ({
         >
           {!collapsed && (
             <div className="min-w-0">
-              <div className="flex items-center gap-1.5 text-indigo-400 text-[9px] font-mono font-bold uppercase tracking-wider">
-                <Settings className="w-3 h-3" />
-                <span className="truncate">Admin</span>
+              <div className="flex items-center gap-1.5 text-amber-400 text-[9px] font-mono font-bold uppercase tracking-wider">
+                <Crown className="w-3 h-3" />
+                <span className="truncate">{brandSubtitle}</span>
               </div>
-              <div className="text-sm font-bold text-white truncate">Control Center</div>
+              <div className="text-sm font-bold text-white truncate">{brandName}</div>
             </div>
           )}
           <button
@@ -339,7 +289,6 @@ export const AdminShell: React.FC<AdminShellProps> = ({
         {renderNav('desktop')}
       </aside>
 
-      {/* Mobile drawer */}
       {mobileOpen && (
         <div className="md:hidden fixed inset-0 z-40 flex">
           <button
@@ -351,8 +300,10 @@ export const AdminShell: React.FC<AdminShellProps> = ({
           <aside className="relative z-10 flex flex-col w-[80%] max-w-[320px] h-full min-h-0 bg-[#12151F] border-r border-slate-800 shadow-2xl">
             <div className="flex items-center justify-between h-14 shrink-0 px-3 border-b border-slate-800">
               <div>
-                <div className="text-[9px] font-mono font-bold uppercase tracking-wider text-indigo-400">Admin</div>
-                <div className="text-sm font-bold text-white">Control Center</div>
+                <div className="text-[9px] font-mono font-bold uppercase tracking-wider text-amber-400">
+                  {brandSubtitle}
+                </div>
+                <div className="text-sm font-bold text-white truncate">{brandName}</div>
               </div>
               <button
                 type="button"
@@ -369,7 +320,7 @@ export const AdminShell: React.FC<AdminShellProps> = ({
       )}
 
       {/* Main column — header pinned; content scrolls independently */}
-      <div className="flex-1 min-w-0 min-h-0 flex flex-col h-full max-h-full overflow-hidden">
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col h-full">
         <header className="shrink-0 z-30 border-b border-slate-800 bg-[#12151F]/95 backdrop-blur-sm">
           <div className="flex items-center gap-3 px-3 sm:px-5 h-14">
             <button
@@ -383,17 +334,20 @@ export const AdminShell: React.FC<AdminShellProps> = ({
             <div className="min-w-0 flex-1">
               <h1 className="text-sm sm:text-base font-bold text-white truncate">{currentLabel}</h1>
               <p className="hidden sm:block text-[11px] text-slate-500 truncate">
-                Platform control &amp; moderation
+                {brandName} · agency control
               </p>
             </div>
+            {headerActions}
             {headerKpis && headerKpis.length > 0 && (
               <div className="hidden lg:flex items-center gap-2">
                 {headerKpis.map((kpi) => (
                   <div
                     key={kpi.label}
-                    className="px-3 py-1.5 rounded-lg bg-[#0F1115] border border-slate-800 min-w-[88px]"
+                    className="px-3 py-1.5 rounded-lg bg-[#0F1115] border border-slate-800 border-l-2 border-l-amber-500/60 min-w-[88px]"
                   >
-                    <div className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">{kpi.label}</div>
+                    <div className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">
+                      {kpi.label}
+                    </div>
                     <div className={`text-sm font-extrabold font-mono ${kpi.accentClass || 'text-white'}`}>
                       {kpi.value}
                     </div>
@@ -403,15 +357,16 @@ export const AdminShell: React.FC<AdminShellProps> = ({
             )}
           </div>
 
-          {/* Mobile / tablet header KPIs */}
           {headerKpis && headerKpis.length > 0 && (
             <div className="lg:hidden grid grid-cols-2 gap-2 px-3 pb-3">
               {headerKpis.map((kpi) => (
                 <div
                   key={kpi.label}
-                  className="px-3 py-2 rounded-xl bg-[#0F1115] border border-slate-800 border-l-2 border-l-indigo-500/60"
+                  className="px-3 py-2 rounded-xl bg-[#0F1115] border border-slate-800 border-l-[3px] border-l-amber-500/70"
                 >
-                  <div className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">{kpi.label}</div>
+                  <div className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">
+                    {kpi.label}
+                  </div>
                   <div className={`text-base font-extrabold font-mono ${kpi.accentClass || 'text-white'}`}>
                     {kpi.value}
                   </div>
