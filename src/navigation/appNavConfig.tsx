@@ -14,6 +14,7 @@ import {
   LayoutGrid,
   LogIn,
   LogOut,
+  Menu,
   MessageCircle,
   PhoneCall,
   Settings,
@@ -42,6 +43,7 @@ export const NAV_ICON_MAP: Record<string, LucideIcon> = {
   LayoutGrid,
   LogIn,
   LogOut,
+  Menu,
   MessageCircle,
   PhoneCall,
   Settings,
@@ -115,6 +117,7 @@ export interface NavDispatchContext {
 
 export function dispatchNavAction(item: AppNavItem, ctx: NavDispatchContext) {
   const target = item.actionTarget;
+  if (target === 'none') return;
   ctx.onCloseMenus?.();
   if (target === 'call_logs') ctx.markCallLogsSeen?.();
   if (item.actionType === 'tab' || target === 'home' && item.bar === 'brand') {

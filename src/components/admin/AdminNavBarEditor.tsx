@@ -75,6 +75,7 @@ export const AdminNavBarEditor: React.FC = () => {
   const destinations = NAV_DESTINATIONS.filter((dest) =>
     bar === 'brand' ? dest.actionType === 'tab' : dest.bars.includes(bar)
   );
+  const submenuDestinations = destinations.filter((dest) => dest.actionTarget !== 'none');
 
   const confirmSwitch = () => {
     if (!dirty) return true;
@@ -274,7 +275,7 @@ export const AdminNavBarEditor: React.FC = () => {
           }}
         >
           <option value="" disabled>Choose submenu destination</option>
-          {destinations.map((dest) => (
+          {submenuDestinations.map((dest) => (
             <option key={dest.actionTarget} value={dest.actionTarget}>{dest.label}</option>
           ))}
         </select>
@@ -400,6 +401,9 @@ export const AdminNavBarEditor: React.FC = () => {
         {logoutHidden && (
           <p className="text-xs text-amber-500">Logout is hidden. Users may have no menu path to sign out.</p>
         )}
+        {draft.some((item) => item.active && !item.parentId && item.actionTarget === 'none' && childNavItems(draft, item.id, true).length === 0) && (
+          <p className="text-xs text-amber-500">A None button only opens a submenu. Add at least one submenu item.</p>
+        )}
       </div>
 
       {bar === 'brand' && draft[0] && (
@@ -481,7 +485,9 @@ export const AdminNavBarEditor: React.FC = () => {
             >
               <option value="" disabled>Choose destination</option>
               {destinations.map((dest) => (
-                <option key={dest.actionTarget} value={dest.actionTarget}>{dest.label}</option>
+                <option key={dest.actionTarget} value={dest.actionTarget}>
+                  {dest.actionTarget === 'none' ? 'None' : dest.label}
+                </option>
               ))}
             </select>
           )}

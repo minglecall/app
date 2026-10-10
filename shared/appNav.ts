@@ -133,6 +133,7 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   { id: 'status_offline', label: 'Offline', icon: 'Circle', actionType: 'system', actionTarget: 'status_offline', badge: 'none', bars: ['persona_menu'] },
   { id: 'install_pwa', label: 'Install app', icon: 'Download', actionType: 'system', actionTarget: 'install_pwa', badge: 'none', bars: ['persona_menu', 'main_header'] },
   { id: 'exit', label: 'Exit', icon: 'LogOut', actionType: 'system', actionTarget: 'exit', badge: 'none', bars: ['mobile_bottom'] },
+  { id: 'none', label: 'More', icon: 'Menu', actionType: 'system', actionTarget: 'none', badge: 'none', bars: ['main_header', 'subheader', 'mobile_bottom'] },
 ];
 
 const DEST_BY_TARGET = new Map(NAV_DESTINATIONS.map((d) => [d.actionTarget, d]));
@@ -185,6 +186,7 @@ export function validateNavSlice(items: AppNavItem[]): string | null {
   const byId = new Map(items.map((item) => [item.id, item]));
   for (const item of items) {
     if (!item.parentId) continue;
+    if (item.actionTarget === 'none') return 'A submenu item must navigate somewhere';
     const parent = byId.get(item.parentId);
     if (!parent) return 'Submenu item must belong to a button in the same bar';
     if (parent.parentId) return 'Submenus can only be one level deep';

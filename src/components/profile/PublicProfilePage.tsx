@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   X,
@@ -26,6 +26,8 @@ import {
   Camera,
   Play,
   Pencil,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { CreatorMoment, GalleryVideoItem, UserProfile } from '../../types';
 import { getLanguageFlag } from '../../utils/flags';
@@ -52,6 +54,56 @@ function resolveGalleryVideoSrc(vid: GalleryVideoItem): string {
     normalizeMediaUrl(vid.url, vid.storageKey) ||
     (key ? `/api/storage/media?key=${encodeURIComponent(key)}` : '')
   );
+}
+
+type MediaLightboxItem =
+  | { type: 'photo'; src: string }
+  | { type: 'video'; src: string };
+
+const SWIPE_THRESHOLD_PX = 50;
+
+function useLightboxCarousel(open: boolean, count: number, index: number | null, setIndex: (i: number | null) => void) {
+  const touchStartX = useRef<number | null>(null);
+
+  const go = useCallback(
+    (dir: -1 | 1) => {
+      if (index == null || count <= 1) return;
+      setIndex((index + dir + count) % count);
+    },
+    [count, index, setIndex]
+  );
+
+  useEffect(() => {
+    if (!open || index == null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        go(-1);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        go(1);
+      } else if (e.key === 'Escape') {
+        setIndex(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, index, go, setIndex]);
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.changedTouches[0]?.clientX ?? null;
+  };
+
+  const onTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX.current == null) return;
+    const endX = e.changedTouches[0]?.clientX ?? touchStartX.current;
+    const dx = endX - touchStartX.current;
+    touchStartX.current = null;
+    if (Math.abs(dx) < SWIPE_THRESHOLD_PX) return;
+    go(dx > 0 ? -1 : 1);
+  };
+
+  return { go, onTouchStart, onTouchEnd };
 }
 
 export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
@@ -81,9 +133,8 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
   const [loading, setLoading] = useState(false);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [activeTab, setActiveTab] = useState<ProfileTab>('about');
-  const [lightboxMoment, setLightboxMoment] = useState<CreatorMoment | null>(null);
-  const [activeVideo, setActiveVideo] = useState<GalleryVideoItem | null>(null);
-  const [activePhoto, setActivePhoto] = useState<string | null>(null);
+  const [mediaLightboxIndex, setMediaLightboxIndex] = useState<number | null>(null);
+  const [momentLightboxIndex, setMomentLightboxIndex] = useState<number | null>(null);
   const [showGearMenu, setShowGearMenu] = useState(false);
   const [momentsList, setMomentsList] = useState<CreatorMoment[]>([]);
   const [momentsLoading, setMomentsLoading] = useState(false);
@@ -96,9 +147,8 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
     setActiveImageIndex(0);
     setActiveTab('about');
     setShowGearMenu(false);
-    setActiveVideo(null);
-    setActivePhoto(null);
-    setLightboxMoment(null);
+    setMediaLightboxIndex(null);
+    setMomentLightboxIndex(null);
     setLoadError(null);
     setFetchedUser(null);
 
@@ -160,9 +210,59 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
     (isSelf ? currentUser : null) ||
     fetchedUser;
 
-  const openPhoto = (url: string, idx?: number) => {
-    if (typeof idx === 'number') setActiveImageIndex(idx);
-    setActivePhoto(url);
+  const galleryVideos = Array.isArray(liveUser?.galleryVideos) ? liveUser!.galleryVideos! : [];
+  const allImages = liveUser
+    ? [
+        normalizeMediaUrl(liveUser.avatarUrl),
+        ...(liveUser.gallery || []).map((img) => normalizeMediaUrl(img)),
+      ].filter(Boolean)
+    : [];
+
+  const mediaItems: MediaLightboxItem[] = [
+    ...allImages.map((src) => ({ type: 'photo' as const, src })),
+    ...galleryVideos
+      .map((video) => {
+        const src = resolveGalleryVideoSrc(video);
+        return src ? ({ type: 'video' as const, src } as const) : null;
+      })
+      .filter((item): item is Extract<MediaLightboxItem, { type: 'video' }> => Boolean(item)),
+  ];
+
+  const mediaCarousel = useLightboxCarousel(
+    mediaLightboxIndex != null,
+    mediaItems.length,
+    mediaLightboxIndex,
+    setMediaLightboxIndex
+  );
+  const momentCarousel = useLightboxCarousel(
+    momentLightboxIndex != null,
+    momentsList.length,
+    momentLightboxIndex,
+    setMomentLightboxIndex
+  );
+
+  const activeMedia =
+    mediaLightboxIndex != null ? mediaItems[mediaLightboxIndex] ?? null : null;
+  const activeMoment =
+    momentLightboxIndex != null ? momentsList[momentLightboxIndex] ?? null : null;
+
+  useEffect(() => {
+    if (mediaLightboxIndex == null) return;
+    if (mediaLightboxIndex < allImages.length) {
+      setActiveImageIndex(mediaLightboxIndex);
+    }
+  }, [mediaLightboxIndex, allImages.length]);
+
+  const openPhotoAt = (idx: number) => {
+    if (idx < 0 || idx >= allImages.length) return;
+    setActiveImageIndex(idx);
+    setMediaLightboxIndex(idx);
+  };
+
+  const openVideoAt = (videoIdx: number) => {
+    const mediaIdx = allImages.length + videoIdx;
+    if (mediaIdx < 0 || mediaIdx >= mediaItems.length) return;
+    setMediaLightboxIndex(mediaIdx);
   };
 
   const shell = (body: React.ReactNode) => (
@@ -214,11 +314,6 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
 
   const isFemale = liveUser.gender === 'female';
   const isFav = favorites.includes(liveUser.id);
-  const galleryVideos = Array.isArray(liveUser.galleryVideos) ? liveUser.galleryVideos : [];
-  const allImages = [
-    normalizeMediaUrl(liveUser.avatarUrl),
-    ...(liveUser.gallery || []).map((img) => normalizeMediaUrl(img)),
-  ].filter(Boolean);
 
   const handleLikeMoment = async (momentId: string) => {
     const result = await likeUserMoment(liveUser.id, momentId);
@@ -276,13 +371,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
         <button
           type="button"
           className="w-full h-full cursor-zoom-in"
-          onClick={() =>
-            openPhoto(
-              allImages[activeImageIndex] ||
-                getFallbackAvatar(liveUser.name, liveUser.gender, liveUser.role),
-              activeImageIndex
-            )
-          }
+          onClick={() => openPhotoAt(activeImageIndex)}
         >
           <img
             src={
@@ -347,7 +436,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                   e.stopPropagation();
                   setActiveImageIndex(idx);
                 }}
-                onDoubleClick={() => openPhoto(img, idx)}
+                onDoubleClick={() => openPhotoAt(idx)}
                 className={`w-11 h-11 sm:w-12 sm:h-12 rounded-xl overflow-hidden border-2 transition-all shrink-0 ${
                   activeImageIndex === idx
                     ? 'border-brand scale-105'
@@ -627,7 +716,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                     <button
                       key={`photo-${idx}`}
                       type="button"
-                      onClick={() => openPhoto(img, idx)}
+                      onClick={() => openPhotoAt(idx)}
                       className="aspect-square rounded-xl overflow-hidden border border-app bg-slate-900"
                     >
                       <img src={img} alt="" className="w-full h-full object-cover" />
@@ -651,7 +740,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                       <button
                         key={vid.storageKey || vid.url || idx}
                         type="button"
-                        onClick={() => setActiveVideo(vid)}
+                        onClick={() => openVideoAt(idx)}
                         className="relative aspect-video rounded-xl overflow-hidden border border-app bg-slate-950 group"
                       >
                         {url ? (
@@ -692,7 +781,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                 </p>
               </div>
             ) : (
-              momentsList.map((m) => {
+              momentsList.map((m, mIdx) => {
                 const momentLikeState = likedMoments[m.id] || {
                   liked: Boolean(m.isLiked),
                   count: m.likes || 0,
@@ -719,7 +808,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                       </div>
                       <button
                         type="button"
-                        onClick={() => setLightboxMoment(m)}
+                        onClick={() => setMomentLightboxIndex(mIdx)}
                         className="p-1.5 rounded-lg bg-slate-900 text-slate-400 hover:text-white border border-slate-800 text-xs flex items-center space-x-1 font-mono"
                       >
                         <Maximize2 className="w-3.5 h-3.5" />
@@ -728,7 +817,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
 
                     <div
                       className="relative h-56 bg-slate-950 rounded-xl overflow-hidden cursor-pointer group"
-                      onClick={() => setLightboxMoment(m)}
+                      onClick={() => setMomentLightboxIndex(mIdx)}
                     >
                       {m.mediaType === 'video' ? (
                         <video
@@ -829,66 +918,114 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
         </div>
       )}
 
-      {/* Photo lightbox */}
-      {activePhoto && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/90 backdrop-blur-lg">
+      {/* Unified photo/video lightbox with prev/next */}
+      {activeMedia && mediaLightboxIndex != null && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/90 backdrop-blur-lg"
+          onTouchStart={mediaCarousel.onTouchStart}
+          onTouchEnd={mediaCarousel.onTouchEnd}
+        >
           <div className="relative max-w-3xl w-full bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
             <button
               type="button"
-              onClick={() => setActivePhoto(null)}
+              onClick={() => setMediaLightboxIndex(null)}
               className="absolute top-4 right-4 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700"
             >
               <X className="w-5 h-5" />
             </button>
+
+            {mediaItems.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => mediaCarousel.go(-1)}
+                  className="absolute left-2 sm:left-3 top-1/2 -translate-y-1/2 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700 hover:bg-slate-900"
+                  aria-label="Previous media"
+                >
+                  <ChevronLeft className="w-6 h-6" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => mediaCarousel.go(1)}
+                  className="absolute right-2 sm:right-3 top-1/2 -translate-y-1/2 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700 hover:bg-slate-900"
+                  aria-label="Next media"
+                >
+                  <ChevronRight className="w-6 h-6" />
+                </button>
+              </>
+            )}
+
             <div className="bg-black flex items-center justify-center min-h-[300px] p-2">
-              <img
-                src={activePhoto}
-                alt="Full size"
-                className="max-h-[80vh] w-auto max-w-full object-contain"
-              />
+              {activeMedia.type === 'video' ? (
+                <video
+                  key={activeMedia.src}
+                  src={activeMedia.src}
+                  className="w-full max-h-[80vh] bg-black"
+                  controls
+                  autoPlay
+                  playsInline
+                />
+              ) : (
+                <img
+                  key={activeMedia.src}
+                  src={activeMedia.src}
+                  alt="Full size"
+                  className="max-h-[80vh] w-auto max-w-full object-contain"
+                />
+              )}
             </div>
+
+            {mediaItems.length > 1 && (
+              <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-slate-950/80 border border-slate-700 text-[11px] font-mono text-slate-200">
+                {mediaLightboxIndex + 1} / {mediaItems.length}
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Video lightbox */}
-      {activeVideo && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/90 backdrop-blur-lg">
-          <div className="relative max-w-3xl w-full bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
-            <button
-              type="button"
-              onClick={() => setActiveVideo(null)}
-              className="absolute top-4 right-4 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700"
-            >
-              <X className="w-5 h-5" />
-            </button>
-            <video
-              key={resolveGalleryVideoSrc(activeVideo)}
-              src={resolveGalleryVideoSrc(activeVideo)}
-              className="w-full max-h-[80vh] bg-black"
-              controls
-              autoPlay
-              playsInline
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Moment lightbox */}
-      {lightboxMoment && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/90 backdrop-blur-lg">
+      {/* Moment lightbox with prev/next */}
+      {activeMoment && momentLightboxIndex != null && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/90 backdrop-blur-lg"
+          onTouchStart={momentCarousel.onTouchStart}
+          onTouchEnd={momentCarousel.onTouchEnd}
+        >
           <div className="relative max-w-3xl w-full bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
             <button
               type="button"
-              onClick={() => setLightboxMoment(null)}
+              onClick={() => setMomentLightboxIndex(null)}
               className="absolute top-4 right-4 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700"
             >
               <X className="w-5 h-5" />
             </button>
+
+            {momentsList.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => momentCarousel.go(-1)}
+                  className="absolute left-2 sm:left-3 top-1/2 -translate-y-1/2 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700 hover:bg-slate-900"
+                  aria-label="Previous moment"
+                >
+                  <ChevronLeft className="w-6 h-6" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => momentCarousel.go(1)}
+                  className="absolute right-2 sm:right-3 top-1/2 -translate-y-1/2 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700 hover:bg-slate-900"
+                  aria-label="Next moment"
+                >
+                  <ChevronRight className="w-6 h-6" />
+                </button>
+              </>
+            )}
+
             <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden min-h-[300px]">
-              {lightboxMoment.mediaType === 'video' ? (
+              {activeMoment.mediaType === 'video' ? (
                 <video
-                  src={normalizeMediaUrl(lightboxMoment.mediaUrl)}
+                  key={activeMoment.id}
+                  src={normalizeMediaUrl(activeMoment.mediaUrl)}
                   className="max-h-[70vh] w-auto"
                   controls
                   autoPlay
@@ -896,7 +1033,8 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                 />
               ) : (
                 <img
-                  src={normalizeMediaUrl(lightboxMoment.mediaUrl)}
+                  key={activeMoment.id}
+                  src={normalizeMediaUrl(activeMoment.mediaUrl)}
                   alt="Enlarged moment"
                   className="max-h-[70vh] w-auto object-contain"
                 />
@@ -905,14 +1043,21 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             <div className="p-4 sm:p-6 bg-[#12151C] border-t border-slate-800 space-y-2">
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="font-bold text-white">{liveUser.name}</span>
-                <span className="text-rose-400 font-bold flex items-center space-x-1">
-                  <ThumbsUp className="w-3.5 h-3.5 fill-current" />
-                  <span>{lightboxMoment.likes} Likes</span>
-                </span>
+                <div className="flex items-center gap-3">
+                  {momentsList.length > 1 && (
+                    <span className="text-slate-400">
+                      {momentLightboxIndex + 1} / {momentsList.length}
+                    </span>
+                  )}
+                  <span className="text-rose-400 font-bold flex items-center space-x-1">
+                    <ThumbsUp className="w-3.5 h-3.5 fill-current" />
+                    <span>{activeMoment.likes} Likes</span>
+                  </span>
+                </div>
               </div>
-              {lightboxMoment.caption && (
+              {activeMoment.caption && (
                 <p className="text-xs sm:text-sm text-slate-200 leading-relaxed font-sans">
-                  {lightboxMoment.caption}
+                  {activeMoment.caption}
                 </p>
               )}
             </div>
