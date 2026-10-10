@@ -13,6 +13,14 @@ const {
   splitGalleryPhotosAndVideos,
   mergeGalleryWithVideoSentinel,
 } = require('./helpers');
+const {
+  isRedisConfigured,
+  setPresence,
+  deletePresence,
+  mgetPresence,
+  setCallState,
+  deleteCallState,
+} = require('./redisPresence');
 
 function isMissingGalleryVideosColumnError(err) {
   const msg = String((err && err.message) || err || '');
@@ -239,8 +247,19 @@ async function handlePresence(path, req, res) {
   if (req.method === 'GET') {
     const auth = await requireAuth(req);
     if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const bodyIds = Array.isArray(req.query && req.query.ids)
+      ? req.query.ids
+      : String((req.query && req.query.ids) || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+    if (isRedisConfigured() && bodyIds.length) {
+      const presence = await mgetPresence(bodyIds);
+      return send(res, 200, { success: true, presence, source: 'redis' });
+    }
+    // Fallback for clients that still expect a map (capped; prefer Redis + ids)
     const presence = await buildPresenceMap(auth.client);
-    return send(res, 200, { success: true, presence });
+    return send(res, 200, { success: true, presence, source: 'db_fallback' });
   }
   if (req.method !== 'POST' && req.method !== 'PUT') {
     return send(res, 405, { success: false, error: 'Method not allowed' });
@@ -255,9 +274,8 @@ async function handlePresence(path, req, res) {
       error: 'status must be online, busy, or offline',
     });
   }
-  // Only clear open call_logs on logout or explicit clearCalls (login / Online toggle).
-  // Regular heartbeats must NOT end a live call.
   const clearCalls = Boolean(body && body.clearCalls) || status === 'offline';
+  const durableWrite = Boolean(body && body.durable) || status === 'offline' || clearCalls;
   if (clearCalls) {
     await closeOpenCallLogsForUsers(
       auth.client,
@@ -266,56 +284,57 @@ async function handlePresence(path, req, res) {
     );
   }
 
-  const busyIds = await fetchActiveCallParticipantIds(auth.client);
-  const inActiveCall =
-    busyIds.has(String(auth.profileId)) || busyIds.has(String(auth.userId));
-
-  // offline wins; real open call forces busy; otherwise honor online | busy
   let writeStatus = 'online';
   if (status === 'offline') {
     writeStatus = 'offline';
-  } else if (inActiveCall) {
-    writeStatus = 'busy';
   } else if (status === 'busy' || status === 'in_call') {
     writeStatus = 'busy';
   } else {
     writeStatus = 'online';
   }
 
-  const nowIso = new Date().toISOString();
-  await auth.client
-    .from('profiles')
-    .update({
-      online_status: writeStatus,
-      last_seen_at: nowIso,
-      updated_at: nowIso,
-    })
-    .eq('id', auth.profileId);
-
-  // If we just wrote busy (manual) but no open call, keep it in the response map.
-  // If we wrote online/offline, rebuild map — no self-only overwrite (was causing
-  // "I see X, others see Y").
-  const presence = await buildPresenceMap(auth.client);
-  if (writeStatus === 'busy' && !inActiveCall) {
-    presence[auth.profileId] = 'busy';
-    if (auth.userId) presence[String(auth.userId)] = 'busy';
-  } else {
-    presence[auth.profileId] = writeStatus;
-    if (auth.userId) presence[String(auth.userId)] = writeStatus;
+  // Redis lease for routine heartbeats (no Postgres write)
+  if (isRedisConfigured()) {
+    if (writeStatus === 'offline') {
+      await deletePresence(auth.profileId);
+      if (auth.userId) await deletePresence(String(auth.userId));
+    } else {
+      await setPresence(auth.profileId, writeStatus);
+      if (auth.userId && String(auth.userId) !== String(auth.profileId)) {
+        await setPresence(String(auth.userId), writeStatus);
+      }
+    }
   }
 
-  // Persist cleared leftover busy → online in DB when map says online after cleanup
-  if (writeStatus === 'online' || writeStatus === 'offline') {
-    // already written above
-  } else if (writeStatus === 'busy' && !inActiveCall) {
-    // manual busy already written
+  // Durable Postgres write only on login/logout / explicit durable flag
+  if (durableWrite || !isRedisConfigured()) {
+    const nowIso = new Date().toISOString();
+    await auth.client
+      .from('profiles')
+      .update({
+        online_status: writeStatus,
+        last_seen_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq('id', auth.profileId);
   }
+
+  const peerIds = Array.isArray(body && body.peerIds)
+    ? body.peerIds.map((id) => String(id || '').trim()).filter(Boolean).slice(0, 200)
+    : [];
+  let presence = {};
+  if (isRedisConfigured() && peerIds.length) {
+    presence = await mgetPresence(peerIds);
+  }
+  presence[auth.profileId] = writeStatus === 'offline' ? 'offline' : writeStatus;
+  if (auth.userId) presence[String(auth.userId)] = presence[auth.profileId];
 
   return send(res, 200, {
     success: true,
     userId: auth.profileId,
     status: writeStatus,
     presence,
+    redis: isRedisConfigured(),
   });
 }
 
@@ -698,12 +717,34 @@ async function handleCalls(path, req, res) {
       });
     }
 
-    // Authoritative presence:
-    // - ringing: only caller → busy (callee stays online until Accept UI lands)
-    // - active: both busy
-    // - ended: both online
+    // Authoritative presence via Redis when configured; durable DB only on end/login paths
     try {
-      if (callStatus === 'ringing') {
+      if (isRedisConfigured()) {
+        if (callStatus === 'ringing') {
+          await setPresence(callerId, 'busy');
+          await setCallState(callId, {
+            callerId,
+            receiverId,
+            status: callStatus,
+            startedAt: startedAt || null,
+          });
+        } else if (busyStatuses.has(callStatus)) {
+          await setPresence(callerId, 'busy');
+          if (receiverId) await setPresence(receiverId, 'busy');
+          await setCallState(callId, {
+            callerId,
+            receiverId,
+            status: callStatus,
+            startedAt: startedAt || null,
+          });
+        } else if (endStatuses.has(callStatus)) {
+          await setPresence(callerId, 'online');
+          if (receiverId) await setPresence(receiverId, 'online');
+          await deleteCallState(callId);
+          // One durable last_seen transition on call end
+          await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'online');
+        }
+      } else if (callStatus === 'ringing') {
         await setProfilesOnlineStatus(auth.client, [callerId], 'busy');
       } else if (busyStatuses.has(callStatus)) {
         await setProfilesOnlineStatus(auth.client, [callerId, receiverId], 'busy');
@@ -1086,81 +1127,60 @@ async function handleGifts(path, req, res) {
     );
     const hostShare = Math.floor(cost * (hostSharePercent / 100));
 
-    // Conditional debit — fails if concurrent spend drops balance below cost
-    const { data: sender, error: senderErr } = await auth.client
-      .from('profiles')
-      .select('id, coin_balance')
-      .eq('id', auth.profileId)
-      .maybeSingle();
-    if (senderErr || !sender) {
-      return send(res, 500, { success: false, error: 'Sender profile unavailable' });
-    }
-    if (Number(sender.coin_balance) < cost) {
-      return send(res, 400, {
-        success: false,
-        error: 'Insufficient coins.',
-        code: 'INSUFFICIENT',
-      });
-    }
-    const newBal = Number(sender.coin_balance) - cost;
-    const { data: debited, error: debitErr } = await auth.client
-      .from('profiles')
-      .update({ coin_balance: newBal, updated_at: new Date().toISOString() })
-      .eq('id', auth.profileId)
-      .gte('coin_balance', cost)
-      .select('coin_balance')
-      .maybeSingle();
-    if (debitErr || !debited) {
-      return send(res, 409, {
-        success: false,
-        error: 'Coin debit conflict — retry.',
-        code: 'DEBIT_CONFLICT',
-      });
-    }
-
     const { data: receiver } = await auth.client
       .from('profiles')
       .select('id, earnings_coins, role, team_leader_id, created_by_id')
       .eq('id', receiverId)
       .maybeSingle();
-    if (receiver) {
-      await auth.client
-        .from('profiles')
-        .update({
-          earnings_coins: Number(receiver.earnings_coins || 0) + hostShare,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', receiverId);
-    }
+    const tlId =
+      receiver &&
+      (receiver.role === 'female_creator' || receiver.role === 'female_host')
+        ? String(receiver.team_leader_id || receiver.created_by_id || '')
+        : '';
+    // Stable idempotency — never Date.now(); prefer client key or gift+message id
+    const idempotencyKey = String(
+      (body && (body.idempotencyKey || body.clientTempId)) || `gift:${auth.profileId}:${giftId}:${receiverId}:${cost}`
+    )
+      .trim()
+      .slice(0, 200);
 
-    try {
-      await auth.client.from('wallet_ledger').insert({
-        user_id: auth.profileId,
-        transaction_type: 'GIFT_DEBIT',
-        amount: -cost,
-        balance_after: Number(debited.coin_balance),
-        metadata: { giftId, receiverId, kind: 'gift' },
+    const { data: rpcRaw, error: rpcErr } = await auth.client.rpc('gift_spend_atomic', {
+      p_sender_id: auth.profileId,
+      p_receiver_id: receiverId,
+      p_tl_id: tlId || null,
+      p_coins: cost,
+      p_host_coins: hostShare,
+      p_tl_coins: 0,
+      p_idempotency_key: idempotencyKey,
+      p_metadata: { giftId, receiverId, kind: 'gift' },
+    });
+    if (rpcErr) {
+      console.error('[api/gifts/send] RPC error:', rpcErr.message);
+      return send(res, 500, {
+        success: false,
+        error: 'Gift billing failed',
+        code: 'GIFT_RPC_FAILED',
       });
-      if (receiver && hostShare > 0) {
-        await auth.client.from('wallet_ledger').insert({
-          user_id: receiverId,
-          transaction_type: 'HOST_EARN',
-          amount: hostShare,
-          balance_after: Number(receiver.earnings_coins || 0) + hostShare,
-          metadata: { giftId, kind: 'gift', senderId: auth.profileId },
-        });
-      }
-    } catch (ledgerErr) {
-      console.warn('[api/gifts/send] ledger write skipped', ledgerErr && ledgerErr.message);
+    }
+    const rpcResult = typeof rpcRaw === 'string' ? JSON.parse(rpcRaw) : rpcRaw;
+    if (!rpcResult || !rpcResult.success) {
+      const code = (rpcResult && rpcResult.error_code) || 'GIFT_FAILED';
+      const status = code === 'INSUFFICIENT_BALANCE' ? 400 : 500;
+      return send(res, status, {
+        success: false,
+        error: (rpcResult && rpcResult.error_message) || 'Gift failed',
+        code: code === 'INSUFFICIENT_BALANCE' ? 'INSUFFICIENT' : code,
+      });
     }
 
-    const senderBalance = Number(debited.coin_balance);
+    const senderBalance = Number(rpcResult.new_sender_balance || 0);
     return send(res, 200, {
       success: true,
       // Client Quick Match reads top-level senderBalance
       senderBalance,
       senderCoinBalance: senderBalance,
-      receiverEarningsDelta: hostShare,
+      receiverEarningsDelta: Number(rpcResult.host_coins_earned || hostShare),
+      duplicate: Boolean(rpcResult.duplicate),
       giftId,
       cost,
     });

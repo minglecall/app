@@ -80,10 +80,18 @@ function writeClientOverride(url: string, anonKey: string) {
   }
 }
 
-const envUrl = (getEnvVar('VITE_SUPABASE_URL') || getEnvVar('SUPABASE_URL'))
+const envUrl = (
+  getEnvVar('NEXT_PUBLIC_SUPABASE_URL') ||
+  getEnvVar('VITE_SUPABASE_URL') ||
+  getEnvVar('SUPABASE_URL')
+)
   .trim()
   .replace(/^["']|["']$/g, '');
-const envAnonKey = (getEnvVar('VITE_SUPABASE_ANON_KEY') || getEnvVar('SUPABASE_ANON_KEY'))
+const envAnonKey = (
+  getEnvVar('NEXT_PUBLIC_SUPABASE_ANON_KEY') ||
+  getEnvVar('VITE_SUPABASE_ANON_KEY') ||
+  getEnvVar('SUPABASE_ANON_KEY')
+)
   .trim()
   .replace(/^["']|["']$/g, '');
 

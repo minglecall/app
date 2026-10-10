@@ -1,14 +1,5 @@
-/**
- * POST /api/presence/heartbeat — Redis presence lease (no Postgres on routine ticks).
- */
-import {
-  sendJson,
-  readJsonBody,
-  requireAuthFromBearer,
-  createServiceClient,
-  type VercelReq,
-  type VercelRes,
-} from '../../vercelAuth';
+import { NextRequest, NextResponse } from 'next/server';
+import { requireAuth, createServiceClient } from '../../../../lib/nextAuth';
 import {
   isRedisConfigured,
   setPresence,
@@ -17,33 +8,34 @@ import {
   type PresenceStatus,
 } from '../../../../lib/redis';
 
-export default async function handler(req: VercelReq, res: VercelRes) {
-  if (req.method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.end();
-    return;
-  }
-  if (req.method !== 'POST' && req.method !== 'PUT') {
-    return sendJson(res, 405, { success: false, error: 'Method not allowed' });
-  }
+export const runtime = 'nodejs';
+export const maxDuration = 15;
 
-  const auth = await requireAuthFromBearer(req);
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
   if (auth.ok === false) {
-    return sendJson(res, auth.status, { success: false, error: auth.error });
+    return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
 
-  const body = await readJsonBody(req);
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+
   const statusRaw = String(body?.status || 'online').toLowerCase();
   const writeStatus: PresenceStatus =
-    statusRaw === 'offline' ? 'offline' : statusRaw === 'busy' || statusRaw === 'in_call' ? 'busy' : 'online';
+    statusRaw === 'offline'
+      ? 'offline'
+      : statusRaw === 'busy' || statusRaw === 'in_call'
+        ? 'busy'
+        : 'online';
   const durable = Boolean(body?.durable) || writeStatus === 'offline';
 
   if (isRedisConfigured()) {
-    if (writeStatus === 'offline') {
-      await deletePresence(auth.profileId);
-    } else {
-      await setPresence(auth.profileId, writeStatus);
-    }
+    if (writeStatus === 'offline') await deletePresence(auth.profileId);
+    else await setPresence(auth.profileId, writeStatus);
   }
 
   if (durable || !isRedisConfigured()) {
@@ -70,11 +62,15 @@ export default async function handler(req: VercelReq, res: VercelRes) {
   }
   presence[auth.profileId] = writeStatus;
 
-  return sendJson(res, 200, {
+  return NextResponse.json({
     success: true,
     userId: auth.profileId,
     status: writeStatus,
     presence,
     redis: isRedisConfigured(),
   });
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204 });
 }

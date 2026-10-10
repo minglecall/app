@@ -6,14 +6,16 @@ alwaysApply: true
 
 # Tech Stack & Integrations
 
-- Frontend: React + Tailwind CSS
-- Backend: Node.js + Express + REST APIs
+- Frontend / API host: Next.js (App Router) on Vercel — React + Tailwind CSS
+- Legacy local: Node.js + Express (`server.ts`) for dual-run only; do not add new Express WS features
 - Database & Authentication: Supabase PostgreSQL + Supabase Auth
-- Database Realtime: Supabase Realtime
-- Database Client (Backend): @supabase/supabase-js
-- Video Calling: LiveKit WebRTC
+- Database Realtime: Supabase Realtime (targeted channels; no global presence fan-out)
+- Cache & Presence: Upstash Redis (`presence:{userId}` TTL; never heartbeat to Postgres)
+- Database Client (Backend): @supabase/supabase-js (service role in Route Handlers)
+- Video Calling: LiveKit Cloud (tokens server-side only)
 - Media Storage: Cloudflare R2 via S3-compatible Presigned URLs
 - Email: SMTP Service
+- Architecture blueprint: `docs/architecture_engineering_rules.md` (always follow)
 
 # Core Architecture & Data Flow
 

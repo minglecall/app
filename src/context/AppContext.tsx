@@ -1829,8 +1829,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     void pollIncoming();
-    const pollTimer = setInterval(() => void pollIncoming(), 800);
-    const recoverTimer = setInterval(() => recoverBusyWithoutRing(), 1200);
+    // Realtime inbox is primary; HTTP poll is slow backoff safety net only
+    const pollTimer = setInterval(() => void pollIncoming(), 8000);
+    const recoverTimer = setInterval(() => recoverBusyWithoutRing(), 15000);
 
     const channels: ReturnType<typeof supabase.channel>[] = [];
     if (isSupabaseConfigured()) {
@@ -3402,10 +3403,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ? 'busy'
             : preferredStatusRef.current;
 
+        // Ask only for presence of users currently in local directory (viewport-scale), not full DB scan
+        const peerIds = (usersRef.current || [])
+          .map((u) => u.id)
+          .filter((id) => id && id !== currentUserIdRef.current)
+          .slice(0, 200);
         const res = await authFetch('/api/presence/heartbeat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: myStatus }),
+          body: JSON.stringify({ status: myStatus, peerIds }),
         });
 
         if (res.ok && !isCancelled) {
@@ -4363,25 +4369,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       syncUserDirectory();
     }
 
-    // 1. Signaling heartbeat — WS or Supabase Realtime
+    // 1. Signaling heartbeat — WS or Supabase Realtime (light)
     heartbeatTimer = setInterval(() => {
       if (isResettingRef.current) return;
       if (isSignalOpen()) {
         signalSend({ type: 'heartbeat', userId: currentUserId });
       }
-    }, 5000);
+    }, 15000);
 
-    // 2. HTTP presence — always poll (WS alone cannot clear sticky busy from call_logs)
+    // 2. HTTP presence — jittered ~30s (Redis lease); never full-directory Postgres writes
+    const presenceIntervalMs = 30000 + Math.floor(Math.random() * 10000) - 5000;
     presenceSyncTimer = setInterval(() => {
       if (isResettingRef.current) return;
       syncPresenceDirect();
-    }, 10000);
+    }, Math.max(25000, presenceIntervalMs));
 
-    // 3. User directory refresh from server (authoritative listings)
+    // 3. User directory refresh — slowed; presence comes from Redis peer ids, not full map
     userDirectoryTimer = setInterval(() => {
       if (isResettingRef.current) return;
       syncUserDirectory();
-    }, 30000);
+    }, 120000);
 
     // 4. Friend requests + social hydrate (badge counts) — poll often enough for pending badges
     supabaseStatusTimer = setInterval(() => {
@@ -5204,41 +5211,36 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return { success: true, message: 'Password updated successfully!' };
   };
 
-  // Buy Coins
+  // Buy Coins — server checkout intent only (never mutate coin_balance from the client)
   const buyCoinPackage = (packageId: string) => {
     const pkg = coinPackages.find((p) => p.id === packageId);
     if (!pkg) return;
 
-    const totalToAdd = (Number(pkg.coins) || 0) + (Number(pkg.bonusCoins) || 0);
-    const target = usersRef.current.find((u) => u.id === currentUser.id) || currentUser;
-    const updatedBal = (Number(target.coinBalance) || 0) + totalToAdd;
-    const updatedUserObj: UserProfile = { ...target, coinBalance: updatedBal };
-
-    setUsers((prev) => {
-      const next = prev.map((u) => (u.id === target.id || u.authId === target.id ? { ...u, coinBalance: updatedBal } : u));
-      usersRef.current = next;
-      return next;
-    });
-
-    if (isSupabaseConfigured()) {
-      updateUserProfileInSupabase(target.id, {
-        coinBalance: updatedBal,
-        email: target.email,
-      }).catch(() => {});
-      upsertProfileToSupabase(updatedUserObj).catch(() => {});
-    }
-
-    authFetch('/api/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedUserObj),
-    }).catch(() => {});
-
-    showToast(
-      'Coins Purchased! 🪙',
-      `Successfully added ${totalToAdd} coins (${pkg.coins} + ${pkg.bonusCoins} bonus) to your wallet!`,
-      'success'
-    );
+    void (async () => {
+      try {
+        const res = await authFetch('/api/v1/finance/funding/checkout-intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ packageId: pkg.id }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.success === false) {
+          showToast(
+            'Checkout unavailable',
+            data?.error?.message || data?.error || 'Could not start coin purchase. Try again later.',
+            'error'
+          );
+          return;
+        }
+        showToast(
+          'Checkout started',
+          'Complete payment to credit coins. Balance updates only after server confirmation.',
+          'info'
+        );
+      } catch {
+        showToast('Purchase failed', 'Could not reach the funding API.', 'error');
+      }
+    })();
   };
 
   // Call System & Coin Burn Ticker

@@ -504,11 +504,10 @@ export async function updateUserProfileInSupabase(
     if (updates.introVideoUrl !== undefined) payload.intro_video_url = updates.introVideoUrl || null;
     if (updates.isVerified !== undefined) payload.is_verified = updates.isVerified;
     if (updates.role !== undefined) payload.role = updates.role === 'female_host' ? 'female_creator' : updates.role;
-    if (updates.coinBalance !== undefined) payload.coin_balance = Number(updates.coinBalance);
+    // coin_balance / earnings_coins are server-only (REVOKE + RPC). Never accept client wallet writes.
     if (updates.hourlyCoinRate !== undefined) payload.hourly_coin_rate = Number(updates.hourlyCoinRate);
-    if (updates.earningsCoins !== undefined) payload.earnings_coins = Number(updates.earningsCoins);
     if (updates.totalLifetimeEarnedUSD !== undefined) payload.total_lifetime_earned_usd = Number(updates.totalLifetimeEarnedUSD);
-    if (updates.onlineStatus !== undefined) payload.online_status = updates.onlineStatus;
+    // online_status / last_seen are owned by /api/presence (Redis); do not write from profile updates
     if (updates.teamLeaderId !== undefined) payload.team_leader_id = updates.teamLeaderId;
     if (updates.createdById !== undefined) payload.created_by_id = updates.createdById;
     if (updates.coinEarnOverrideRate !== undefined) payload.coin_earn_override_rate = updates.coinEarnOverrideRate;
@@ -925,33 +924,41 @@ export function subscribeToRealtimeProfiles(
 ) {
   if (!isSupabaseConfigured()) return () => { };
 
+  // INSERT/DELETE only — never subscribe to profile UPDATEs (heartbeat/last_seen fan-out).
   const channel = supabase
     .channel('public_profiles_changes')
     .on(
       'postgres_changes',
       {
-        event: '*',
+        event: 'INSERT',
         schema: 'public',
         table: 'profiles',
       },
       (payload) => {
         try {
-          if (payload.eventType === 'DELETE') {
-            const oldRecord = payload.old as DbProfile;
-            const deletedId = oldRecord?.id;
-            if (deletedId) {
-              onProfileEvent({ eventType: 'DELETE', userId: deletedId });
-            }
-          } else if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const raw = payload.new as DbProfile;
-            if (raw && raw.id) {
-              const mapped = mapDbProfileToUserProfile(raw);
-              onProfileEvent({
-                eventType: payload.eventType,
-                profile: mapped,
-                userId: mapped.id,
-              });
-            }
+          const raw = payload.new as DbProfile;
+          if (raw && raw.id) {
+            const mapped = mapDbProfileToUserProfile(raw);
+            onProfileEvent({ eventType: 'INSERT', profile: mapped, userId: mapped.id });
+          }
+        } catch (err) {
+          console.warn('Realtime profiles channel handler warning:', err);
+        }
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: 'DELETE',
+        schema: 'public',
+        table: 'profiles',
+      },
+      (payload) => {
+        try {
+          const oldRecord = payload.old as DbProfile;
+          const deletedId = oldRecord?.id;
+          if (deletedId) {
+            onProfileEvent({ eventType: 'DELETE', userId: deletedId });
           }
         } catch (err) {
           console.warn('Realtime profiles channel handler warning:', err);

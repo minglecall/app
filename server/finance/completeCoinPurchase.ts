@@ -347,8 +347,6 @@ export async function completeCoinPurchase(
   const peg = await loadLiveCoinUsdPeg(client);
   const pegFields = purchasePegFields(amountCoins, amountUsd, peg);
 
-  const previousBalance = Number(profile.coin_balance) || 0;
-  const newBalance = previousBalance + amountCoins;
   const nowIso = new Date().toISOString();
   const ledgerMeta = buildLedgerMetadata(
     {
@@ -376,7 +374,7 @@ export async function completeCoinPurchase(
       .insert({
         user_id: userId,
         channel,
-        status: 'completed',
+        status: 'pending',
         amount_coins: amountCoins,
         amount_usd: amountUsd != null ? Number(amountUsd) : null,
         ...pegColumnPayload,
@@ -385,7 +383,6 @@ export async function completeCoinPurchase(
         external_ref: externalRef,
         actor_admin_id: input.actorAdminId ?? null,
         reason: reason,
-        completed_at: nowIso,
       })
       .select('id')
       .single();
@@ -399,49 +396,47 @@ export async function completeCoinPurchase(
     purchaseId = String(purchaseRow.id);
   }
 
-  const { error: balErr } = await client
-    .from('profiles')
-    .update({ coin_balance: newBalance })
-    .eq('id', userId);
-  if (balErr) {
+  const idempotencyKey =
+    (externalRef && provider ? `purchase:${provider}:${externalRef}` : null) ||
+    `purchase:${purchaseId}`;
+
+  const { data: rpcRaw, error: rpcErr } = await client.rpc('complete_coin_purchase_atomic', {
+    p_user_id: userId,
+    p_amount_coins: amountCoins,
+    p_idempotency_key: idempotencyKey,
+    p_purchase_id: purchaseId,
+    p_metadata: ledgerMeta,
+  });
+
+  if (rpcErr) {
     if (!pendingMode && purchaseId) {
-      await client.from('coin_purchases').delete().eq('id', purchaseId);
+      await client.from('coin_purchases').update({ status: 'failed' }).eq('id', purchaseId);
     }
-    return { success: false, error: balErr.message, code: 'BALANCE_UPDATE_FAILED' };
+    return { success: false, error: rpcErr.message, code: 'PURCHASE_RPC_FAILED' };
   }
 
-  const { data: ledgerRow, error: ledgerErr } = await client
-    .from('wallet_ledger')
-    .insert({
-      user_id: userId,
-      call_id: purchaseId,
-      transaction_type: 'PURCHASE',
-      amount: amountCoins,
-      balance_after: newBalance,
-      billing_minute: 0,
-      metadata: ledgerMeta,
-    })
-    .select('id')
-    .single();
-
-  if (ledgerErr) {
-    await client.from('profiles').update({ coin_balance: previousBalance }).eq('id', userId);
+  const rpcResult = typeof rpcRaw === 'string' ? JSON.parse(rpcRaw) : rpcRaw;
+  if (!rpcResult?.success) {
     if (!pendingMode && purchaseId) {
-      await client.from('coin_purchases').delete().eq('id', purchaseId);
+      await client.from('coin_purchases').update({ status: 'failed' }).eq('id', purchaseId);
     }
-    const msg = String(ledgerErr.message || '');
-    if (ledgerErr.code === '23505' || /duplicate|unique/i.test(msg)) {
-      return { success: false, error: 'Purchase ledger already posted', code: 'LEDGER_DUPLICATE' };
-    }
-    return { success: false, error: msg, code: 'LEDGER_INSERT_FAILED' };
+    return {
+      success: false,
+      error: rpcResult?.error_message || 'Purchase credit failed',
+      code: rpcResult?.error_code || 'PURCHASE_FAILED',
+    };
   }
 
-  const walletLedgerId = String(ledgerRow.id);
-  const { error: finalizeErr } = await client
+  const walletLedgerId = rpcResult.wallet_ledger_id
+    ? String(rpcResult.wallet_ledger_id)
+    : undefined;
+  const newBalance = Number(rpcResult.coin_balance) || 0;
+
+  await client
     .from('coin_purchases')
     .update({
       status: 'completed',
-      wallet_ledger_id: walletLedgerId,
+      wallet_ledger_id: walletLedgerId || null,
       completed_at: nowIso,
       payment_provider: provider || undefined,
       external_ref: externalRef || undefined,
@@ -451,16 +446,12 @@ export async function completeCoinPurchase(
     })
     .eq('id', purchaseId!);
 
-  if (finalizeErr) {
-    // Balance + ledger already posted — surface warning code but treat as success for wallet.
-    console.warn('[completeCoinPurchase] finalize purchase row failed:', finalizeErr.message);
-  }
-
   return {
     success: true,
     purchaseId,
     walletLedgerId,
     coinBalance: newBalance,
+    duplicate: Boolean(rpcResult.duplicate),
   };
 }
 

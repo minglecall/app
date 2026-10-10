@@ -7,6 +7,12 @@ import {
   upsertCreatorMetricsAdmin,
   assertActiveSessionAdmin,
 } from '../supabaseAdmin';
+import {
+  isRedisConfigured,
+  setPresence,
+  deletePresence,
+  mgetPresence,
+} from '../../lib/redis';
 
 function readClientSessionId(req: { headers: Record<string, unknown>; body?: any }): string | null {
   const header = req.headers['x-session-id'] || req.headers['X-Session-Id'];
@@ -96,11 +102,11 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
     }
   });
 
-  // Lightweight liveness ping — status transitions only hit DB
+  // Lightweight liveness ping — Redis lease when configured; durable DB only on transitions
   router.post('/heartbeat', requireAuth, async (req, res) => {
     try {
       const userId = String((req as any).profileId || (req as any).user?.id || '');
-      const { status } = req.body;
+      const { status, durable, peerIds } = req.body || {};
       if (!userId) {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
@@ -121,8 +127,17 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
         });
       }
 
-      const result = applyPresenceHeartbeat(userId, requested || 'online', {
-        persistStatus: true,
+      const writeStatus = requested || 'online';
+      const durableWrite = Boolean(durable) || writeStatus === 'offline';
+
+      if (isRedisConfigured()) {
+        if (writeStatus === 'offline') await deletePresence(userId);
+        else await setPresence(userId, writeStatus);
+      }
+
+      const result = applyPresenceHeartbeat(userId, writeStatus, {
+        // Skip Postgres on routine Redis heartbeats
+        persistStatus: durableWrite || !isRedisConfigured(),
       });
 
       if (result.changed) {
@@ -130,10 +145,17 @@ export function createPresenceRouter(ctx: ServerRuntime): Router {
         broadcastUsers();
       }
 
+      let presence = getFormattedPresence();
+      if (isRedisConfigured() && Array.isArray(peerIds) && peerIds.length) {
+        const redisMap = await mgetPresence(peerIds.map(String));
+        presence = { ...presence, ...redisMap, [userId]: writeStatus };
+      }
+
       return res.json({
         success: true,
         status: result.status,
-        presence: getFormattedPresence(),
+        presence,
+        redis: isRedisConfigured(),
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });

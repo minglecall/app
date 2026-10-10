@@ -117,19 +117,14 @@ export class RealtimeSignaling {
         aliases.push(ch);
       }
 
-      const presenceChannel = supabase.channel('app-presence', {
-        config: { presence: { key: profileId } },
+      // Global app-presence track-all removed — HTTP/Redis heartbeat is authoritative.
+      // Optional broadcast-only channel for call signals (no presence.track fan-out).
+      const presenceChannel = supabase.channel('app-signals', {
+        config: { broadcast: { self: false } },
       });
-      presenceChannel
-        .on('presence', { event: 'sync' }, () => {
-          const state = presenceChannel.presenceState() || {};
-          if (this.handler) {
-            this.handler({ type: 'presence:sync', state });
-          }
-        })
-        .on('broadcast', { event: 'signal' }, ({ payload }) => {
-          if (payload && this.handler) this.handler(payload);
-        });
+      presenceChannel.on('broadcast', { event: 'signal' }, ({ payload }) => {
+        if (payload && this.handler) this.handler(payload);
+      });
 
       this.userChannel = userChannel;
       this.aliasChannels = aliases;
@@ -139,7 +134,8 @@ export class RealtimeSignaling {
         waitForSubscribe(userChannel, 12000),
         ...aliases.map((ch) => waitForSubscribe(ch, 12000)),
       ]);
-      const presenceOk = await waitForSubscribe(presenceChannel, 12000);
+      // Best-effort signal channel; do not block connect on it
+      const presenceOk = await waitForSubscribe(presenceChannel, 8000);
       const anyInbox = userOk || aliasResults.some(Boolean);
       return { userOk: anyInbox, presenceOk };
     };
@@ -156,21 +152,11 @@ export class RealtimeSignaling {
       if (generation !== this.connectGeneration) return false;
     }
 
-    if (presenceOk && this.presenceChannel) {
-      try {
-        await this.presenceChannel.track({
-          userId: profileId,
-          online_at: new Date().toISOString(),
-          status: 'online',
-        });
-      } catch (e) {
-        console.warn('[RealtimeSignaling] presence track failed', e);
-      }
-    } else if (!presenceOk) {
-      console.warn('[RealtimeSignaling] presence channel unavailable — calls still use user inbox + DB poll');
+    if (!presenceOk) {
+      console.warn('[RealtimeSignaling] signal channel unavailable — calls still use user inbox + DB poll');
     }
 
-    // User inbox is enough for call signaling; presence is optional
+    // User inbox is enough for call signaling; Redis/HTTP owns presence
     this.connected = Boolean(userOk);
 
     if (this.connected && this.handler) {
