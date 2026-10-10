@@ -814,6 +814,169 @@ INSERT INTO public.home_quick_links (
   ('link_safety_policy', 'Safety Center', 'Policies & Reporting', 'ShieldCheck', 'INFO', 'policy', 'policy_safety', 'from-indigo-500 to-cyan-600', 6, true)
 ON CONFLICT (id) DO NOTHING;
 
+
+CREATE TABLE IF NOT EXISTS public.app_nav_items (
+    id TEXT PRIMARY KEY,
+    audience_role TEXT NOT NULL,
+    bar TEXT NOT NULL,
+    slot TEXT NOT NULL DEFAULT 'default',
+    label TEXT NOT NULL,
+    icon TEXT NOT NULL DEFAULT 'Circle',
+    action_type TEXT NOT NULL,
+    action_target TEXT NOT NULL,
+    badge TEXT DEFAULT 'none',
+    meta JSONB,
+    order_num INT NOT NULL DEFAULT 0,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_nav_items_lookup
+  ON public.app_nav_items (audience_role, bar, slot, order_num);
+
+ALTER TABLE public.app_nav_items
+  ADD COLUMN IF NOT EXISTS parent_id TEXT REFERENCES public.app_nav_items(id) ON DELETE CASCADE;
+
+CREATE INDEX IF NOT EXISTS idx_app_nav_items_parent
+  ON public.app_nav_items (parent_id, order_num);
+
+INSERT INTO public.app_nav_items (
+  id, audience_role, bar, slot, label, icon, action_type, action_target, badge, meta, order_num, active
+) VALUES
+  ('brand_global', '*', 'brand', 'default', 'Minglecall', 'Sparkles', 'tab', 'home', 'none', '{"markText":"M","wordmarkPrimary":"Mingle","wordmarkAccent":"call","imageUrl":"","showMark":true,"showWordmark":true}'::jsonb, 0, true),
+  ('nav_guest_logged_out_header_default_auth_login', 'guest', 'logged_out_header', 'default', 'Sign In', 'LogIn', 'auth', 'auth_login', 'none', NULL, 1, true),
+  ('nav_guest_logged_out_header_default_auth_register', 'guest', 'logged_out_header', 'default', 'Join free', 'UserPlus', 'auth', 'auth_register', 'none', NULL, 2, true),
+  ('nav_admin_main_header_left_home', 'admin', 'main_header', 'left', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_admin_main_header_left_admin', 'admin', 'main_header', 'left', 'Admin', 'Settings', 'tab', 'admin', 'none', NULL, 2, true),
+  ('nav_admin_main_header_right_daily_rewards', 'admin', 'main_header', 'right', 'Rewards', 'Gift', 'modal', 'daily_rewards', 'unclaimed_rewards', NULL, 1, true),
+  ('nav_admin_main_header_right_store', 'admin', 'main_header', 'right', 'Buy', 'Coins', 'modal', 'store', 'coin_balance', NULL, 2, true),
+  ('nav_admin_subheader_default_discovery', 'admin', 'subheader', 'default', 'Discover', 'LayoutGrid', 'tab', 'discovery', 'none', '{"group":"primary"}'::jsonb, 1, true),
+  ('nav_admin_subheader_default_swipe', 'admin', 'subheader', 'default', 'Swipe', 'Layers', 'tab', 'swipe', 'none', '{"group":"primary"}'::jsonb, 2, true),
+  ('nav_admin_subheader_default_moments', 'admin', 'subheader', 'default', 'Moments', 'Image', 'tab', 'moments', 'none', '{"group":"primary"}'::jsonb, 3, true),
+  ('nav_admin_subheader_default_match', 'admin', 'subheader', 'default', 'Match', 'Zap', 'overlay', 'match', 'none', '{"group":"primary"}'::jsonb, 4, true),
+  ('nav_admin_subheader_default_chat', 'admin', 'subheader', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', '{"group":"primary"}'::jsonb, 5, true),
+  ('nav_admin_subheader_default_call_logs', 'admin', 'subheader', 'default', 'Calls', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', '{"group":"secondary"}'::jsonb, 6, true),
+  ('nav_admin_subheader_default_friend_requests', 'admin', 'subheader', 'default', 'Friends', 'UserPlus', 'overlay', 'friend_requests', 'friend_requests', '{"group":"secondary"}'::jsonb, 7, true),
+  ('nav_admin_subheader_default_social_circle', 'admin', 'subheader', 'default', 'Circle', 'Users', 'overlay', 'social_circle', 'none', '{"group":"secondary"}'::jsonb, 8, true),
+  ('nav_admin_mobile_bottom_default_home', 'admin', 'mobile_bottom', 'default', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_admin_mobile_bottom_default_discovery', 'admin', 'mobile_bottom', 'default', 'Discover', 'Compass', 'tab', 'discovery', 'none', NULL, 2, true),
+  ('nav_admin_mobile_bottom_default_match', 'admin', 'mobile_bottom', 'default', 'Match', 'Flame', 'overlay', 'match', 'none', NULL, 3, true),
+  ('nav_admin_mobile_bottom_default_chat', 'admin', 'mobile_bottom', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', NULL, 4, true),
+  ('nav_admin_mobile_bottom_default_profile', 'admin', 'mobile_bottom', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 5, true),
+  ('nav_admin_mobile_bottom_default_call_logs', 'admin', 'mobile_bottom', 'default', 'Logs', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', NULL, 6, true),
+  ('nav_admin_mobile_bottom_default_admin', 'admin', 'mobile_bottom', 'default', 'Admin', 'Settings', 'tab', 'admin', 'none', NULL, 7, true),
+  ('nav_admin_persona_menu_default_status_online', 'admin', 'persona_menu', 'default', 'Available', 'Circle', 'system', 'status_online', 'none', NULL, 1, true),
+  ('nav_admin_persona_menu_default_status_busy', 'admin', 'persona_menu', 'default', 'Busy', 'Circle', 'system', 'status_busy', 'none', NULL, 2, true),
+  ('nav_admin_persona_menu_default_status_offline', 'admin', 'persona_menu', 'default', 'Offline', 'Circle', 'system', 'status_offline', 'none', NULL, 3, true),
+  ('nav_admin_persona_menu_default_store', 'admin', 'persona_menu', 'default', 'Top Up', 'Coins', 'modal', 'store', 'coin_balance', NULL, 4, true),
+  ('nav_admin_persona_menu_default_profile', 'admin', 'persona_menu', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 5, true),
+  ('nav_admin_persona_menu_default_earnings', 'admin', 'persona_menu', 'default', 'Spending & Analytics', 'TrendingUp', 'tab', 'earnings', 'none', NULL, 6, true),
+  ('nav_admin_persona_menu_default_social_circle', 'admin', 'persona_menu', 'default', 'Friends & Social Circle', 'Users', 'overlay', 'social_circle', 'none', NULL, 7, true),
+  ('nav_admin_persona_menu_default_install_pwa', 'admin', 'persona_menu', 'default', 'Install LiveCall PWA App', 'Download', 'system', 'install_pwa', 'none', NULL, 8, true),
+  ('nav_admin_persona_menu_default_logout', 'admin', 'persona_menu', 'default', 'Log Out', 'LogOut', 'system', 'logout', 'none', NULL, 9, true),
+  ('nav_team_leader_main_header_left_home', 'team_leader', 'main_header', 'left', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_team_leader_main_header_right_daily_rewards', 'team_leader', 'main_header', 'right', 'Rewards', 'Gift', 'modal', 'daily_rewards', 'unclaimed_rewards', NULL, 1, true),
+  ('nav_team_leader_main_header_right_team_leader', 'team_leader', 'main_header', 'right', 'Agency', 'Crown', 'tab', 'team_leader', 'none', NULL, 2, true),
+  ('nav_team_leader_subheader_default_discovery', 'team_leader', 'subheader', 'default', 'Discover', 'LayoutGrid', 'tab', 'discovery', 'none', '{"group":"primary"}'::jsonb, 1, true),
+  ('nav_team_leader_subheader_default_swipe', 'team_leader', 'subheader', 'default', 'Swipe', 'Layers', 'tab', 'swipe', 'none', '{"group":"primary"}'::jsonb, 2, true),
+  ('nav_team_leader_subheader_default_moments', 'team_leader', 'subheader', 'default', 'Moments', 'Image', 'tab', 'moments', 'none', '{"group":"primary"}'::jsonb, 3, true),
+  ('nav_team_leader_subheader_default_match', 'team_leader', 'subheader', 'default', 'Match', 'Zap', 'overlay', 'match', 'none', '{"group":"primary"}'::jsonb, 4, true),
+  ('nav_team_leader_subheader_default_chat', 'team_leader', 'subheader', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', '{"group":"primary"}'::jsonb, 5, true),
+  ('nav_team_leader_subheader_default_call_logs', 'team_leader', 'subheader', 'default', 'Calls', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', '{"group":"secondary"}'::jsonb, 6, true),
+  ('nav_team_leader_subheader_default_friend_requests', 'team_leader', 'subheader', 'default', 'Friends', 'UserPlus', 'overlay', 'friend_requests', 'friend_requests', '{"group":"secondary"}'::jsonb, 7, true),
+  ('nav_team_leader_subheader_default_social_circle', 'team_leader', 'subheader', 'default', 'Circle', 'Users', 'overlay', 'social_circle', 'none', '{"group":"secondary"}'::jsonb, 8, true),
+  ('nav_team_leader_mobile_bottom_default_home', 'team_leader', 'mobile_bottom', 'default', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_team_leader_mobile_bottom_default_discovery', 'team_leader', 'mobile_bottom', 'default', 'Discover', 'Compass', 'tab', 'discovery', 'none', NULL, 2, true),
+  ('nav_team_leader_mobile_bottom_default_match', 'team_leader', 'mobile_bottom', 'default', 'Match', 'Flame', 'overlay', 'match', 'none', NULL, 3, true),
+  ('nav_team_leader_mobile_bottom_default_chat', 'team_leader', 'mobile_bottom', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', NULL, 4, true),
+  ('nav_team_leader_mobile_bottom_default_profile', 'team_leader', 'mobile_bottom', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 5, true),
+  ('nav_team_leader_mobile_bottom_default_call_logs', 'team_leader', 'mobile_bottom', 'default', 'Logs', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', NULL, 6, true),
+  ('nav_team_leader_mobile_bottom_default_team_leader', 'team_leader', 'mobile_bottom', 'default', 'Agency', 'Crown', 'tab', 'team_leader', 'none', NULL, 7, true),
+  ('nav_team_leader_persona_menu_default_status_online', 'team_leader', 'persona_menu', 'default', 'Available', 'Circle', 'system', 'status_online', 'none', NULL, 1, true),
+  ('nav_team_leader_persona_menu_default_status_busy', 'team_leader', 'persona_menu', 'default', 'Busy', 'Circle', 'system', 'status_busy', 'none', NULL, 2, true),
+  ('nav_team_leader_persona_menu_default_status_offline', 'team_leader', 'persona_menu', 'default', 'Offline', 'Circle', 'system', 'status_offline', 'none', NULL, 3, true),
+  ('nav_team_leader_persona_menu_default_profile', 'team_leader', 'persona_menu', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 4, true),
+  ('nav_team_leader_persona_menu_default_earnings', 'team_leader', 'persona_menu', 'default', 'Earnings & Analytics', 'DollarSign', 'tab', 'earnings', 'none', NULL, 5, true),
+  ('nav_team_leader_persona_menu_default_social_circle', 'team_leader', 'persona_menu', 'default', 'Friends & Social Circle', 'Users', 'overlay', 'social_circle', 'none', NULL, 6, true),
+  ('nav_team_leader_persona_menu_default_install_pwa', 'team_leader', 'persona_menu', 'default', 'Install LiveCall PWA App', 'Download', 'system', 'install_pwa', 'none', NULL, 7, true),
+  ('nav_team_leader_persona_menu_default_logout', 'team_leader', 'persona_menu', 'default', 'Log Out', 'LogOut', 'system', 'logout', 'none', NULL, 8, true),
+  ('nav_male_user_main_header_left_home', 'male_user', 'main_header', 'left', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_male_user_main_header_right_daily_rewards', 'male_user', 'main_header', 'right', 'Rewards', 'Gift', 'modal', 'daily_rewards', 'unclaimed_rewards', NULL, 1, true),
+  ('nav_male_user_main_header_right_store', 'male_user', 'main_header', 'right', 'Buy', 'Coins', 'modal', 'store', 'coin_balance', NULL, 2, true),
+  ('nav_male_user_subheader_default_discovery', 'male_user', 'subheader', 'default', 'Discover', 'LayoutGrid', 'tab', 'discovery', 'none', '{"group":"primary"}'::jsonb, 1, true),
+  ('nav_male_user_subheader_default_swipe', 'male_user', 'subheader', 'default', 'Swipe', 'Layers', 'tab', 'swipe', 'none', '{"group":"primary"}'::jsonb, 2, true),
+  ('nav_male_user_subheader_default_moments', 'male_user', 'subheader', 'default', 'Moments', 'Image', 'tab', 'moments', 'none', '{"group":"primary"}'::jsonb, 3, true),
+  ('nav_male_user_subheader_default_match', 'male_user', 'subheader', 'default', 'Match', 'Zap', 'overlay', 'match', 'none', '{"group":"primary"}'::jsonb, 4, true),
+  ('nav_male_user_subheader_default_chat', 'male_user', 'subheader', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', '{"group":"primary"}'::jsonb, 5, true),
+  ('nav_male_user_subheader_default_call_logs', 'male_user', 'subheader', 'default', 'Calls', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', '{"group":"secondary"}'::jsonb, 6, true),
+  ('nav_male_user_subheader_default_friend_requests', 'male_user', 'subheader', 'default', 'Friends', 'UserPlus', 'overlay', 'friend_requests', 'friend_requests', '{"group":"secondary"}'::jsonb, 7, true),
+  ('nav_male_user_subheader_default_social_circle', 'male_user', 'subheader', 'default', 'Circle', 'Users', 'overlay', 'social_circle', 'none', '{"group":"secondary"}'::jsonb, 8, true),
+  ('nav_male_user_mobile_bottom_default_home', 'male_user', 'mobile_bottom', 'default', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_male_user_mobile_bottom_default_discovery', 'male_user', 'mobile_bottom', 'default', 'Discover', 'Compass', 'tab', 'discovery', 'none', NULL, 2, true),
+  ('nav_male_user_mobile_bottom_default_match', 'male_user', 'mobile_bottom', 'default', 'Match', 'Flame', 'overlay', 'match', 'none', NULL, 3, true),
+  ('nav_male_user_mobile_bottom_default_chat', 'male_user', 'mobile_bottom', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', NULL, 4, true),
+  ('nav_male_user_mobile_bottom_default_profile', 'male_user', 'mobile_bottom', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 5, true),
+  ('nav_male_user_persona_menu_default_status_online', 'male_user', 'persona_menu', 'default', 'Available', 'Circle', 'system', 'status_online', 'none', NULL, 1, true),
+  ('nav_male_user_persona_menu_default_status_busy', 'male_user', 'persona_menu', 'default', 'Busy', 'Circle', 'system', 'status_busy', 'none', NULL, 2, true),
+  ('nav_male_user_persona_menu_default_status_offline', 'male_user', 'persona_menu', 'default', 'Offline', 'Circle', 'system', 'status_offline', 'none', NULL, 3, true),
+  ('nav_male_user_persona_menu_default_store', 'male_user', 'persona_menu', 'default', 'Top Up', 'Coins', 'modal', 'store', 'coin_balance', NULL, 4, true),
+  ('nav_male_user_persona_menu_default_profile', 'male_user', 'persona_menu', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 5, true),
+  ('nav_male_user_persona_menu_default_earnings', 'male_user', 'persona_menu', 'default', 'Spending & Analytics', 'TrendingUp', 'tab', 'earnings', 'none', NULL, 6, true),
+  ('nav_male_user_persona_menu_default_social_circle', 'male_user', 'persona_menu', 'default', 'Friends & Social Circle', 'Users', 'overlay', 'social_circle', 'none', NULL, 7, true),
+  ('nav_male_user_persona_menu_default_install_pwa', 'male_user', 'persona_menu', 'default', 'Install LiveCall PWA App', 'Download', 'system', 'install_pwa', 'none', NULL, 8, true),
+  ('nav_male_user_persona_menu_default_logout', 'male_user', 'persona_menu', 'default', 'Log Out', 'LogOut', 'system', 'logout', 'none', NULL, 9, true),
+  ('nav_female_user_main_header_left_home', 'female_user', 'main_header', 'left', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_female_user_main_header_right_daily_rewards', 'female_user', 'main_header', 'right', 'Rewards', 'Gift', 'modal', 'daily_rewards', 'unclaimed_rewards', NULL, 1, true),
+  ('nav_female_user_subheader_default_discovery', 'female_user', 'subheader', 'default', 'Discover', 'LayoutGrid', 'tab', 'discovery', 'none', '{"group":"primary"}'::jsonb, 1, true),
+  ('nav_female_user_subheader_default_swipe', 'female_user', 'subheader', 'default', 'Swipe', 'Layers', 'tab', 'swipe', 'none', '{"group":"primary"}'::jsonb, 2, true),
+  ('nav_female_user_subheader_default_moments', 'female_user', 'subheader', 'default', 'Moments', 'Image', 'tab', 'moments', 'none', '{"group":"primary"}'::jsonb, 3, true),
+  ('nav_female_user_subheader_default_match', 'female_user', 'subheader', 'default', 'Match', 'Zap', 'overlay', 'match', 'none', '{"group":"primary"}'::jsonb, 4, true),
+  ('nav_female_user_subheader_default_chat', 'female_user', 'subheader', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', '{"group":"primary"}'::jsonb, 5, true),
+  ('nav_female_user_subheader_default_call_logs', 'female_user', 'subheader', 'default', 'Calls', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', '{"group":"secondary"}'::jsonb, 6, true),
+  ('nav_female_user_subheader_default_friend_requests', 'female_user', 'subheader', 'default', 'Friends', 'UserPlus', 'overlay', 'friend_requests', 'friend_requests', '{"group":"secondary"}'::jsonb, 7, true),
+  ('nav_female_user_subheader_default_social_circle', 'female_user', 'subheader', 'default', 'Circle', 'Users', 'overlay', 'social_circle', 'none', '{"group":"secondary"}'::jsonb, 8, true),
+  ('nav_female_user_mobile_bottom_default_home', 'female_user', 'mobile_bottom', 'default', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_female_user_mobile_bottom_default_discovery', 'female_user', 'mobile_bottom', 'default', 'Discover', 'Compass', 'tab', 'discovery', 'none', NULL, 2, true),
+  ('nav_female_user_mobile_bottom_default_match', 'female_user', 'mobile_bottom', 'default', 'Match', 'Flame', 'overlay', 'match', 'none', NULL, 3, true),
+  ('nav_female_user_mobile_bottom_default_chat', 'female_user', 'mobile_bottom', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', NULL, 4, true),
+  ('nav_female_user_mobile_bottom_default_profile', 'female_user', 'mobile_bottom', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 5, true),
+  ('nav_female_user_mobile_bottom_default_call_logs', 'female_user', 'mobile_bottom', 'default', 'Logs', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', NULL, 6, true),
+  ('nav_female_user_persona_menu_default_status_online', 'female_user', 'persona_menu', 'default', 'Available', 'Circle', 'system', 'status_online', 'none', NULL, 1, true),
+  ('nav_female_user_persona_menu_default_status_busy', 'female_user', 'persona_menu', 'default', 'Busy', 'Circle', 'system', 'status_busy', 'none', NULL, 2, true),
+  ('nav_female_user_persona_menu_default_status_offline', 'female_user', 'persona_menu', 'default', 'Offline', 'Circle', 'system', 'status_offline', 'none', NULL, 3, true),
+  ('nav_female_user_persona_menu_default_profile', 'female_user', 'persona_menu', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 4, true),
+  ('nav_female_user_persona_menu_default_earnings', 'female_user', 'persona_menu', 'default', 'Activity & Performance', 'DollarSign', 'tab', 'earnings', 'none', NULL, 5, true),
+  ('nav_female_user_persona_menu_default_social_circle', 'female_user', 'persona_menu', 'default', 'Friends & Social Circle', 'Users', 'overlay', 'social_circle', 'none', NULL, 6, true),
+  ('nav_female_user_persona_menu_default_install_pwa', 'female_user', 'persona_menu', 'default', 'Install LiveCall PWA App', 'Download', 'system', 'install_pwa', 'none', NULL, 7, true),
+  ('nav_female_user_persona_menu_default_logout', 'female_user', 'persona_menu', 'default', 'Log Out', 'LogOut', 'system', 'logout', 'none', NULL, 8, true),
+  ('nav_female_host_main_header_left_home', 'female_host', 'main_header', 'left', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_female_host_main_header_right_daily_rewards', 'female_host', 'main_header', 'right', 'Rewards', 'Gift', 'modal', 'daily_rewards', 'unclaimed_rewards', NULL, 1, true),
+  ('nav_female_host_subheader_default_discovery', 'female_host', 'subheader', 'default', 'Discover', 'LayoutGrid', 'tab', 'discovery', 'none', '{"group":"primary"}'::jsonb, 1, true),
+  ('nav_female_host_subheader_default_swipe', 'female_host', 'subheader', 'default', 'Swipe', 'Layers', 'tab', 'swipe', 'none', '{"group":"primary"}'::jsonb, 2, true),
+  ('nav_female_host_subheader_default_moments', 'female_host', 'subheader', 'default', 'Moments', 'Image', 'tab', 'moments', 'none', '{"group":"primary"}'::jsonb, 3, true),
+  ('nav_female_host_subheader_default_match', 'female_host', 'subheader', 'default', 'Match', 'Zap', 'overlay', 'match', 'none', '{"group":"primary"}'::jsonb, 4, true),
+  ('nav_female_host_subheader_default_chat', 'female_host', 'subheader', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', '{"group":"primary"}'::jsonb, 5, true),
+  ('nav_female_host_subheader_default_call_logs', 'female_host', 'subheader', 'default', 'Calls', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', '{"group":"secondary"}'::jsonb, 6, true),
+  ('nav_female_host_subheader_default_friend_requests', 'female_host', 'subheader', 'default', 'Friends', 'UserPlus', 'overlay', 'friend_requests', 'friend_requests', '{"group":"secondary"}'::jsonb, 7, true),
+  ('nav_female_host_subheader_default_social_circle', 'female_host', 'subheader', 'default', 'Circle', 'Users', 'overlay', 'social_circle', 'none', '{"group":"secondary"}'::jsonb, 8, true),
+  ('nav_female_host_mobile_bottom_default_home', 'female_host', 'mobile_bottom', 'default', 'Home', 'Home', 'tab', 'home', 'none', NULL, 1, true),
+  ('nav_female_host_mobile_bottom_default_discovery', 'female_host', 'mobile_bottom', 'default', 'Discover', 'Compass', 'tab', 'discovery', 'none', NULL, 2, true),
+  ('nav_female_host_mobile_bottom_default_match', 'female_host', 'mobile_bottom', 'default', 'Match', 'Flame', 'overlay', 'match', 'none', NULL, 3, true),
+  ('nav_female_host_mobile_bottom_default_chat', 'female_host', 'mobile_bottom', 'default', 'Chat', 'MessageCircle', 'overlay', 'chat', 'unread_messages', NULL, 4, true),
+  ('nav_female_host_mobile_bottom_default_profile', 'female_host', 'mobile_bottom', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 5, true),
+  ('nav_female_host_mobile_bottom_default_call_logs', 'female_host', 'mobile_bottom', 'default', 'Logs', 'PhoneCall', 'tab', 'call_logs', 'missed_calls', NULL, 6, true),
+  ('nav_female_host_persona_menu_default_status_online', 'female_host', 'persona_menu', 'default', 'Available', 'Circle', 'system', 'status_online', 'none', NULL, 1, true),
+  ('nav_female_host_persona_menu_default_status_busy', 'female_host', 'persona_menu', 'default', 'Busy', 'Circle', 'system', 'status_busy', 'none', NULL, 2, true),
+  ('nav_female_host_persona_menu_default_status_offline', 'female_host', 'persona_menu', 'default', 'Offline', 'Circle', 'system', 'status_offline', 'none', NULL, 3, true),
+  ('nav_female_host_persona_menu_default_profile', 'female_host', 'persona_menu', 'default', 'Profile', 'User', 'tab', 'profile', 'none', NULL, 4, true),
+  ('nav_female_host_persona_menu_default_earnings', 'female_host', 'persona_menu', 'default', 'Earnings & Analytics', 'DollarSign', 'tab', 'earnings', 'none', NULL, 5, true),
+  ('nav_female_host_persona_menu_default_social_circle', 'female_host', 'persona_menu', 'default', 'Friends & Social Circle', 'Users', 'overlay', 'social_circle', 'none', NULL, 6, true),
+  ('nav_female_host_persona_menu_default_install_pwa', 'female_host', 'persona_menu', 'default', 'Install LiveCall PWA App', 'Download', 'system', 'install_pwa', 'none', NULL, 7, true),
+  ('nav_female_host_persona_menu_default_logout', 'female_host', 'persona_menu', 'default', 'Log Out', 'LogOut', 'system', 'logout', 'none', NULL, 8, true)
+
+ON CONFLICT (id) DO NOTHING;
+
 -- ============================================================================
 -- 11. FEED POSTS & CREATOR MOMENTS TABLE
 -- ============================================================================
@@ -1477,6 +1640,28 @@ DROP POLICY IF EXISTS "admin delete home_quick_links" ON public.home_quick_links
 DROP POLICY IF EXISTS "admin write home_quick_links" ON public.home_quick_links;
 CREATE POLICY "public select home_quick_links" ON public.home_quick_links FOR SELECT USING (true);
 CREATE POLICY "admin write home_quick_links" ON public.home_quick_links
+  FOR ALL
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.role = 'admin'
+        AND (p.auth_id = auth.uid() OR p.id = auth.uid()::text)
+    )
+  );
+
+
+ALTER TABLE public.app_nav_items ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "public select app_nav_items" ON public.app_nav_items;
+DROP POLICY IF EXISTS "admin write app_nav_items" ON public.app_nav_items;
+CREATE POLICY "public select app_nav_items" ON public.app_nav_items FOR SELECT USING (true);
+CREATE POLICY "admin write app_nav_items" ON public.app_nav_items
   FOR ALL
   USING (
     EXISTS (

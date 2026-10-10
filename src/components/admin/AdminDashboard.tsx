@@ -89,6 +89,7 @@ import { getUserEffectiveLocation } from '../../utils/location';
 import { ManualCoinModal } from './ManualCoinModal';
 import { EditUserModal } from './EditUserModal';
 import { AdminHomeCMS } from './AdminHomeCMS';
+import { AdminNavBarEditor } from './AdminNavBarEditor';
 import { UserAnalyticsModal } from './UserAnalyticsModal';
 import { AdminSilentCallMonitorModal } from './AdminSilentCallMonitorModal';
 import { AdminDatabaseStorageConfig } from './AdminDatabaseStorageConfig';
@@ -3342,6 +3343,8 @@ export const AdminDashboard: React.FC = () => {
           onCmsSectionChange={setCmsSection}
         />
       )}
+
+      {activeSubTab === 'cms-navigation' && <AdminNavBarEditor />}
 
       {/* Sub-Tab: Worldwide Countries, Languages, Zodiac & Interests Control */}
       {activeSubTab === 'countries' && (

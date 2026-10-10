@@ -120,7 +120,7 @@ const MainApp: React.FC = () => {
     setChatUserId(targetUserId || null);
   };
 
-  const handleCloseOverlays = () => {
+  const dismissTransientOverlays = () => {
     setIsChatOpen(false);
     setChatUserId(null);
     setIsMatchOpen(false);
@@ -128,6 +128,24 @@ const MainApp: React.FC = () => {
     setIsStoreOpen(false);
     setIsAuthOpen(false);
     setSelectedDeckUser(null);
+  };
+
+  /** Close drawers/modals; soft-clear public profile URL without history.back race. */
+  const handleCloseOverlays = () => {
+    dismissTransientOverlays();
+    if (viewingProfileId) {
+      replaceTab(activeTab);
+    }
+  };
+
+  const navigateTab = (tab: string) => {
+    dismissTransientOverlays();
+    setActiveTab(tab);
+  };
+
+  const openProfileAndClear = (id: string) => {
+    dismissTransientOverlays();
+    openPublicProfile(id);
   };
 
   // Dedicated full-screen Server Setup Wizard when accessing /server-setup
@@ -162,11 +180,10 @@ const MainApp: React.FC = () => {
     isFemaleHostStudioUser && (activeTab === 'earnings' || activeTab === 'call_logs');
 
   const isShellLayout =
-    !viewingProfileId &&
-    (activeTab === 'admin' ||
-      activeTab === 'team_leader' ||
-      activeTab === 'profile' ||
-      isHostStudioSurface);
+    activeTab === 'admin' ||
+    activeTab === 'team_leader' ||
+    activeTab === 'profile' ||
+    isHostStudioSurface;
 
   return (
     <div
@@ -177,12 +194,27 @@ const MainApp: React.FC = () => {
       {/* App Header */}
       <Header
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        onOpenStore={() => setIsStoreOpen(true)}
-        onOpenAuth={(mode) => handleOpenAuth(mode || 'register')}
-        onOpenSocialCircle={() => setIsSocialCircleOpen(true)}
-        onOpenChat={(id) => handleOpenChat(id)}
-        onOpenMatch={() => setIsMatchOpen(true)}
+        setActiveTab={navigateTab}
+        onOpenStore={() => {
+          handleCloseOverlays();
+          setIsStoreOpen(true);
+        }}
+        onOpenAuth={(mode) => {
+          handleCloseOverlays();
+          handleOpenAuth(mode || 'register');
+        }}
+        onOpenSocialCircle={() => {
+          handleCloseOverlays();
+          setIsSocialCircleOpen(true);
+        }}
+        onOpenChat={(id) => {
+          handleCloseOverlays();
+          handleOpenChat(id);
+        }}
+        onOpenMatch={() => {
+          handleCloseOverlays();
+          setIsMatchOpen(true);
+        }}
       />
 
       {/* Main View Content — shell layouts (admin / TL / profile) own their own scroll panes */}
@@ -195,103 +227,110 @@ const MainApp: React.FC = () => {
               : 'pb-6'
         }`}
       >
-        {viewingProfileId ? (
-          <PublicProfilePage
-            userId={viewingProfileId}
-            onClose={() => closePublicProfile()}
+        {activeTab === 'home' && (
+          <HomePage
             onStartCall={(id) => startCall(id)}
             onOpenChat={(id) => handleOpenChat(id)}
-            onEditOwnProfile={() => setActiveTab('profile')}
+            onOpenMatch={() => setIsMatchOpen(true)}
+            onOpenStore={() => setIsStoreOpen(true)}
+            onOpenAuth={(mode) => handleOpenAuth(mode || 'register')}
+            onNavigateToTab={(tab) => navigateTab(tab)}
           />
-        ) : (
-          <>
-            {activeTab === 'home' && (
-              <HomePage
-                onStartCall={(id) => startCall(id)}
-                onOpenChat={(id) => handleOpenChat(id)}
-                onOpenMatch={() => setIsMatchOpen(true)}
-                onOpenStore={() => setIsStoreOpen(true)}
-                onOpenAuth={(mode) => handleOpenAuth(mode || 'register')}
-                onNavigateToTab={(tab) => setActiveTab(tab)}
-              />
-            )}
-
-            {activeTab === 'discovery' && (
-              <DiscoveryGrid
-                onStartCall={(id) => startCall(id)}
-                onOpenChat={(id) => setChatUserId(id)}
-                onOpenMatch={() => setIsMatchOpen(true)}
-                onNavigateToSwipe={() => setActiveTab('swipe')}
-              />
-            )}
-
-            {activeTab === 'swipe' && (
-              <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
-                <SwipeMatchDeck onOpenDetailModal={(user) => setSelectedDeckUser(user)} />
-                <ProfileDetailModal
-                  user={selectedDeckUser}
-                  onClose={() => setSelectedDeckUser(null)}
-                  onStartCall={(id) => startCall(id)}
-                  onOpenChat={(id) => handleOpenChat(id)}
-                />
-              </div>
-            )}
-
-            {activeTab === 'moments' && (
-              <MomentsFeed
-                onStartCall={(id) => startCall(id)}
-                onOpenChat={(id) => setChatUserId(id)}
-                onOpenStore={() => setIsStoreOpen(true)}
-              />
-            )}
-
-            {isHostStudioSurface && (
-              <HostDashboard
-                appSurface={activeTab === 'call_logs' ? 'call_logs' : 'earnings'}
-                onAppSurfaceChange={(surface) => setActiveTab(surface)}
-                onOpenChat={(id) => setChatUserId(id)}
-                onStartCall={(id) => startCall(id)}
-                onOpenProfile={(id) => openPublicProfile(id)}
-              />
-            )}
-
-            {activeTab === 'earnings' && !isHostStudioSurface && (
-              <FemaleEarningsDashboard
-                onOpenStore={() => setIsStoreOpen(true)}
-                onStartCall={(id) => startCall(id)}
-                onOpenChat={(id) => setChatUserId(id)}
-                onOpenCallLogs={() => setActiveTab('call_logs')}
-              />
-            )}
-
-            {activeTab === 'call_logs' && !isHostStudioSurface && (
-              <FemaleCallLogsView
-                onOpenChat={(id) => setChatUserId(id)}
-                onStartCall={(id) => startCall(id)}
-                onOpenProfile={(id) => openPublicProfile(id)}
-              />
-            )}
-
-            {activeTab === 'profile' && (
-              <UserProfilePage
-                onOpenStore={() => setIsStoreOpen(true)}
-                onOpenChat={(id) => handleOpenChat(id)}
-                onNavigateToTab={(tab) => setActiveTab(tab)}
-              />
-            )}
-
-            {activeTab === 'team_leader' && isLoggedIn && (currentUser.role === 'team_leader' || currentUser.role === 'admin') && (
-              <TeamLeaderDashboard
-                onStartCall={(id) => startCall(id)}
-                onOpenChat={(id) => handleOpenChat(id)}
-                onNavigateToTab={(tab) => setActiveTab(tab)}
-              />
-            )}
-
-            {activeTab === 'admin' && isLoggedIn && currentUser.role === 'admin' && <AdminDashboard />}
-          </>
         )}
+
+        {activeTab === 'discovery' && (
+          <DiscoveryGrid
+            onStartCall={(id) => startCall(id)}
+            onOpenChat={(id) => setChatUserId(id)}
+            onOpenMatch={() => setIsMatchOpen(true)}
+            onNavigateToSwipe={() => navigateTab('swipe')}
+          />
+        )}
+
+        {activeTab === 'swipe' && (
+          <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+            <SwipeMatchDeck onOpenDetailModal={(user) => setSelectedDeckUser(user)} />
+            <ProfileDetailModal
+              user={selectedDeckUser}
+              onClose={() => setSelectedDeckUser(null)}
+              onStartCall={(id) => startCall(id)}
+              onOpenChat={(id) => handleOpenChat(id)}
+            />
+          </div>
+        )}
+
+        {activeTab === 'moments' && (
+          <MomentsFeed
+            onStartCall={(id) => startCall(id)}
+            onOpenChat={(id) => setChatUserId(id)}
+            onOpenStore={() => setIsStoreOpen(true)}
+          />
+        )}
+
+        {isHostStudioSurface && (
+          <HostDashboard
+            appSurface={activeTab === 'call_logs' ? 'call_logs' : 'earnings'}
+            onAppSurfaceChange={(surface) => navigateTab(surface)}
+            onOpenChat={(id) => setChatUserId(id)}
+            onStartCall={(id) => startCall(id)}
+            onOpenProfile={(id) => openProfileAndClear(id)}
+          />
+        )}
+
+        {activeTab === 'earnings' && !isHostStudioSurface && (
+          <FemaleEarningsDashboard
+            onOpenStore={() => setIsStoreOpen(true)}
+            onStartCall={(id) => startCall(id)}
+            onOpenChat={(id) => setChatUserId(id)}
+            onOpenCallLogs={() => navigateTab('call_logs')}
+          />
+        )}
+
+        {activeTab === 'call_logs' && !isHostStudioSurface && (
+          <FemaleCallLogsView
+            onOpenChat={(id) => setChatUserId(id)}
+            onStartCall={(id) => startCall(id)}
+            onOpenProfile={(id) => openProfileAndClear(id)}
+          />
+        )}
+
+        {activeTab === 'profile' && (
+          <UserProfilePage
+            onOpenStore={() => setIsStoreOpen(true)}
+            onOpenChat={(id) => handleOpenChat(id)}
+            onNavigateToTab={(tab) => navigateTab(tab)}
+          />
+        )}
+
+        {activeTab === 'team_leader' && isLoggedIn && (currentUser.role === 'team_leader' || currentUser.role === 'admin') && (
+          <TeamLeaderDashboard
+            onStartCall={(id) => startCall(id)}
+            onOpenChat={(id) => handleOpenChat(id)}
+            onNavigateToTab={(tab) => navigateTab(tab)}
+          />
+        )}
+
+        {activeTab === 'admin' && isLoggedIn && currentUser.role === 'admin' && <AdminDashboard />}
       </main>
+
+      {viewingProfileId && (
+        <PublicProfilePage
+          userId={viewingProfileId}
+          onClose={() => closePublicProfile()}
+          onStartCall={(id) => {
+            closePublicProfile();
+            startCall(id);
+          }}
+          onOpenChat={(id) => {
+            closePublicProfile();
+            handleOpenChat(id);
+          }}
+          onEditOwnProfile={() => {
+            closePublicProfile();
+            navigateTab('profile');
+          }}
+        />
+      )}
 
       {!isShellLayout && (
       <footer className="h-8 bg-app-surface border-t border-app px-4 sm:px-8 flex items-center justify-between text-[10px] text-app-muted">
@@ -319,7 +358,7 @@ const MainApp: React.FC = () => {
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
         initialMode={authInitialMode}
-        onNavigateToTab={(tab) => setActiveTab(tab)}
+        onNavigateToTab={(tab) => navigateTab(tab)}
       />
       {isOnboardingOpen && currentUser && (
         <OnboardingWizard
@@ -334,7 +373,7 @@ const MainApp: React.FC = () => {
       <DailyRewardsModal
         isOpen={isDailyRewardsModalOpen}
         onClose={closeDailyRewardsModal}
-        onNavigateTab={(tab) => setActiveTab(tab)}
+        onNavigateTab={(tab) => navigateTab(tab)}
       />
       <BlockReportModal
         key={blockReportModal ? `${blockReportModal.userId}-${blockReportModal.action}` : 'closed'}
@@ -362,13 +401,9 @@ const MainApp: React.FC = () => {
           setChatUserId(null);
         }}
         onStartCall={(id) => startCall(id)}
-        onOpenProfile={(id) => {
-          setIsChatOpen(false);
-          setChatUserId(null);
-          openPublicProfile(id);
-        }}
+        onOpenProfile={(id) => openProfileAndClear(id)}
       />
-      <PolicyDetailModal onNavigateToTab={(tab) => setActiveTab(tab)} />
+      <PolicyDetailModal onNavigateToTab={(tab) => navigateTab(tab)} />
       {pendingRatingCall && (
         <PostCallRatingModal
           creatorId={pendingRatingCall.creatorId}

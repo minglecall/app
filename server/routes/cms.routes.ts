@@ -2,6 +2,15 @@ import { Router } from 'express';
 import type { ServerRuntime } from '../runtimeTypes';
 import { requireAdmin } from '../middleware/auth';
 import { getSupabaseAdmin, isSupabaseAdminConfigured } from '../supabaseAdmin';
+import {
+  isNavAudienceRole,
+  isNavBarId,
+  mapNavRow,
+  navItemToRow,
+  normalizeNavPayload,
+  validateNavSlice,
+  type AppNavItem,
+} from '../../shared/appNav';
 
 const CMS_ACTION_TYPES = new Set(['tab', 'modal', 'external', 'policy']);
 const POLICY_CATEGORIES = new Set(['safety', 'privacy', 'terms', 'coins', 'creators', 'moderation']);
@@ -101,10 +110,11 @@ export function createCmsAdminRouter(_ctx: ServerRuntime): Router {
     try {
       if (!requireConfigured(res)) return;
       const client = getSupabaseAdmin()!;
-      const [banners, policies, links] = await Promise.all([
+      const [banners, policies, links, nav] = await Promise.all([
         client.from('home_banners').select('*').order('order_num', { ascending: true }),
         client.from('cms_policies').select('*').order('order_num', { ascending: true }),
         client.from('home_quick_links').select('*').order('order_num', { ascending: true }),
+        client.from('app_nav_items').select('*').order('order_num', { ascending: true }),
       ]);
       if (banners.error || policies.error || links.error) {
         return res.status(500).json({
@@ -121,6 +131,7 @@ export function createCmsAdminRouter(_ctx: ServerRuntime): Router {
           banners: (banners.data || []).map(mapBannerRow),
           policies: (policies.data || []).map(mapPolicyRow),
           quickLinks: (links.data || []).map(mapQuickLinkRow),
+          navItems: nav.error ? [] : (nav.data || []).map(mapNavRow),
         },
       });
     } catch (err: any) {
@@ -369,30 +380,205 @@ export function createCmsAdminRouter(_ctx: ServerRuntime): Router {
     }
   });
 
+  router.put('/cms/nav-items/batch', requireAdmin, async (req, res) => {
+    try {
+      if (!requireConfigured(res)) return;
+      const audienceRole = String(req.body?.audienceRole || '');
+      const bar = String(req.body?.bar || '');
+      const slot = req.body?.slot ? String(req.body.slot) : null;
+      const rawItems = req.body?.items;
+      if (!isNavAudienceRole(audienceRole) || !isNavBarId(bar) || !Array.isArray(rawItems)) {
+        return res.status(400).json({ success: false, error: 'audienceRole, bar, and items[] are required' });
+      }
+      const items: AppNavItem[] = [];
+      for (const raw of rawItems) {
+        const normalized = normalizeNavPayload({ ...raw, audienceRole, bar, slot: slot || raw?.slot || 'default' });
+        if ('error' in normalized) {
+          return res.status(400).json({ success: false, error: normalized.error });
+        }
+        if (slot && normalized.slot !== slot) {
+          return res.status(400).json({ success: false, error: 'Item slot does not match the slice' });
+        }
+        items.push(normalized);
+      }
+      const sliceError = validateNavSlice(items);
+      if (sliceError) return res.status(400).json({ success: false, error: sliceError });
+      const client = getSupabaseAdmin()!;
+      let existingQuery = client.from('app_nav_items').select('id, parent_id').eq('audience_role', audienceRole).eq('bar', bar);
+      if (slot) existingQuery = existingQuery.eq('slot', slot);
+      const existing = await existingQuery;
+      if (existing.error) {
+        return res.status(500).json({ success: false, error: safeError(existing.error.message, 'Failed to load nav items') });
+      }
+      const keep = new Set(items.map((item) => item.id));
+      const removable = (existing.data || []).filter((row: any) => !keep.has(row.id));
+      const childIds = removable.filter((row: any) => row.parent_id).map((row: any) => row.id);
+      const rootIds = removable.filter((row: any) => !row.parent_id).map((row: any) => row.id);
+      if (childIds.length) {
+        const deletedChildren = await client.from('app_nav_items').delete().in('id', childIds);
+        if (deletedChildren.error) {
+          return res.status(500).json({ success: false, error: safeError(deletedChildren.error.message, 'Failed to update nav items') });
+        }
+      }
+      if (rootIds.length) {
+        const deletedRoots = await client.from('app_nav_items').delete().in('id', rootIds);
+        if (deletedRoots.error) {
+          return res.status(500).json({ success: false, error: safeError(deletedRoots.error.message, 'Failed to update nav items') });
+        }
+      }
+      const parents = items.filter((item) => !item.parentId);
+      const children = items.filter((item) => item.parentId);
+      if (parents.length) {
+        const upsertedParents = await client.from('app_nav_items').upsert(parents.map(navItemToRow), { onConflict: 'id' });
+        if (upsertedParents.error) {
+          return res.status(500).json({ success: false, error: safeError(upsertedParents.error.message, 'Failed to save nav items') });
+        }
+      }
+      if (children.length) {
+        const upsertedChildren = await client.from('app_nav_items').upsert(children.map(navItemToRow), { onConflict: 'id' });
+        if (upsertedChildren.error) {
+          return res.status(500).json({ success: false, error: safeError(upsertedChildren.error.message, 'Failed to save nav items') });
+        }
+      }
+      let savedQuery = client.from('app_nav_items').select('*').eq('audience_role', audienceRole).eq('bar', bar);
+      if (slot) savedQuery = savedQuery.eq('slot', slot);
+      const saved = await savedQuery.order('order_num', { ascending: true });
+      if (saved.error) {
+        return res.status(500).json({ success: false, error: safeError(saved.error.message, 'Failed to save nav items') });
+      }
+      return res.json({ success: true, data: (saved.data || []).map(mapNavRow) });
+    } catch (err: any) {
+      console.error('PUT /api/admin/cms/nav-items/batch error:', err);
+      return res.status(500).json({ success: false, error: safeError(err, 'Failed to save nav items') });
+    }
+  });
+
+  router.put('/cms/nav-items/reorder', requireAdmin, async (req, res) => {
+    try {
+      if (!requireConfigured(res)) return;
+      const audienceRole = String(req.body?.audienceRole || '');
+      const bar = String(req.body?.bar || '');
+      const orderedIds = req.body?.orderedIds;
+      if (!isNavAudienceRole(audienceRole) || !isNavBarId(bar) || !Array.isArray(orderedIds)) {
+        return res.status(400).json({ success: false, error: 'audienceRole, bar, and orderedIds are required' });
+      }
+      const client = getSupabaseAdmin()!;
+      for (let index = 0; index < orderedIds.length; index += 1) {
+        const id = String(orderedIds[index] || '');
+        if (!id) continue;
+        const updated = await client
+          .from('app_nav_items')
+          .update({ order_num: index + 1, updated_at: new Date().toISOString() })
+          .eq('id', id)
+          .eq('audience_role', audienceRole)
+          .eq('bar', bar);
+        if (updated.error) {
+          return res.status(500).json({ success: false, error: safeError(updated.error.message, 'Failed to reorder nav items') });
+        }
+      }
+      const rows = await client
+        .from('app_nav_items')
+        .select('*')
+        .eq('audience_role', audienceRole)
+        .eq('bar', bar)
+        .order('order_num', { ascending: true });
+      if (rows.error) {
+        return res.status(500).json({ success: false, error: safeError(rows.error.message, 'Failed to reorder nav items') });
+      }
+      return res.json({ success: true, data: (rows.data || []).map(mapNavRow) });
+    } catch (err: any) {
+      console.error('PUT /api/admin/cms/nav-items/reorder error:', err);
+      return res.status(500).json({ success: false, error: safeError(err, 'Failed to reorder nav items') });
+    }
+  });
+
+  router.put('/cms/nav-items', requireAdmin, async (req, res) => {
+    try {
+      if (!requireConfigured(res)) return;
+      const normalized = normalizeNavPayload(req.body || {});
+      if ('error' in normalized) {
+        return res.status(400).json({ success: false, error: normalized.error });
+      }
+      const client = getSupabaseAdmin()!;
+      const { data, error } = await client
+        .from('app_nav_items')
+        .upsert(navItemToRow(normalized), { onConflict: 'id' })
+        .select('*')
+        .maybeSingle();
+      if (error) {
+        return res.status(500).json({ success: false, error: safeError(error.message, 'Failed to save nav item') });
+      }
+      return res.json({ success: true, data: mapNavRow(data || navItemToRow(normalized)) });
+    } catch (err: any) {
+      console.error('PUT /api/admin/cms/nav-items error:', err);
+      return res.status(500).json({ success: false, error: safeError(err, 'Failed to save nav item') });
+    }
+  });
+
+  router.patch('/cms/nav-items/:id/active', requireAdmin, async (req, res) => {
+    try {
+      if (!requireConfigured(res)) return;
+      const id = String(req.params.id || '');
+      if (!id) return res.status(400).json({ success: false, error: 'Nav item id is required' });
+      if (typeof req.body?.active !== 'boolean') {
+        return res.status(400).json({ success: false, error: 'active boolean is required' });
+      }
+      const client = getSupabaseAdmin()!;
+      const { data, error } = await client
+        .from('app_nav_items')
+        .update({ active: req.body.active, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .select('*')
+        .maybeSingle();
+      if (error) return res.status(500).json({ success: false, error: safeError(error.message, 'Failed to update nav item') });
+      if (!data) return res.status(404).json({ success: false, error: 'Nav item not found' });
+      return res.json({ success: true, data: mapNavRow(data) });
+    } catch (err: any) {
+      console.error('PATCH /api/admin/cms/nav-items/:id/active error:', err);
+      return res.status(500).json({ success: false, error: safeError(err, 'Failed to update nav item') });
+    }
+  });
+
+  router.delete('/cms/nav-items/:id', requireAdmin, async (req, res) => {
+    try {
+      if (!requireConfigured(res)) return;
+      const id = String(req.params.id || '');
+      if (!id) return res.status(400).json({ success: false, error: 'Nav item id is required' });
+      const client = getSupabaseAdmin()!;
+      const { error } = await client.from('app_nav_items').delete().eq('id', id);
+      if (error) return res.status(500).json({ success: false, error: safeError(error.message, 'Failed to delete nav item') });
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error('DELETE /api/admin/cms/nav-items/:id error:', err);
+      return res.status(500).json({ success: false, error: safeError(err, 'Failed to delete nav item') });
+    }
+  });
+
   // Seed honest starter CMS content into Supabase (admin only)
   router.post('/cms/seed-defaults', requireAdmin, async (req, res) => {
     try {
       if (!requireConfigured(res)) return;
-      const { banners, policies, quickLinks } = req.body || {};
+      const { banners, policies, quickLinks, navItems } = req.body || {};
       if (
         (banners !== undefined && !Array.isArray(banners)) ||
         (policies !== undefined && !Array.isArray(policies)) ||
-        (quickLinks !== undefined && !Array.isArray(quickLinks))
+        (quickLinks !== undefined && !Array.isArray(quickLinks)) ||
+        (navItems !== undefined && !Array.isArray(navItems))
       ) {
         return res.status(400).json({
           success: false,
-          error: 'banners, policies, and quickLinks must be arrays when provided',
+          error: 'banners, policies, quickLinks, and navItems must be arrays when provided',
         });
       }
-      if (!banners && !policies && !quickLinks) {
+      if (!banners && !policies && !quickLinks && !navItems) {
         return res.status(400).json({
           success: false,
-          error: 'Provide at least one of banners, policies, or quickLinks',
+          error: 'Provide at least one of banners, policies, quickLinks, or navItems',
         });
       }
 
       const client = getSupabaseAdmin()!;
-      const out: { banners?: any[]; policies?: any[]; quickLinks?: any[] } = {};
+      const out: { banners?: any[]; policies?: any[]; quickLinks?: any[]; navItems?: any[] } = {};
 
       if (Array.isArray(banners)) {
         const bannerRows = banners.map((b: any) => ({
@@ -466,6 +652,25 @@ export function createCmsAdminRouter(_ctx: ServerRuntime): Router {
           });
         }
         out.quickLinks = (lRes.data || []).map(mapQuickLinkRow);
+      }
+
+      if (Array.isArray(navItems)) {
+        const navRows = [];
+        for (const raw of navItems) {
+          const normalized = normalizeNavPayload(raw);
+          if ('error' in normalized) {
+            return res.status(400).json({ success: false, error: normalized.error });
+          }
+          navRows.push(navItemToRow(normalized));
+        }
+        const nRes = await client.from('app_nav_items').upsert(navRows, { onConflict: 'id' }).select('*');
+        if (nRes.error) {
+          return res.status(500).json({
+            success: false,
+            error: safeError(nRes.error.message, 'Failed to seed navigation'),
+          });
+        }
+        out.navItems = (nRes.data || []).map(mapNavRow);
       }
 
       return res.json({ success: true, data: out });

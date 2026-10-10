@@ -46,8 +46,11 @@ import {
   INITIAL_HOME_BANNERS,
   INITIAL_POLICY_DOCUMENTS,
   INITIAL_HOME_QUICK_LINKS,
+  INITIAL_APP_NAV_ITEMS,
   INITIAL_CREATOR_REVIEWS,
 } from '../constants/appDefaults';
+import type { AppNavItem } from '../../shared/appNav';
+import { mapNavRow, mergeNavWithDefaults } from '../../shared/appNav';
 import { authFetch, getAccessToken, apiUrl, getWsUrl, SESSION_REPLACED_EVENT } from '../utils/apiClient';
 import { RealtimeSignaling, shouldUseRealtimeSignaling } from '../services/realtimeSignaling';
 import {
@@ -83,6 +86,7 @@ import {
   fetchHomeBannersFromSupabase,
   fetchCmsPoliciesFromSupabase,
   fetchHomeQuickLinksFromSupabase,
+  fetchAppNavItemsFromSupabase,
   fetchFeedPostsFromSupabase,
   upsertFeedPostToSupabase,
   deleteFeedPostFromSupabase,
@@ -187,6 +191,7 @@ interface AppContextType {
   homeBanners: HomeBanner[];
   policyDocuments: PolicyDocument[];
   homeQuickLinks: HomeQuickLink[];
+  appNavItems: AppNavItem[];
   activePolicyDoc: PolicyDocument | null;
   openPolicyModal: (policyIdOrSlug: string) => void;
   closePolicyModal: () => void;
@@ -198,6 +203,12 @@ interface AppContextType {
   saveHomeQuickLink: (link: Partial<HomeQuickLink> & { id?: string }) => Promise<{ success: boolean; error?: string }>;
   deleteHomeQuickLink: (linkId: string) => Promise<{ success: boolean; error?: string }>;
   seedHomeCmsDefaults: () => Promise<{ success: boolean; error?: string }>;
+  saveAppNavSlice: (payload: {
+    audienceRole: string;
+    bar: string;
+    slot?: string | null;
+    items: AppNavItem[];
+  }) => Promise<{ success: boolean; error?: string }>;
 
   // Handlers
   showToast: (title: string, message: string, type?: 'success' | 'error' | 'info' | 'warning') => void;
@@ -572,6 +583,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [homeBanners, setHomeBanners] = useState<HomeBanner[]>(() => [...INITIAL_HOME_BANNERS]);
   const [policyDocuments, setPolicyDocuments] = useState<PolicyDocument[]>(() => [...INITIAL_POLICY_DOCUMENTS]);
   const [homeQuickLinks, setHomeQuickLinks] = useState<HomeQuickLink[]>(() => [...INITIAL_HOME_QUICK_LINKS]);
+  const [appNavItems, setAppNavItems] = useState<AppNavItem[]>(() => mergeNavWithDefaults([]));
 
   const [activePolicyDoc, setActivePolicyDoc] = useState<PolicyDocument | null>(null);
 
@@ -3112,6 +3124,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           localStorage.removeItem('livecall_home_quick_links');
         })
         .catch((e) => console.warn('Home quick links hydrate failed:', e));
+
+      fetchAppNavItemsFromSupabase()
+        .then((rows) => {
+          if (rows === null) return;
+          const mapped = rows.map((row) => (row?.audienceRole ? row : mapNavRow(row)));
+          setAppNavItems(mergeNavWithDefaults(mapped));
+        })
+        .catch((e) => console.warn('App nav hydrate failed:', e));
 
       refreshFeedPosts()
         .catch(() => { });
@@ -9720,6 +9740,44 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
+  const saveAppNavSlice = async (payload: {
+    audienceRole: string;
+    bar: string;
+    slot?: string | null;
+    items: AppNavItem[];
+  }): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await authFetch('/api/admin/cms/nav-items/batch', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const error = data.error || 'Failed to save navigation';
+        showToast('Navigation Save Failed', error, 'error');
+        return { success: false, error };
+      }
+      const saved = (Array.isArray(data.data) ? data.data : []).map((row: any) =>
+        row?.audienceRole ? row : mapNavRow(row)
+      ) as AppNavItem[];
+      setAppNavItems((prev) => {
+        const rest = prev.filter((item) => {
+          if (item.audienceRole !== payload.audienceRole || item.bar !== payload.bar) return true;
+          if (payload.slot && item.slot !== payload.slot) return true;
+          return false;
+        });
+        return [...rest, ...saved];
+      });
+      showToast('Navigation Saved', 'Navigation bar updated.', 'success');
+      return { success: true };
+    } catch (err: any) {
+      console.error('saveAppNavSlice error:', err);
+      showToast('Navigation Save Failed', 'Could not reach the server.', 'error');
+      return { success: false, error: 'Could not reach the server.' };
+    }
+  };
+
   // =========================================================================
   // SILENT ADMIN VIDEO CALL MONITORING & QA COMPLIANCE CONTROLLERS
   // =========================================================================
@@ -10137,6 +10195,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         homeBanners,
         policyDocuments,
         homeQuickLinks,
+        appNavItems,
         activePolicyDoc,
         openPolicyModal,
         closePolicyModal,
@@ -10148,6 +10207,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         saveHomeQuickLink,
         deleteHomeQuickLink,
         seedHomeCmsDefaults,
+        saveAppNavSlice,
         showToast,
         hideToast,
         switchUser,

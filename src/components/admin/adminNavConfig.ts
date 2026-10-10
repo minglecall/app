@@ -19,7 +19,8 @@ export type AdminSubTabKey =
   | 'leaders'
   | 'payouts'
   | 'users'
-  | 'cms';
+  | 'cms'
+  | 'cms-navigation';
 
 /** Non-tab sidebar actions (Setup Wizard / Reset Data). */
 export type AdminNavActionKey = 'setup-wizard' | 'reset-data';
@@ -226,6 +227,12 @@ export const ADMIN_NAV_GROUPS: AdminNavGroup[] = [
       },
       { id: 'api-health', label: 'API Health', icon: 'Activity', kind: 'tab' },
       { id: 'email', label: 'Email', icon: 'Mail', kind: 'tab' },
+    ],
+  },
+  {
+    id: 'cms',
+    label: 'CMS',
+    items: [
       {
         id: 'cms',
         label: 'Home CMS & Policies',
@@ -237,6 +244,12 @@ export const ADMIN_NAV_GROUPS: AdminNavGroup[] = [
           { id: 'shortcuts', label: 'Quick Shortcuts', icon: 'Zap' },
           { id: 'discovery_card', label: 'Discovery Card', icon: 'LayoutTemplate' },
         ],
+      },
+      {
+        id: 'cms-navigation',
+        label: 'Navigation Editor',
+        icon: 'LayoutTemplate',
+        kind: 'tab',
       },
     ],
   },

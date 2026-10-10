@@ -9,6 +9,7 @@ import {
   type VercelReq,
   type VercelRes,
 } from '../../vercelAuth';
+import { mapNavRow, navItemToRow, normalizeNavPayload } from '../../../../shared/appNav';
 
 function mapBannerRow(row: any) {
   return {
@@ -80,25 +81,26 @@ export default async function handler(req: VercelReq, res: VercelRes) {
 
   try {
     const body = await readJsonBody(req);
-    const { banners, policies, quickLinks } = body || {};
+    const { banners, policies, quickLinks, navItems } = body || {};
     if (
       (banners !== undefined && !Array.isArray(banners)) ||
       (policies !== undefined && !Array.isArray(policies)) ||
-      (quickLinks !== undefined && !Array.isArray(quickLinks))
+      (quickLinks !== undefined && !Array.isArray(quickLinks)) ||
+      (navItems !== undefined && !Array.isArray(navItems))
     ) {
       return sendJson(res, 400, {
         success: false,
-        error: 'banners, policies, and quickLinks must be arrays when provided',
+        error: 'banners, policies, quickLinks, and navItems must be arrays when provided',
       });
     }
-    if (!banners && !policies && !quickLinks) {
+    if (!banners && !policies && !quickLinks && !navItems) {
       return sendJson(res, 400, {
         success: false,
-        error: 'Provide at least one of banners, policies, or quickLinks',
+        error: 'Provide at least one of banners, policies, quickLinks, or navItems',
       });
     }
 
-    const out: { banners?: any[]; policies?: any[]; quickLinks?: any[] } = {};
+    const out: { banners?: any[]; policies?: any[]; quickLinks?: any[]; navItems?: any[] } = {};
 
     if (Array.isArray(banners)) {
       const bannerRows = banners.map((b: any) => ({
@@ -163,6 +165,22 @@ export default async function handler(req: VercelReq, res: VercelRes) {
         return sendJson(res, 500, { success: false, error: lRes.error.message || 'Failed to seed quick links' });
       }
       out.quickLinks = (lRes.data || []).map(mapQuickLinkRow);
+    }
+
+    if (Array.isArray(navItems)) {
+      const navRows = [];
+      for (const raw of navItems) {
+        const normalized = normalizeNavPayload(raw);
+        if ('error' in normalized) {
+          return sendJson(res, 400, { success: false, error: normalized.error });
+        }
+        navRows.push(navItemToRow(normalized));
+      }
+      const nRes = await client.from('app_nav_items').upsert(navRows, { onConflict: 'id' }).select('*');
+      if (nRes.error) {
+        return sendJson(res, 500, { success: false, error: nRes.error.message || 'Failed to seed navigation' });
+      }
+      out.navItems = (nRes.data || []).map(mapNavRow);
     }
 
     return sendJson(res, 200, { success: true, data: out });

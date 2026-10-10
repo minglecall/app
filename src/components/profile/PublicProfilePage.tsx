@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
-  ArrowLeft,
+  X,
   Video,
   MessageSquare,
   ShieldCheck,
@@ -46,6 +46,14 @@ interface PublicProfilePageProps {
 
 type ProfileTab = 'about' | 'media' | 'moments';
 
+function resolveGalleryVideoSrc(vid: GalleryVideoItem): string {
+  const key = String(vid.storageKey || '').trim();
+  return (
+    normalizeMediaUrl(vid.url, vid.storageKey) ||
+    (key ? `/api/storage/media?key=${encodeURIComponent(key)}` : '')
+  );
+}
+
 export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
   userId,
   onClose,
@@ -75,6 +83,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
   const [activeTab, setActiveTab] = useState<ProfileTab>('about');
   const [lightboxMoment, setLightboxMoment] = useState<CreatorMoment | null>(null);
   const [activeVideo, setActiveVideo] = useState<GalleryVideoItem | null>(null);
+  const [activePhoto, setActivePhoto] = useState<string | null>(null);
   const [showGearMenu, setShowGearMenu] = useState(false);
   const [momentsList, setMomentsList] = useState<CreatorMoment[]>([]);
   const [momentsLoading, setMomentsLoading] = useState(false);
@@ -88,6 +97,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
     setActiveTab('about');
     setShowGearMenu(false);
     setActiveVideo(null);
+    setActivePhoto(null);
     setLightboxMoment(null);
     setLoadError(null);
     setFetchedUser(null);
@@ -150,26 +160,53 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
     (isSelf ? currentUser : null) ||
     fetchedUser;
 
+  const openPhoto = (url: string, idx?: number) => {
+    if (typeof idx === 'number') setActiveImageIndex(idx);
+    setActivePhoto(url);
+  };
+
+  const shell = (body: React.ReactNode) => (
+    <div className="fixed inset-0 z-[85] flex items-center justify-center p-2 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-fadeIn">
+      <div className="relative w-full max-w-2xl bg-app-card border border-app rounded-app-xl shadow-app-lg overflow-hidden my-auto flex flex-col max-h-[88vh] sm:max-h-[90vh] app-scale-in">
+        {body}
+      </div>
+    </div>
+  );
+
   if (loading && !liveUser) {
-    return (
-      <div className="min-h-[60vh] flex items-center justify-center px-4">
+    return shell(
+      <div className="flex items-center justify-center min-h-[40vh] px-4 relative">
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute top-3 right-3 p-2 rounded-full bg-slate-900/80 text-slate-300 hover:text-white border border-slate-700"
+        >
+          <X className="w-4 h-4" />
+        </button>
         <div className="text-sm text-app-muted font-mono">Loading profile…</div>
       </div>
     );
   }
 
   if (!liveUser) {
-    return (
-      <div className="min-h-[60vh] flex flex-col items-center justify-center gap-4 px-4">
+    return shell(
+      <div className="flex flex-col items-center justify-center gap-4 min-h-[40vh] px-4 relative">
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute top-3 right-3 p-2 rounded-full bg-slate-900/80 text-slate-300 hover:text-white border border-slate-700"
+        >
+          <X className="w-4 h-4" />
+        </button>
         <p className="text-sm text-app-muted font-mono text-center">
           {loadError || 'Profile not found or unavailable.'}
         </p>
         <button
           type="button"
           onClick={onClose}
-          className="px-4 py-2 rounded-xl bg-app-card border border-app text-app-heading text-sm font-semibold"
+          className="px-4 py-2 rounded-xl bg-app border border-app text-app-heading text-sm font-semibold"
         >
-          Go back
+          Close
         </button>
       </div>
     );
@@ -197,64 +234,75 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
     );
   };
 
-  return (
-    <div className="max-w-2xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 pb-28">
-      {/* Top bar */}
-      <div className="flex items-center justify-between gap-2">
+  return shell(
+    <>
+      {/* Top controls */}
+      <div className="absolute top-3 right-3 z-30 flex items-center space-x-2">
+        {isSelf && onEditOwnProfile && (
+          <button
+            type="button"
+            onClick={onEditOwnProfile}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-full bg-brand/20 border border-brand/40 text-brand text-xs font-semibold backdrop-blur-md"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+            Edit
+          </button>
+        )}
+        {!isSelf && (
+          <button
+            type="button"
+            onClick={() => toggleFavorite(liveUser.id)}
+            className={`p-2 rounded-full backdrop-blur-md border transition-all shadow-lg ${
+              isFav
+                ? 'bg-amber-500 text-slate-950 border-amber-400'
+                : 'bg-slate-900/80 text-slate-300 border-slate-700 hover:text-white'
+            }`}
+            title={isFav ? 'Remove from Favorites' : 'Add to Favorites'}
+          >
+            <Star className={`w-4 h-4 ${isFav ? 'fill-current' : ''}`} />
+          </button>
+        )}
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-app-card border border-app text-app-heading text-xs font-semibold hover:bg-brand-soft transition-colors"
+          className="p-2 rounded-full bg-slate-900/80 text-slate-300 hover:text-white border border-slate-700 backdrop-blur-md transition-colors shadow-lg"
         >
-          <ArrowLeft className="w-4 h-4 text-brand" />
-          <span>Back</span>
+          <X className="w-4 h-4" />
         </button>
-
-        <div className="flex items-center gap-2">
-          {isSelf && onEditOwnProfile && (
-            <button
-              type="button"
-              onClick={onEditOwnProfile}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-brand/15 border border-brand/30 text-brand text-xs font-semibold"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-              Edit profile
-            </button>
-          )}
-          {!isSelf && (
-            <button
-              type="button"
-              onClick={() => toggleFavorite(liveUser.id)}
-              className={`p-2 rounded-xl border transition-all ${
-                isFav
-                  ? 'bg-amber-500 text-slate-950 border-amber-400'
-                  : 'bg-app-card text-app-muted border-app hover:text-app-heading'
-              }`}
-              title={isFav ? 'Remove from Favorites' : 'Add to Favorites'}
-            >
-              <Star className={`w-4 h-4 ${isFav ? 'fill-current' : ''}`} />
-            </button>
-          )}
-        </div>
       </div>
 
       {/* Hero gallery */}
-      <div className="relative h-64 sm:h-80 bg-slate-950 rounded-app-xl overflow-hidden border border-app">
-        <img
-          src={allImages[activeImageIndex] || getFallbackAvatar(liveUser.name, liveUser.gender, liveUser.role)}
-          alt={liveUser.name}
-          onError={(e) => {
-            (e.target as HTMLImageElement).src = getFallbackAvatar(
-              liveUser.name,
-              liveUser.gender,
-              liveUser.role
-            );
-          }}
-          className="w-full h-full object-cover bg-slate-900"
-        />
-        <div className="absolute inset-0 bg-gradient-to-t from-[var(--app-card)] via-transparent to-black/30" />
+      <div className="relative h-56 sm:h-72 bg-slate-950 shrink-0 overflow-hidden">
+        <button
+          type="button"
+          className="w-full h-full cursor-zoom-in"
+          onClick={() =>
+            openPhoto(
+              allImages[activeImageIndex] ||
+                getFallbackAvatar(liveUser.name, liveUser.gender, liveUser.role),
+              activeImageIndex
+            )
+          }
+        >
+          <img
+            src={
+              allImages[activeImageIndex] ||
+              getFallbackAvatar(liveUser.name, liveUser.gender, liveUser.role)
+            }
+            alt={liveUser.name}
+            onError={(e) => {
+              (e.target as HTMLImageElement).src = getFallbackAvatar(
+                liveUser.name,
+                liveUser.gender,
+                liveUser.role
+              );
+            }}
+            className="w-full h-full object-cover bg-slate-900"
+          />
+        </button>
+        <div className="absolute inset-0 bg-gradient-to-t from-[var(--app-card)] via-transparent to-black/30 pointer-events-none" />
 
-        <div className="absolute top-3 left-3 z-20 flex items-center space-x-2">
+        <div className="absolute top-3 left-3 z-20 flex items-center space-x-2 pointer-events-none">
           <div
             className={`px-2.5 py-1 rounded-full backdrop-blur-md border shadow-md flex items-center space-x-1.5 ${
               liveUser.onlineStatus === 'online'
@@ -295,7 +343,11 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
               <button
                 key={`${img}-${idx}`}
                 type="button"
-                onClick={() => setActiveImageIndex(idx)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setActiveImageIndex(idx);
+                }}
+                onDoubleClick={() => openPhoto(img, idx)}
                 className={`w-11 h-11 sm:w-12 sm:h-12 rounded-xl overflow-hidden border-2 transition-all shrink-0 ${
                   activeImageIndex === idx
                     ? 'border-brand scale-105'
@@ -310,7 +362,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center border-b border-app px-1 pt-1 space-x-4">
+      <div className="flex items-center border-b border-app bg-app px-4 sm:px-6 pt-3 shrink-0 space-x-4">
         {(
           [
             { key: 'about' as const, label: 'About', icon: User },
@@ -338,14 +390,14 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
         ))}
       </div>
 
-      {/* Content */}
-      <div className="space-y-5">
+      {/* Scrollable content */}
+      <div className="p-4 sm:p-6 overflow-y-auto space-y-5 flex-1 min-h-0">
         {activeTab === 'about' && (
           <>
-            <div className="bg-app-card p-4 rounded-app-lg border border-app space-y-2">
+            <div className="bg-app p-4 rounded-app-lg border border-app space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center space-x-2 min-w-0">
-                  <h1 className="text-lg sm:text-xl font-black text-white truncate">{liveUser.name}</h1>
+                  <h2 className="text-lg sm:text-xl font-black text-white truncate">{liveUser.name}</h2>
                   <span className="text-sm sm:text-base font-bold text-slate-400 shrink-0">
                     {liveUser.age}
                   </span>
@@ -477,11 +529,11 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             </div>
 
             <div className="space-y-2">
-              <h2 className="text-xs font-mono font-bold text-indigo-400 uppercase tracking-wider flex items-center space-x-1.5">
+              <h3 className="text-xs font-mono font-bold text-indigo-400 uppercase tracking-wider flex items-center space-x-1.5">
                 <Flame className="w-3.5 h-3.5" />
                 <span>Bio</span>
-              </h2>
-              <div className="bg-app-card p-4 rounded-app-lg border border-app text-xs sm:text-sm text-slate-200 leading-relaxed space-y-2">
+              </h3>
+              <div className="bg-app p-4 rounded-app-lg border border-app text-xs sm:text-sm text-slate-200 leading-relaxed space-y-2">
                 <p className="font-semibold text-white">{liveUser.bio || 'No bio yet.'}</p>
                 {liveUser.extendedBio && (
                   <p className="text-slate-300 text-xs leading-relaxed pt-1 border-t border-slate-800/80">
@@ -492,14 +544,14 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             </div>
 
             <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-              <div className="bg-app-card p-3 rounded-app border border-app space-y-0.5">
+              <div className="bg-app p-3 rounded-app border border-app space-y-0.5">
                 <div className="text-slate-500 text-[10px]">Location</div>
                 <div className="font-bold text-slate-200 truncate flex items-center space-x-1.5">
                   <MapPin className="w-3 h-3 text-emerald-400 shrink-0" />
                   <span className="truncate">{getUserEffectiveLocation(liveUser).displayCity}</span>
                 </div>
               </div>
-              <div className="bg-app-card p-3 rounded-app border border-app space-y-0.5">
+              <div className="bg-app p-3 rounded-app border border-app space-y-0.5">
                 <div className="text-slate-500 text-[10px]">Zodiac</div>
                 <div className="font-bold text-slate-200">
                   {liveUser.zodiac ? (
@@ -512,10 +564,10 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             </div>
 
             <div className="space-y-2">
-              <h2 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+              <h3 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
                 <Languages className="w-3.5 h-3.5 text-indigo-400" />
                 <span>Languages</span>
-              </h2>
+              </h3>
               <div className="flex flex-wrap gap-2">
                 {(liveUser.spokenLanguages || []).map((lang) => (
                   <span
@@ -530,9 +582,9 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             </div>
 
             <div className="space-y-2">
-              <h2 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider">
+              <h3 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider">
                 Interests & Tags
-              </h2>
+              </h3>
               <div className="flex flex-wrap gap-2">
                 {[...(liveUser.interests || []), ...(liveUser.tags || [])].map((tag) => (
                   <span
@@ -564,9 +616,9 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
         {activeTab === 'media' && (
           <div className="space-y-5">
             <div className="space-y-2">
-              <h2 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider">
+              <h3 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider">
                 Photos ({allImages.length})
-              </h2>
+              </h3>
               {allImages.length === 0 ? (
                 <p className="text-xs text-slate-500 font-mono">No photos yet.</p>
               ) : (
@@ -575,10 +627,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                     <button
                       key={`photo-${idx}`}
                       type="button"
-                      onClick={() => {
-                        setActiveImageIndex(idx);
-                        window.scrollTo({ top: 0, behavior: 'smooth' });
-                      }}
+                      onClick={() => openPhoto(img, idx)}
                       className="aspect-square rounded-xl overflow-hidden border border-app bg-slate-900"
                     >
                       <img src={img} alt="" className="w-full h-full object-cover" />
@@ -589,15 +638,15 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             </div>
 
             <div className="space-y-2">
-              <h2 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider">
+              <h3 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider">
                 Video clips ({galleryVideos.length})
-              </h2>
+              </h3>
               {galleryVideos.length === 0 ? (
                 <p className="text-xs text-slate-500 font-mono">No video clips yet.</p>
               ) : (
                 <div className="grid grid-cols-2 gap-2">
                   {galleryVideos.map((vid, idx) => {
-                    const url = normalizeMediaUrl(vid.url);
+                    const url = resolveGalleryVideoSrc(vid);
                     return (
                       <button
                         key={vid.storageKey || vid.url || idx}
@@ -605,13 +654,17 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                         onClick={() => setActiveVideo(vid)}
                         className="relative aspect-video rounded-xl overflow-hidden border border-app bg-slate-950 group"
                       >
-                        <video
-                          src={url}
-                          className="w-full h-full object-cover opacity-90"
-                          muted
-                          playsInline
-                          preload="metadata"
-                        />
+                        {url ? (
+                          <video
+                            src={url}
+                            className="w-full h-full object-cover opacity-90"
+                            muted
+                            playsInline
+                            preload="metadata"
+                          />
+                        ) : (
+                          <div className="w-full h-full bg-slate-900" />
+                        )}
                         <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/40 transition-colors">
                           <span className="w-10 h-10 rounded-full bg-white/90 text-slate-900 flex items-center justify-center">
                             <Play className="w-5 h-5 fill-current ml-0.5" />
@@ -674,7 +727,7 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
                     </div>
 
                     <div
-                      className="relative h-64 bg-slate-950 rounded-xl overflow-hidden cursor-pointer group"
+                      className="relative h-56 bg-slate-950 rounded-xl overflow-hidden cursor-pointer group"
                       onClick={() => setLightboxMoment(m)}
                     >
                       {m.mediaType === 'video' ? (
@@ -730,50 +783,70 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
         )}
       </div>
 
-      {/* Sticky actions */}
+      {/* Modal footer actions */}
       {!isSelf && (
-        <div className="fixed bottom-20 md:bottom-6 left-0 right-0 z-40 px-3 sm:px-4 pointer-events-none">
-          <div className="max-w-2xl mx-auto grid grid-cols-2 gap-3 p-3 bg-app-card/95 backdrop-blur-md border border-app rounded-2xl shadow-app-lg pointer-events-auto">
+        <div className="p-4 bg-app border-t border-app grid grid-cols-2 gap-3 shrink-0">
+          <button
+            type="button"
+            onClick={() => onOpenChat(liveUser.id)}
+            className="h-11 w-full bg-app-card hover:bg-brand-soft text-app-heading rounded-app font-semibold text-sm flex items-center justify-center space-x-2 transition-colors border border-app"
+          >
+            <MessageSquare className="w-4 h-4 text-brand shrink-0" />
+            <span>Chat</span>
+          </button>
+
+          {liveUser.role === 'team_leader' || liveUser.role === 'agency_manager' ? (
+            <div className="h-11 w-full bg-amber-950/40 border border-amber-500/30 text-amber-300 rounded-xl font-mono font-bold text-[11px] flex items-center justify-center px-2 text-center">
+              Agency Team Leader
+            </div>
+          ) : currentUser.role === 'team_leader' ? (
+            <div className="h-11 w-full bg-slate-900 border border-slate-800 text-slate-400 rounded-xl font-mono text-[11px] flex items-center justify-center px-2 text-center">
+              Agency Mode
+            </div>
+          ) : liveUser.onlineStatus === 'busy' || liveUser.onlineStatus === 'in_call' ? (
             <button
               type="button"
-              onClick={() => onOpenChat(liveUser.id)}
-              className="h-11 w-full bg-app hover:bg-brand-soft text-app-heading rounded-app font-semibold text-sm flex items-center justify-center space-x-2 transition-colors border border-app"
+              onClick={() => onStartCall(liveUser.id)}
+              className="h-11 w-full bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 rounded-xl font-mono font-bold text-xs flex items-center justify-center space-x-2"
             >
-              <MessageSquare className="w-4 h-4 text-brand shrink-0" />
-              <span>Chat</span>
+              <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Busy — Call</span>
             </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onStartCall(liveUser.id)}
+              className={`h-11 w-full rounded-xl font-mono font-bold text-xs flex items-center justify-center space-x-2 transition-all ${
+                liveUser.onlineStatus === 'online'
+                  ? 'bg-flirt hover:brightness-110 text-white shadow-brand'
+                  : 'bg-slate-800/80 text-slate-400 border border-slate-700/80'
+              }`}
+            >
+              <Video className="w-4 h-4 fill-current shrink-0" />
+              <span>{liveUser.onlineStatus === 'online' ? 'Start HD Call' : 'Call (Offline)'}</span>
+            </button>
+          )}
+        </div>
+      )}
 
-            {liveUser.role === 'team_leader' || liveUser.role === 'agency_manager' ? (
-              <div className="h-11 w-full bg-amber-950/40 border border-amber-500/30 text-amber-300 rounded-xl font-mono font-bold text-[11px] flex items-center justify-center px-2 text-center">
-                Agency Team Leader
-              </div>
-            ) : currentUser.role === 'team_leader' ? (
-              <div className="h-11 w-full bg-slate-900 border border-slate-800 text-slate-400 rounded-xl font-mono text-[11px] flex items-center justify-center px-2 text-center">
-                Agency Mode
-              </div>
-            ) : liveUser.onlineStatus === 'busy' || liveUser.onlineStatus === 'in_call' ? (
-              <button
-                type="button"
-                onClick={() => onStartCall(liveUser.id)}
-                className="h-11 w-full bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 rounded-xl font-mono font-bold text-xs flex items-center justify-center space-x-2"
-              >
-                <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
-                <span>Busy — Call</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onStartCall(liveUser.id)}
-                className={`h-11 w-full rounded-xl font-mono font-bold text-xs flex items-center justify-center space-x-2 transition-all ${
-                  liveUser.onlineStatus === 'online'
-                    ? 'bg-flirt hover:brightness-110 text-white shadow-brand'
-                    : 'bg-slate-800/80 text-slate-400 border border-slate-700/80'
-                }`}
-              >
-                <Video className="w-4 h-4 fill-current shrink-0" />
-                <span>{liveUser.onlineStatus === 'online' ? 'Start HD Call' : 'Call (Offline)'}</span>
-              </button>
-            )}
+      {/* Photo lightbox */}
+      {activePhoto && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/90 backdrop-blur-lg">
+          <div className="relative max-w-3xl w-full bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
+            <button
+              type="button"
+              onClick={() => setActivePhoto(null)}
+              className="absolute top-4 right-4 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="bg-black flex items-center justify-center min-h-[300px] p-2">
+              <img
+                src={activePhoto}
+                alt="Full size"
+                className="max-h-[80vh] w-auto max-w-full object-contain"
+              />
+            </div>
           </div>
         </div>
       )}
@@ -785,12 +858,13 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             <button
               type="button"
               onClick={() => setActiveVideo(null)}
-              className="absolute top-4 right-4 z-20 px-3 py-1.5 rounded-full bg-slate-950/80 text-white border border-slate-700 text-xs font-semibold"
+              className="absolute top-4 right-4 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700"
             >
-              Close
+              <X className="w-5 h-5" />
             </button>
             <video
-              src={normalizeMediaUrl(activeVideo.url)}
+              key={resolveGalleryVideoSrc(activeVideo)}
+              src={resolveGalleryVideoSrc(activeVideo)}
               className="w-full max-h-[80vh] bg-black"
               controls
               autoPlay
@@ -807,9 +881,9 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
             <button
               type="button"
               onClick={() => setLightboxMoment(null)}
-              className="absolute top-4 right-4 z-20 px-3 py-1.5 rounded-full bg-slate-950/80 text-white border border-slate-700 text-xs font-semibold"
+              className="absolute top-4 right-4 z-20 p-2 rounded-full bg-slate-950/80 text-white border border-slate-700"
             >
-              Close
+              <X className="w-5 h-5" />
             </button>
             <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden min-h-[300px]">
               {lightboxMoment.mediaType === 'video' ? (
@@ -845,6 +919,6 @@ export const PublicProfilePage: React.FC<PublicProfilePageProps> = ({
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 };

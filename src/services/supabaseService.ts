@@ -2220,6 +2220,24 @@ export async function deleteHomeBannerFromSupabase(bannerId: string): Promise<bo
   }
 }
 
+export async function fetchAppNavItemsFromSupabase(): Promise<any[] | null> {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const { data, error } = await supabase
+      .from('app_nav_items')
+      .select('*')
+      .order('order_num', { ascending: true });
+    if (error) {
+      console.warn('Supabase fetchAppNavItems error:', error.message);
+      return null;
+    }
+    return data || [];
+  } catch (err) {
+    console.warn('Supabase fetchAppNavItems exception:', err);
+    return null;
+  }
+}
+
 export async function fetchHomeQuickLinksFromSupabase(): Promise<any[] | null> {
   if (!isSupabaseConfigured()) return null;
   try {

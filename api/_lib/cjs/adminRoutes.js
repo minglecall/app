@@ -739,6 +739,67 @@ async function handleAdmin(path, req, res) {
     }
   }
 
+  if (path === 'admin/cms/nav-items/batch' && (req.method === 'PUT' || req.method === 'POST')) {
+    const auth = await requireAdmin(req);
+    if (auth.ok === false) return send(res, auth.status, { success: false, error: auth.error });
+    const body = await readJsonBody(req);
+    const audienceRole = String((body && body.audienceRole) || '');
+    const bar = String((body && body.bar) || '');
+    const slot = body && body.slot ? String(body.slot) : null;
+    const items = body && Array.isArray(body.items) ? body.items : null;
+    if (!audienceRole || !bar || !items) {
+      return send(res, 400, { success: false, error: 'audienceRole, bar, and items[] are required' });
+    }
+    const rows = items.map((item) => ({
+      id: String(item.id),
+      audience_role: audienceRole,
+      bar,
+      slot: slot || item.slot || 'default',
+      label: String(item.label || ''),
+      icon: String(item.icon || 'Circle'),
+      action_type: String(item.actionType || 'tab'),
+      action_target: String(item.actionTarget || ''),
+      badge: item.badge || 'none',
+      meta: item.meta || null,
+      order_num: Number(item.order || 0),
+      active: item.active !== false,
+      parent_id: item.parentId || null,
+      updated_at: new Date().toISOString(),
+    }));
+    let existingQuery = auth.client.from('app_nav_items').select('id, parent_id').eq('audience_role', audienceRole).eq('bar', bar);
+    if (slot) existingQuery = existingQuery.eq('slot', slot);
+    const existing = await existingQuery;
+    if (existing.error) return send(res, 500, { success: false, error: existing.error.message });
+    const keep = new Set(rows.map((row) => row.id));
+    const removable = (existing.data || []).filter((row) => !keep.has(row.id));
+    const childIds = removable.filter((row) => row.parent_id).map((row) => row.id);
+    const rootIds = removable.filter((row) => !row.parent_id).map((row) => row.id);
+    if (childIds.length) {
+      const deletedChildren = await auth.client.from('app_nav_items').delete().in('id', childIds);
+      if (deletedChildren.error) return send(res, 500, { success: false, error: deletedChildren.error.message });
+    }
+    if (rootIds.length) {
+      const deletedRoots = await auth.client.from('app_nav_items').delete().in('id', rootIds);
+      if (deletedRoots.error) return send(res, 500, { success: false, error: deletedRoots.error.message });
+    }
+    if (!rows.length) return send(res, 200, { success: true, data: [] });
+    const parentRows = rows.filter((row) => !row.parent_id);
+    const childRows = rows.filter((row) => row.parent_id);
+    if (parentRows.length) {
+      const upsertedParents = await auth.client.from('app_nav_items').upsert(parentRows, { onConflict: 'id' });
+      if (upsertedParents.error) return send(res, 500, { success: false, error: upsertedParents.error.message });
+    }
+    if (childRows.length) {
+      const upsertedChildren = await auth.client.from('app_nav_items').upsert(childRows, { onConflict: 'id' });
+      if (upsertedChildren.error) return send(res, 500, { success: false, error: upsertedChildren.error.message });
+    }
+    let savedQuery = auth.client.from('app_nav_items').select('*').eq('audience_role', audienceRole).eq('bar', bar);
+    if (slot) savedQuery = savedQuery.eq('slot', slot);
+    const saved = await savedQuery.order('order_num', { ascending: true });
+    if (saved.error) return send(res, 500, { success: false, error: saved.error.message });
+    return send(res, 200, { success: true, data: saved.data || [] });
+  }
+
   if (
     (path === 'admin/cms/banners' ||
       path === 'admin/cms/policies' ||

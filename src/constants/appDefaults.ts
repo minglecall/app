@@ -1,4 +1,6 @@
 import { SystemSettings, CoinPackage, VirtualGift, HomeBanner, PolicyDocument, HomeQuickLink, UserProfile, CreatorReview } from '../types';
+export { INITIAL_APP_NAV_ITEMS } from '../../shared/appNav';
+export type { AppNavItem, NavAudienceRole, NavBarId, NavSlot } from '../../shared/appNav';
 
 export const INITIAL_CREATOR_REVIEWS: CreatorReview[] = [];
 
