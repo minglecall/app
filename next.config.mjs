@@ -7,20 +7,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const nextConfig = {
   reactStrictMode: true,
   typescript: {
-    // Large legacy SPA — typecheck via `npm run lint`; do not block Next deploy on historical TS debt
     ignoreBuildErrors: true,
   },
   eslint: {
     ignoreDuringBuilds: true,
   },
-  // Silence workspace root warning when multiple lockfiles exist
-  outputFileTracingRoot: __dirname,
-  typescript: {
-    // Large legacy SPA — typecheck via `npm run lint`; do not block Next deploy on historical TS debt
-    ignoreBuildErrors: true,
-  },
-  eslint: {
-    ignoreDuringBuilds: true,
+  // Expose Vite-named Supabase env to the Next client bundle (login requires these)
+  env: {
+    NEXT_PUBLIC_SUPABASE_URL:
+      process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || '',
+    NEXT_PUBLIC_SUPABASE_ANON_KEY:
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '',
+    VITE_SUPABASE_URL: process.env.VITE_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+    VITE_SUPABASE_ANON_KEY:
+      process.env.VITE_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
   },
   images: {
     remotePatterns: [
@@ -34,14 +34,8 @@ const nextConfig = {
       ...config.resolve.alias,
       '@': __dirname,
     };
-    // Ignore Vite-only virtual modules when bundling the SPA under Next
-    config.resolve.fallback = {
-      ...config.resolve.fallback,
-    };
-    config.plugins = config.plugins || [];
     return config;
   },
-  // Existing CJS api/ folder remains for dual-run; Next app/api takes precedence on Vercel Next.
   serverExternalPackages: ['@upstash/redis', 'livekit-server-sdk'],
 };
 

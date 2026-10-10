@@ -841,7 +841,10 @@ export async function signInWithEmailPassword(
       console.warn('Supabase signIn exception:', err);
       return {
         success: false,
-        error: 'Unable to connect to authentication server.',
+        error:
+          err?.message && String(err.message).length < 160
+            ? `Unable to connect to authentication server (${err.message}).`
+            : 'Unable to connect to authentication server. Check Supabase URL/anon key env vars.',
       };
     }
   }
@@ -853,6 +856,17 @@ export async function signInWithEmailPassword(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: cleanEmail, password }),
     });
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      return {
+        success: false,
+        error:
+          res.status === 403
+            ? 'Login blocked by Vercel security checkpoint. Disable Attack Challenge Mode for /api or allowlist the domain, then retry.'
+            : `Unable to connect to authentication server (HTTP ${res.status}, non-JSON response).`,
+      };
+    }
 
     const data = await res.json();
     if (res.ok && data.success && data.user) {
@@ -884,7 +898,10 @@ export async function signInWithEmailPassword(
   } catch (err: any) {
     return {
       success: false,
-      error: 'Unable to connect to authentication server.',
+      error:
+        err?.message && String(err.message).length < 160
+          ? `Unable to connect to authentication server (${err.message}).`
+          : 'Unable to connect to authentication server.',
     };
   }
 }
